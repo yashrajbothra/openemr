@@ -57,11 +57,11 @@ class EncounterService extends BaseService
         $processingResult = new ProcessingResult();
 
         $isValidPatient = $this->encounterValidator->validateId('uuid', self::PATIENT_TABLE, $puuid, true);
-        if ($isValidPatient != true) {
+        if ($isValidPatient !== true) {
             return $isValidPatient;
         }
         $isValidEncounter = $this->encounterValidator->validateId('uuid', self::ENCOUNTER_TABLE, $euuid, true);
-        if ($isValidEncounter != true) {
+        if ($isValidEncounter !== true) {
             return $isValidEncounter;
         }
 
@@ -123,7 +123,7 @@ class EncounterService extends BaseService
         $processingResult = new ProcessingResult();
 
         $isValidPatient = $this->encounterValidator->validateId('uuid', self::PATIENT_TABLE, $puuid, true);
-        if ($isValidPatient != true) {
+        if ($isValidPatient !== true) {
             return $isValidPatient;
         }
 
@@ -185,7 +185,7 @@ class EncounterService extends BaseService
     {
         $processingResult = new ProcessingResult();
         $isValidEncounter = $this->encounterValidator->validateId('uuid', self::ENCOUNTER_TABLE, $euuid, true);
-        if ($isValidEncounter != true) {
+        if ($isValidEncounter !== true) {
             return $isValidEncounter;
         }
         $euuidBytes = UuidRegistry::uuidToBytes($euuid);
@@ -262,7 +262,7 @@ class EncounterService extends BaseService
                 $search['uuid'],
                 true
             );
-            if ($isValidEncounter != true) {
+            if ($isValidEncounter !== true) {
                 return $isValidEncounter;
             }
             $search['uuid'] = UuidRegistry::uuidToBytes($search['uuid']);
@@ -276,7 +276,7 @@ class EncounterService extends BaseService
                 $search['pid'],
                 true
             );
-            if ($isValidEncounter != true) {
+            if ($isValidEncounter !== true) {
                 return $isValidEncounter;
             }
             $puuidBytes = UuidRegistry::uuidToBytes($search['pid']);
