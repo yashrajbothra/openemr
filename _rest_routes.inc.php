@@ -416,10 +416,20 @@ RestConfig::$FHIR_ROUTE_MAP = array(
         return (new FhirPractitionerRestController())->patch($id, $data);
     },
     "GET /fhir/Organization" => function () {
-        return (new FhirOrganizationRestController(null))->getAll($_GET);
+        return (new FhirOrganizationRestController())->getAll($_GET);
     },
     "GET /fhir/Organization/:id" => function ($id) {
-        return (new FhirOrganizationRestController(null))->getOne($id);
+        return (new FhirOrganizationRestController())->getOne($id);
+    },
+    "POST /fhir/Organization" => function () {
+        RestConfig::authorization_check("admin", "users");
+        $data = (array) (json_decode(file_get_contents("php://input"), true));
+        return (new FhirOrganizationRestController())->post($data);
+    },
+    "PATCH /fhir/Organization/:id" => function ($id) {
+        RestConfig::authorization_check("admin", "users");
+        $data = (array) (json_decode(file_get_contents("php://input"), true));
+        return (new FhirOrganizationRestController())->patch($id, $data);
     },
     "GET /fhir/AllergyIntolerance" => function () {
         RestConfig::authorization_check("patients", "med");
