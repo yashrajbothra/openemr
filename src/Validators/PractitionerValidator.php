@@ -33,7 +33,7 @@ class PractitionerValidator extends BaseValidator
             function (Validator $context) {
                 $context->required("fname", "First Name")->lengthBetween(2, 255);
                 $context->required("lname", 'Last Name')->lengthBetween(2, 255);
-                $context->required("npi", "NPI")->numeric()->length(10);
+                $context->required("npi", "NPI")->numeric()->lengthBetween(10, 15);
                 $context->optional("facility_id", "Facility Id")->numeric()->callback(
                     // check if facility exist
                     function ($value) {

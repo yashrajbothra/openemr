@@ -19,44 +19,65 @@ class FacilityRestController
 {
     private $facilityService;
 
+    /**
+     * White list of facility search fields
+     */
+    private const WHITELISTED_FIELDS = array(
+        "name",
+        "phone",
+        "fax",
+        "street",
+        "city",
+        "state",
+        "postal_code",
+        "country_code",
+        "federal_ein",
+        "website",
+        "email",
+        "domain_identifier",
+        "facility_npi",
+        "facility_taxonomy",
+        "facility_code",
+        "billing_location",
+        "accepts_assignment",
+        "oid",
+        "service_location"
+    );
+
     public function __construct()
     {
         $this->facilityService = new FacilityService();
     }
 
-    public function getOne($id)
+    public function getOne($uuid)
     {
-        $serviceResult = $this->facilityService->getById($id);
-        return RestControllerHelper::responseHandler($serviceResult, null, 200);
+        $processingResult = $this->facilityService->getOne($uuid);
+
+        if (!$processingResult->hasErrors() && count($processingResult->getData()) == 0) {
+            return RestControllerHelper::handleProcessingResult($processingResult, 404);
+        }
+
+        return RestControllerHelper::handleProcessingResult($processingResult, 200);
     }
 
-    public function getAll()
+    public function getAll($search = array())
     {
-        $serviceResult = $this->facilityService->getAll();
-        return RestControllerHelper::responseHandler($serviceResult, null, 200);
+        $validSearchFields = $this->facilityService->filterData($search, self::WHITELISTED_FIELDS);
+        $processingResult = $this->facilityService->getAll($validSearchFields);
+        return RestControllerHelper::handleProcessingResult($processingResult, 200, true);
     }
 
     public function post($data)
     {
-        $validationResult = $this->facilityService->validate($data);
-        $validationHandlerResult = RestControllerHelper::validationHandler($validationResult);
-        if (is_array($validationHandlerResult)) {
-            return $validationHandlerResult;
-        }
-
-        $serviceResult = $this->facilityService->insert($data);
-        return RestControllerHelper::responseHandler($serviceResult, array('fid' => $serviceResult), 201);
+        $filteredData = $this->facilityService->filterData($data, self::WHITELISTED_FIELDS);
+        $processingResult = $this->facilityService->insert($filteredData);
+        return RestControllerHelper::handleProcessingResult($processingResult, 201);
     }
 
-    public function put($data)
+    public function patch($uuid, $data)
     {
-        $validationResult = $this->facilityService->validate($data);
-        $validationHandlerResult = RestControllerHelper::validationHandler($validationResult);
-        if (is_array($validationHandlerResult)) {
-            return $validationHandlerResult;
-        }
-
-        $serviceResult = $this->facilityService->update($data);
-        return RestControllerHelper::responseHandler($serviceResult, array('fid' => $data['fid']), 200);
+        $filteredData = $this->facilityService->filterData($data, self::WHITELISTED_FIELDS);
+        $processingResult = $this->facilityService->update($uuid, $filteredData);
+        return RestControllerHelper::handleProcessingResult($processingResult, 200);
     }
 }
