@@ -165,9 +165,6 @@ class FhirOrganizationService extends FhirServiceBase
             if (isset($fhirResource['address'][0]['state'][0])) {
                 $data['state'] = $fhirResource['address'][0]['state'];
             }
-            if (isset($fhirResource['address'][0]['country'][0])) {
-                $data['country_code'] = $fhirResource['address'][0]['country'];
-            }
         }
 
         if (isset($fhirResource['telecom'])) {

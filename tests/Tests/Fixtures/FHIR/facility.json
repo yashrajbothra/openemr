@@ -30,11 +30,13 @@
         "name": "Health Level Seven International",
         "telecom": [{
                 "system": "phone",
-                "value": "(+1) 734-677-7777"
+                "value": "(+1) 734-677-7777",
+                "use": "work"
             },
             {
                 "system": "email",
-                "value": "hq@HL7.org"
+                "value": "hq@HL7.org",
+                "use": "work"
             }
         ],
         "identifier": [{
@@ -47,8 +49,7 @@
             ],
             "city": "Ann Arbor",
             "state": "MI",
-            "postalCode": "48104",
-            "country": "USA"
+            "postalCode": "48104"
         }]
     },
     {
