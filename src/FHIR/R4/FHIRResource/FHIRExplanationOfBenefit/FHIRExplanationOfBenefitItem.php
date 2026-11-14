@@ -908,7 +908,7 @@ class FHIRExplanationOfBenefitItem extends FHIRBackboneElement implements \JsonS
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -916,7 +916,7 @@ class FHIRExplanationOfBenefitItem extends FHIRBackboneElement implements \JsonS
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->sequence)) {
@@ -1037,15 +1037,13 @@ class FHIRExplanationOfBenefitItem extends FHIRBackboneElement implements \JsonS
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ExplanationOfBenefitItem xmlns="http://hl7.org/fhir"></ExplanationOfBenefitItem>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ExplanationOfBenefitItem xmlns="http://hl7.org/fhir"></ExplanationOfBenefitItem>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->sequence)) {
             $this->sequence->xmlSerialize(true, $sxe->addChild('sequence'));

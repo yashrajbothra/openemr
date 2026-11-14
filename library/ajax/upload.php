@@ -10,38 +10,79 @@
  * @author    Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2017 Sherwin Gaddis <sherwingaddis@gmail.com>
  * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
- * @copyright Copyright (c) 2020 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2020-2023 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(dirname(__FILE__) . "/../../interface/globals.php");
-require_once(dirname(__FILE__) . "/../documents.php");
-
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Services\MessageService;
 
-if (!CsrfUtils::verifyCsrfToken($_REQUEST["csrf_token_form"])) {
+// Auth if core or portal.
+// Need access to classes, so run autoloader now instead of in globals.php.
+require_once(__DIR__ . "/../../vendor/autoload.php");
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+
+$isPortal = false;
+if (!empty($session->get('pid')) && !empty($session->get('patient_portal_onsite_two'))) {
+    $pid = $session->get('pid');
+    $ignoreAuth_onsite_portal = true;
+    $isPortal = true;
+} else {
+    SessionWrapperFactory::getInstance()->destroyPortalSession();
+    $ignoreAuth = false;
+    $session = SessionWrapperFactory::getInstance()->getCoreSession();
+}
+
+require_once(__DIR__ . "/../../interface/globals.php");
+require_once(__DIR__ . "/../documents.php");
+
+
+if (!CsrfUtils::verifyCsrfToken($_REQUEST["csrf_token_form"], session: $session)) {
     CsrfUtils::csrfNotVerified();
 }
 
 // check if this is for dicom image maintenance.
 $action = $_POST['action'] ?? null;
-$doc_id = (int)$_POST['doc_id'] ?? null;
+$doc_id = (int)($_POST['doc_id'] ?? null);
 $json_data = $_POST['json_data'] ?? null;
 
-if ($action == 'save') {
-    //$data = json_decode($json_data, true);
-    //$json_data = base64_encode($data);
-    $pass_it = dicom_history_action($action, $doc_id, $json_data);
-    if ($pass_it === 'false') {
-        // query success. send back a translated message for user.
-        echo xlj("Server says thanks. Images state saved.");
-    } else {
-        echo xlj("Error! Images state save failed.");
+if ($action === 'save' || $action === 'fetch') {
+    $requiredAcl = $action === 'save'
+        ? AclMain::aclCheckCore('patients', 'docs', '', ['write', 'addonly'])
+        : AclMain::aclCheckCore('patients', 'docs');
+    if (!$requiredAcl) {
+        AccessDeniedHelper::deny("ACL check failed for patients/docs: DICOM image state");
+    }
+    if ($doc_id <= 0) {
+        AccessDeniedHelper::deny("Invalid document id for DICOM image state");
+    }
+    $doc = new Document($doc_id);
+    $docForeignId = $doc->get_foreign_id();
+    if (
+        !is_numeric($doc->get_id())
+        || !is_numeric($docForeignId)
+        || (int) $docForeignId <= 0
+        || !$doc->can_access()
+    ) {
+        AccessDeniedHelper::deny("Unauthorized attempt to access document $doc_id via DICOM image state");
     }
 
-    exit();
-}
-if ($action == 'fetch') {
+    if ($action === 'save') {
+        $pass_it = dicom_history_action($action, $doc_id, $json_data);
+        if ($pass_it === 'false') {
+            // query success. send back a translated message for user.
+            echo xlj("Server says thanks. Images state saved.");
+        } else {
+            echo xlj("Error! Images state save failed.");
+        }
+
+        exit();
+    }
+
     $json_data = dicom_history_action($action, $doc_id);
     echo $json_data;
 
@@ -51,28 +92,93 @@ if ($action == 'fetch') {
 $patient_id = filter_input(INPUT_GET, 'patient_id');
 $category_id = filter_input(INPUT_GET, 'parent_id');
 
+if ($isPortal ?? false) {
+    $owner = OEGlobalsBag::getInstance()->get('userauthorized');
+    $files = getMultiple();
+    if (count($files["file"] ?? []) > 0) {
+        $messageService = new MessageService();
+        $data = [];
+        $note['groupname'] = 'Default';
+        // will send to all auth'ed portal users
+        $note['to'] = 'portal-user';
+        $note['from'] = 'portal-user';
+        $note['message_status'] = 'New';
+        $note['title'] = 'New Document';
+        $category = sqlQuery("SELECT id FROM categories WHERE name LIKE ?", [$category_id])['id'] ?: 3;
+        foreach ($files["file"] as $file) {
+            $name = $file['name'];
+            $type = $file['type'];
+            $tmp_name = $file['tmp_name'];
+            $size = $file['size'];
+            $data = addNewDocument(
+                $name,
+                $type,
+                $tmp_name,
+                '',
+                $size,
+                $owner,
+                $pid,
+                $category,
+                '',
+                '',
+                true
+            );
+            $rtn[] = $data;
+        }
+        // give user a break and send just one message for multi documents
+        $names = '';
+        foreach ($rtn as $data) {
+            $names .= '"' . $data['name'] . '", ';
+        }
+        if (!empty($names)) {
+            $note['body'] = xl('A Portal Patient has uploaded new documents titled') .
+                ' ' . $names .
+                xl('to the Documents Onsite Portal Patient category.') . "\n" .
+                xl("Please review and take any necessary actions");
+            $messageService->insert($pid, $note);
+        }
+        echo text(json_encode($rtn));
+    }
+    exit;
+}
 if (!empty($_FILES)) {
     $name = $_FILES['file']['name'];
     $type = $_FILES['file']['type'];
     $tmp_name = $_FILES['file']['tmp_name'];
     $size = $_FILES['file']['size'];
-    $owner = $GLOBALS['userauthorized'];
+    $owner = OEGlobalsBag::getInstance()->get('userauthorized');
 
-    addNewDocument($name, $type, $tmp_name, $error, $size, $owner, $patient_id, $category_id);
-    exit();
+    addNewDocument($name, $type, $tmp_name, '', $size, $owner, $patient_id, $category_id);
+    exit;
 }
 
-function dicom_history_action($action, $doc_id, $json_data = '')
+function dicom_history_action($action, $doc_id, $json_data = ''): bool|string
 {
     if ($action == 'save') {
-        $json_data = base64_encode($json_data);
-        return json_encode(sqlQuery("UPDATE documents SET document_data = ? WHERE id = ?", array($json_data, $doc_id)));
+        $json_data = base64_encode((string) $json_data);
+        return json_encode(sqlQuery("UPDATE documents SET document_data = ? WHERE id = ?", [$json_data, $doc_id]));
     }
 
     if ($action == 'fetch') {
-        $qrtn = sqlQuery("Select document_data FROM documents WHERE id = ?", array($doc_id));
-        return base64_decode($qrtn['document_data']);
+        $qrtn = sqlQuery("Select document_data FROM documents WHERE id = ?", [$doc_id]);
+        return base64_decode((string) $qrtn['document_data']);
     }
 
     return xlj("Unknown");
+}
+
+/**
+ * @return non-empty-array<non-empty-array<mixed>>[]
+ */
+function getMultiple(): array
+{
+    $_FILE = [];
+    foreach ($_FILES as $name => $file) {
+        foreach ($file as $property => $keys) {
+            foreach ($keys as $key => $value) {
+                $_FILE[$name][$key][$property] = $value;
+            }
+        }
+    }
+    return $_FILE;
 }

@@ -4,7 +4,7 @@
  * This class represents the task that compiles claims into an X12 batch file
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Ken Chapple <ken@mi-squared.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Daniel Pflieger <daniel@growlingflea.com>
@@ -22,37 +22,34 @@
 
 namespace OpenEMR\Billing\BillingProcessor\Tasks;
 
+use OpenEMR\Billing\BillingProcessor\BillingClaim;
+use OpenEMR\Billing\BillingProcessor\BillingClaimBatch;
 use OpenEMR\Billing\BillingProcessor\GeneratorCanValidateInterface;
 use OpenEMR\Billing\BillingProcessor\GeneratorInterface;
 use OpenEMR\Billing\BillingProcessor\LoggerInterface;
-use OpenEMR\Billing\BillingProcessor\BillingClaim;
-use OpenEMR\Billing\BillingProcessor\BillingClaimBatch;
 use OpenEMR\Billing\BillingProcessor\Traits\WritesToBillingLog;
 use OpenEMR\Billing\BillingUtilities;
 use OpenEMR\Billing\X125010837P;
+use OpenEMR\Core\OEGlobalsBag;
 
 class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, GeneratorCanValidateInterface, LoggerInterface
 {
     use WritesToBillingLog;
 
     /**
-     * If "Allow Encounter Claims" is enabled, this allows the claims to use
-     * the alternate payor ID on the claim and sets the claims to report,
-     * not chargeable. ie: RP = reporting, CH = chargeable
-     *
-     * @var bool|mixed
-     */
-    protected $encounter_claim = false;
-
-    /**
      * @var BillingClaimBatch
      */
     protected $batch;
 
-    public function __construct($action, $encounter_claim = false)
-    {
+    /**
+     * @param mixed $action
+     * @param bool $encounter_claim If "Allow Encounter Claims" is enabled, this allows the claims to use the alternate payor ID on the claim and sets the claims to report, not chargeable. ie: RP = reporting, CH = chargeable
+     */
+    public function __construct(
+        $action,
+        protected $encounter_claim = false
+    ) {
         parent::__construct($action);
-        $this->encounter_claim = $encounter_claim;
     }
 
     /**
@@ -66,8 +63,21 @@ class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, Gene
     protected function updateBatchFile(BillingClaim $claim)
     {
         // Generate the file
-        $log = '';
-        $segs = explode("~\n", X125010837P::genX12837P($claim->getPid(), $claim->getEncounter(), $log, $this->encounter_claim));
+        $log = 'X12 ' . $claim->action . ' ';
+        $hlCount = 1;
+        $segs = explode(
+            "~\n",
+            (string) X125010837P::genX12837P(
+                $claim->getPid(),
+                $claim->getEncounter(),
+                $claim->getPartner(),
+                $log,
+                $this->encounter_claim,
+                false,
+                $hlCount,
+                payerId: $claim->getSelectedPayerId()
+            )
+        );
         $this->appendToLog($log);
         $this->batch->append_claim($segs);
 
@@ -84,7 +94,7 @@ class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, Gene
      */
     public function setup(array $context)
     {
-        $this->batch = new BillingClaimBatch('.txt');
+        $this->batch = new BillingClaimBatch('.txt', $context);
     }
 
     /**
@@ -96,6 +106,7 @@ class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, Gene
     public function validateOnly(BillingClaim $claim)
     {
         $this->updateBatchFile($claim);
+        $this->printToScreen(xl("Successfully validated claim") . ": " . $claim->getId());
     }
 
     /**
@@ -124,6 +135,7 @@ class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, Gene
 
         // Update the batch file content with this claim's data
         $this->updateBatchFile($claim);
+        $this->printToScreen(xl("Successfully marked claim") . ": " . $claim->getId() .  " " . xl("as billed"));
     }
 
     /**
@@ -175,7 +187,6 @@ class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, Gene
         $format_bat = str_replace('~', PHP_EOL, $this->batch->getBatContent());
         $wrap = "<!DOCTYPE html><html><head></head><body><div style='overflow: hidden;'><pre>" . text($format_bat) . "</pre></div></body></html>";
         echo $wrap;
-        exit();
     }
 
     /**
@@ -197,11 +208,13 @@ class GeneratorX12 extends AbstractGenerator implements GeneratorInterface, Gene
         }
 
         // Tell the billing_process.php script to initiate a download of this file
-        // that's in the edi directory
-        $this->logger->setLogCompleteCallback(function () {
-            // This uses our parent's method to print the JS that automatically initiates
-            // the download of this file, after the screen bill_log messages have printed
-            $this->printDownloadClaimFileJS($this->batch->getBatFilename());
-        });
+        // that's in the edi directory unless it's going to be sent via sftp
+        if (!OEGlobalsBag::getInstance()->getBoolean('auto_sftp_claims_to_x12_partner')) {
+            $this->logger->setLogCompleteCallback(function (): void {
+                // This uses our parent's method to print the JS that automatically initiates
+                // the download of this file, after the screen bill_log messages have printed
+                $this->printDownloadClaimFileJS($this->batch->getBatFilename());
+            });
+        }
     }
 }

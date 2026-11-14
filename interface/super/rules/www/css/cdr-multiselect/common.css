@@ -4,15 +4,12 @@
 	http://developer.yahoo.net/yui/license.txt
 	version: 2.2.0
 	*/
-body {
-  font: 13px "Helvetica", arial, clean, sans-serif;
-  *font: x-small;
-  *font-size: small;
-}
 
 table {
-  font: 100%;
-  font-size: inherit;
+  font-size: 100%;
+  *font-size: inherit;
+  border-collapse: collapse;
+  border-spacing: 0;
 }
 
 select,
@@ -58,11 +55,6 @@ td {
   padding: 0;
 }
 
-table {
-  border-collapse: collapse;
-  border-spacing: 0;
-}
-
 fieldset,
 img {
   border: 0;
@@ -79,7 +71,7 @@ th,
 var {
   font-style: normal;
   font-weight: normal;
-} /*ol,ul {list-style:none;}*/
+} /* ol,ul {list-style:none;} */
 caption,
 th {
   text-align: left;
@@ -92,12 +84,12 @@ h4,
 h5,
 h6 {
   font-size: 100%;
-  font-weight: normal;
+  font-weight: bold;
 }
 
 q::before,
 q::after {
-  content: "";
+  content: '';
 }
 
 abbr,
@@ -108,7 +100,7 @@ acronym {
 /* end of yahoo reset and fonts */
 
 body {
-  background: #232f2e;
+  background: #fff;
   color: #333;
   line-height: 1.3;
 }
@@ -131,15 +123,6 @@ strong {
 
 em {
   font-style: italic;
-}
-
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  font-weight: bold;
 }
 
 h1 {

@@ -497,7 +497,7 @@ dwvOemr.html.createHtmlSelect = function (name, list, i18nPrefix, i18nSafe) {
     if ( list instanceof Array )
     {
         for ( var i in list ) {
-            if ( list.hasOwnProperty(i) ) {
+            if (Object.prototype.hasOwnProperty.call(list, i)) {
                 option = document.createElement("option");
                 option.value = list[i];
                 option.appendChild(document.createTextNode(getText(list[i])));
@@ -561,7 +561,7 @@ dwvOemr.html.appendElement = function (parent, element)
 
 /**
  * Create an element.
- * @param {String} type The type of the elemnt.
+ * @param {String} type The type of the element.
  * @param {String} className The className of the element.
  */
 dwvOemr.html.createHiddenElement = function (type, className)

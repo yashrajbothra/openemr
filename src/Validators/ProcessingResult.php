@@ -2,19 +2,23 @@
 
 namespace OpenEMR\Validators;
 
+use OpenEMR\Common\Database\QueryPagination;
+
 /**
  * OpenEMR Service Processing Result
  *
  * Data contained within a processing result includes:
  * - isValid: indicates if the data provided to the service was valid
  * - validatiomMessages: validation errors, if any, which occurred during processing
- * - internalErrors: system related errors, if any, which occured during processing
+ * - internalErrors: system related errors, if any, which occurred during processing
  * - data: the return value of the operation/process (array)
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Dixon Whitmire <dixonwh@gmail.com>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
  * @copyright Copyright (c) 2020 Dixon Whitmire <dixonwh@gmail.com>
+ * @copyright Copyright (c) 2024 Care Management Solutions, Inc. <stephen.waite@cmsvt.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
@@ -23,6 +27,7 @@ class ProcessingResult
     private $validationMessages;
     private $internalErrors;
     private $data;
+    private QueryPagination $pagination;
 
     /**
      * Initializes internal data structures to an internal array.
@@ -32,12 +37,29 @@ class ProcessingResult
         $this->validationMessages = [];
         $this->internalErrors = [];
         $this->data = [];
+        $this->pagination = new QueryPagination();
     }
 
     /**
-     * @return true if the instance does not contain validation messages/errors
+     * @param QueryPagination $pagination
      */
-    public function isValid()
+    public function setPagination(QueryPagination $pagination): void
+    {
+        $this->pagination = $pagination;
+    }
+
+    /**
+     * @return QueryPagination
+     */
+    public function getPagination(): QueryPagination
+    {
+        return $this->pagination;
+    }
+
+    /**
+     * @return bool if the instance does not contain validation messages/errors
+     */
+    public function isValid(): bool
     {
         return count($this->validationMessages) == 0;
     }
@@ -71,38 +93,124 @@ class ProcessingResult
         array_push($this->internalErrors, $internalError);
     }
 
+    /**
+     * Records one validation message against a field, keeping any already
+     * recorded for it. setValidationMessages() replaces the whole set, so it
+     * cannot be used to add a single message without knowing the others.
+     *
+     * Messages are stored as [field => [message, ...]], which keeps the
+     * [field => [key => message]] shape the validators produce.
+     */
+    public function addValidationError(string $field, string $message): void
+    {
+        // The property is untyped and setValidationMessages() accepts anything,
+        // so narrow to an array rather than assume one.
+        $messages = is_array($this->validationMessages) ? $this->validationMessages : [];
+        if (!isset($messages[$field]) || !is_array($messages[$field])) {
+            $messages[$field] = [];
+        }
+        $messages[$field][] = $message;
+        $this->validationMessages = $messages;
+    }
+
+    public function hasData(): bool
+    {
+        return !empty($this->data);
+    }
+
     public function getData()
     {
         return $this->data;
     }
 
+    public function getFirstDataResult()
+    {
+        if ($this->hasData()) {
+            return $this->data[0];
+        }
+        return null;
+    }
+
     public function setData($data)
     {
+        // we trim the data to be within the confines of the pagination limit and set our has more data flag if we have it
         $this->data = $data;
+        $limit = $this->getPagination()->getLimit();
+        $isEmpty = empty($this->data);
+        if ($limit > 0 && !$isEmpty) {
+            $count = count($this->data);
+            if ($count > $limit) {
+                $this->getPagination()->setHasMoreData(true);
+                $this->data = array_slice($this->data, 0, $limit);
+            }
+        }
+        if ($isEmpty) {
+            $this->getPagination()->setTotalCount(0);
+        }
     }
 
     /**
      * Appends a new data item to the current instance.
-     * @param $newData The new data item.
+     * @param mixed $newData The new data item.
      */
-    public function addData($newData)
+    public function addData(mixed $newData)
     {
-        array_push($this->data, $newData);
+        $count = count($this->data);
+        $limit = max(0, $this->getPagination()->getLimit());
+        if ($limit === 0 || $count < $this->getPagination()->getLimit()) {
+            array_push($this->data, $newData);
+        } else {
+            // we exceeded our limit so we are going to just say we have more data and skip the element
+            // any time a query actually runs we always grab the limit + 1 data element so we can determine if we have more data
+            // this facilitates our pagination logic in the service layer
+            $this->getPagination()->setHasMoreData(true);
+        }
     }
 
     /**
-     * @return true if the instance has 1 or more internal errors.
+     * Removes all the data in the processing result
      */
-    public function hasInternalErrors()
+    public function clearData()
+    {
+        $this->setData([]);
+    }
+
+    /**
+     * Given another processing result, combine all of its properties into this processing result
+     * @param ProcessingResult $other  The result to combine into the current object.
+     */
+    public function addProcessingResult(ProcessingResult $other)
+    {
+        $this->internalErrors = array_merge($this->internalErrors, $other->internalErrors);
+        $this->validationMessages = array_merge($this->validationMessages, $other->validationMessages);
+        if (!empty($other->getPagination())) {
+            $this->pagination->copy();
+        }
+        // make sure to handle our pagination properly by using the setData method
+        $this->setData(array_merge($this->data, $other->data));
+    }
+
+    /**
+     * @return bool true if the instance has 1 or more internal errors.
+     */
+    public function hasInternalErrors(): bool
     {
         return count($this->internalErrors) > 0;
     }
 
     /**
-     * @return true if the instance contains either validation or internal errors.
+     * @return bool True if the instance contains either validation or internal errors.
      */
-    public function hasErrors()
+    public function hasErrors(): bool
     {
         return !$this->isValid() || $this->hasInternalErrors();
+    }
+
+    public static function extractDataArray(ProcessingResult $result): ?array
+    {
+        if ($result->hasData()) {
+            return $result->getData();
+        }
+        return null;
     }
 }

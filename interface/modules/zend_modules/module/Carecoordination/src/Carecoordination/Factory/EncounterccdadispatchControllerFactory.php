@@ -3,10 +3,9 @@
 namespace Carecoordination\Factory;
 
 use Carecoordination\Controller\EncounterccdadispatchController;
-use Carecoordination\Model\EncountermanagerTable;
+use Carecoordination\Model\EncounterccdadispatchTable;
 use Interop\Container\ContainerInterface;
 use Laminas\ServiceManager\Factory\FactoryInterface;
-use Carecoordination\Model\EncounterccdadispatchTable;
 
 /**
  * Creates instances of EncounterccdadispatchController.  This is necessary because the controller is used both as a service
@@ -14,8 +13,7 @@ use Carecoordination\Model\EncounterccdadispatchTable;
  */
 class EncounterccdadispatchControllerFactory implements FactoryInterface
 {
-
-    public function __invoke(ContainerInterface $container, $requestedName, array $options = null)
+    public function __invoke(ContainerInterface $container, $requestedName, ?array $options = null)
     {
         return new EncounterccdadispatchController($container->get(EncounterccdadispatchTable::class));
     }

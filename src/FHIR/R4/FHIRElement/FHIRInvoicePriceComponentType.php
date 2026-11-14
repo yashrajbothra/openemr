@@ -124,7 +124,7 @@ class FHIRInvoicePriceComponentType extends FHIRElement implements \JsonSerializ
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return (string)$this->getValue();
     }
@@ -132,21 +132,19 @@ class FHIRInvoicePriceComponentType extends FHIRElement implements \JsonSerializ
     /**
      * @return mixed
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         return $this->value;
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<InvoicePriceComponentType xmlns="http://hl7.org/fhir"></InvoicePriceComponentType>');
-        }
+        $sxe ??= new \SimpleXMLElement('<InvoicePriceComponentType xmlns="http://hl7.org/fhir"></InvoicePriceComponentType>');
         $sxe->addAttribute('value', $this->value);
         if ($returnSXE) {
             return $sxe;

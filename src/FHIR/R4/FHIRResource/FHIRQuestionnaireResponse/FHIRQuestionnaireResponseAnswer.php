@@ -444,7 +444,7 @@ class FHIRQuestionnaireResponseAnswer extends FHIRBackboneElement implements \Js
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -452,7 +452,7 @@ class FHIRQuestionnaireResponseAnswer extends FHIRBackboneElement implements \Js
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->valueBoolean)) {
@@ -501,15 +501,13 @@ class FHIRQuestionnaireResponseAnswer extends FHIRBackboneElement implements \Js
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<QuestionnaireResponseAnswer xmlns="http://hl7.org/fhir"></QuestionnaireResponseAnswer>');
-        }
+        $sxe ??= new \SimpleXMLElement('<QuestionnaireResponseAnswer xmlns="http://hl7.org/fhir"></QuestionnaireResponseAnswer>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->valueBoolean)) {
             $this->valueBoolean->xmlSerialize(true, $sxe->addChild('valueBoolean'));

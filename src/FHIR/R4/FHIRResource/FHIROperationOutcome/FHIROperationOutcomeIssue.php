@@ -289,7 +289,7 @@ For resource issues, this will be a simple XPath limited to element names, repet
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -297,7 +297,7 @@ For resource issues, this will be a simple XPath limited to element names, repet
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->severity)) {
@@ -328,15 +328,13 @@ For resource issues, this will be a simple XPath limited to element names, repet
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<OperationOutcomeIssue xmlns="http://hl7.org/fhir"></OperationOutcomeIssue>');
-        }
+        $sxe ??= new \SimpleXMLElement('<OperationOutcomeIssue xmlns="http://hl7.org/fhir"></OperationOutcomeIssue>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->severity)) {
             $this->severity->xmlSerialize(true, $sxe->addChild('severity'));

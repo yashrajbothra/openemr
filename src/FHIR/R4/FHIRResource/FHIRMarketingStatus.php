@@ -243,7 +243,7 @@ class FHIRMarketingStatus extends FHIRBackboneElement implements \JsonSerializab
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -251,7 +251,7 @@ class FHIRMarketingStatus extends FHIRBackboneElement implements \JsonSerializab
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         $json['resourceType'] = $this->_fhirElementName;
@@ -274,15 +274,13 @@ class FHIRMarketingStatus extends FHIRBackboneElement implements \JsonSerializab
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<MarketingStatus xmlns="http://hl7.org/fhir"></MarketingStatus>');
-        }
+        $sxe ??= new \SimpleXMLElement('<MarketingStatus xmlns="http://hl7.org/fhir"></MarketingStatus>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->country)) {
             $this->country->xmlSerialize(true, $sxe->addChild('country'));

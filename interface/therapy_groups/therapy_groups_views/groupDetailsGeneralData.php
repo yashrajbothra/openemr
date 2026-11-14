@@ -16,7 +16,19 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\BC\Utilities;
 use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+
+/** @var array<string,mixed> $groupData */
+/** @var string $readonly */
+/** @var string $savingStatus */
+/** @var string $message */
+/** @var array<int,array<string,mixed>> $statuses */
+
+$csrfToken = CsrfUtils::collectCsrfToken(SessionWrapperFactory::getInstance()->getActiveSession());
 
 ?>
 
@@ -36,8 +48,8 @@ use OpenEMR\Common\Acl\AclMain;
                 <div class="row">
                     <div class="col-md-8 col-sm-12">
                         <ul class="tabNav">
-                            <li class="current"><a href="<?php echo $GLOBALS['rootdir'] . '/therapy_groups/index.php?method=groupDetails&group_id=' . attr_url($groupData['group_id']); ?>"><?php echo xlt('General data');?></a></li>
-                            <li><a href="<?php echo $GLOBALS['rootdir'] . '/therapy_groups/index.php?method=groupParticipants&group_id=' . attr_url($groupData['group_id']); ?>"><?php echo xlt('Participants ');?></a></li>
+                            <li class="current"><a href="<?php echo OEGlobalsBag::getInstance()->getKernel()->getRootDir() . '/therapy_groups/index.php?method=groupDetails&group_id=' . attr_url($groupData['group_id']) . '&csrf_token_form=' . attr_url($csrfToken); ?>"><?php echo xlt('General data');?></a></li>
+                            <li><a href="<?php echo OEGlobalsBag::getInstance()->getKernel()->getRootDir() . '/therapy_groups/index.php?method=groupParticipants&group_id=' . attr_url($groupData['group_id']) . '&csrf_token_form=' . attr_url($csrfToken); ?>"><?php echo xlt('Participants ');?></a></li>
                         </ul>
                     </div>
                     <div class="col-md-4 col-sm-4">
@@ -46,10 +58,10 @@ use OpenEMR\Common\Acl\AclMain;
                                 <button class="btn btn-primary" onclick="newGroup()"><?php echo xlt('Add encounter'); ?></button>
                             <?php } ?>
                             <?php if ($readonly == '') { ?>
-                            <button class="btn btn-secondary" onclick="location.href='<?php echo $GLOBALS['rootdir'] . '/therapy_groups/index.php?method=groupDetails&group_id=' . attr_url($groupData['group_id']); ?>'"><?php echo xlt('Cancel');?></button>
+                            <button class="btn btn-secondary" onclick="location.href='<?php echo OEGlobalsBag::getInstance()->getKernel()->getRootDir() . '/therapy_groups/index.php?method=groupDetails&group_id=' . attr_url($groupData['group_id']) . '&csrf_token_form=' . attr_url($csrfToken); ?>'"><?php echo xlt('Cancel');?></button>
                             <button class="btn btn-primary" id="saveUpdates"><?php echo xlt('Save');?></button>
                         <?php } else { ?>
-                            <button class="btn btn-primary" onclick="location.href='<?php echo $GLOBALS['rootdir'] . '/therapy_groups/index.php?method=groupDetails&editGroup=1&group_id=' . attr_url($groupData['group_id']); ?>'"><?php echo xlt('Update');?></button>
+                            <button class="btn btn-primary" onclick="location.href='<?php echo OEGlobalsBag::getInstance()->getKernel()->getRootDir() . '/therapy_groups/index.php?method=groupDetails&editGroup=1&group_id=' . attr_url($groupData['group_id']) . '&csrf_token_form=' . attr_url($csrfToken); ?>'"><?php echo xlt('Update');?></button>
                         <?php } ?>
                       <?php }?>
                     </div>
@@ -58,6 +70,7 @@ use OpenEMR\Common\Acl\AclMain;
                     <div class="col-md-12">
                         <div id="component-border">
                             <form method="post" id='editGroup' name="editGroup">
+                                <input type="hidden" name="csrf_token_form" value="<?php echo attr($csrfToken); ?>" />
                                 <input type="hidden" name="group_id" value="<?php echo isset($groupData['group_id']) ? attr($groupData['group_id']) : '';?>" />
                                 <div class="row group-row">
                                     <div class="col-md-6 col-sm-7">
@@ -127,7 +140,7 @@ use OpenEMR\Common\Acl\AclMain;
                                                 <span class="font-weight-bold"><?php echo xlt('Ending date'); ?>:</span>
                                             </div>
                                             <div class="col-md-6 col-sm-6">
-                                                <input type="text" name="group_end_date" class="form-control datepicker" value="<?php echo $groupData['group_end_date'] == '0000-00-00' ? '' : attr(oeFormatShortDate($groupData['group_end_date'])) ;?>" <?php echo $readonly; ?> />
+                                                <input type="text" name="group_end_date" class="form-control datepicker" value="<?php echo Utilities::isDateEmpty($groupData['group_end_date']) ? '' : attr(oeFormatShortDate($groupData['group_end_date'])) ;?>" <?php echo $readonly; ?> />
                                             </div>
                                         </div>
                                     </div>
@@ -205,7 +218,7 @@ use OpenEMR\Common\Acl\AclMain;
             <?php $datetimepicker_timepicker = false; ?>
             <?php $datetimepicker_showseconds = false; ?>
             <?php $datetimepicker_formatInput = true; ?>
-            <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+            <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
             <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
         });
     });
@@ -220,7 +233,7 @@ use OpenEMR\Common\Acl\AclMain;
 
     function refreshme() {
         top.restoreSession();
-        location.href = <?php echo js_escape($GLOBALS['webroot']); ?> + '/interface/therapy_groups/index.php?method=groupDetails&group_id=' + <?php echo js_url($groupId); ?>;
+        location.href = <?php echo js_escape(OEGlobalsBag::getInstance()->getWebRoot()); ?> + '/interface/therapy_groups/index.php?method=groupDetails&group_id=' + <?php echo js_url($groupId); ?> + '&csrf_token_form=' + <?php echo js_url($csrfToken); ?>;
     }
 
     function newGroup(){
@@ -235,7 +248,7 @@ use OpenEMR\Common\Acl\AclMain;
     /* show the encounters menu in the title menu (code like interface/forms/newGroupEncounter/save.php) */
     <?php
     $result4 = sqlStatement("SELECT fe.encounter,fe.date,openemr_postcalendar_categories.pc_catname FROM form_groups_encounter AS fe " .
-    " left join openemr_postcalendar_categories on fe.pc_catid=openemr_postcalendar_categories.pc_catid  WHERE fe.group_id = ? order by fe.date desc", array($groupData['group_id']));
+    " left join openemr_postcalendar_categories on fe.pc_catid=openemr_postcalendar_categories.pc_catid  WHERE fe.group_id = ? order by fe.date desc", [$groupData['group_id']]);
     ?>
 
     EncounterDateArray=new Array;
@@ -247,7 +260,7 @@ use OpenEMR\Common\Acl\AclMain;
         while ($rowresult4 = sqlFetchArray($result4)) {
             ?>
         EncounterIdArray[Count]=<?php echo js_escape($rowresult4['encounter']); ?>;
-    EncounterDateArray[Count]=<?php echo js_escape(oeFormatShortDate(date("Y-m-d", strtotime($rowresult4['date'])))); ?>;
+    EncounterDateArray[Count]=<?php echo js_escape(oeFormatShortDate(date("Y-m-d", strtotime((string) $rowresult4['date'])))); ?>;
     CalendarCategoryArray[Count]=<?php echo js_escape(xl_appt_category($rowresult4['pc_catname'])); ?>;
     Count++;
             <?php

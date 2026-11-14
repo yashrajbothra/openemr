@@ -6,7 +6,7 @@
  * Documents, etc. New items can be added, existing items can be redirected, etc.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Ken Chapple <ken@mi-squared.com>
  * @copyright Copyright (c) 2021 Ken Chapple <ken@mi-squared.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -14,11 +14,10 @@
 
 namespace OpenEMR\Menu;
 
-use Symfony\Component\EventDispatcher\Event;
+use Symfony\Contracts\EventDispatcher\Event;
 
 class PatientMenuEvent extends Event
 {
-
      /**
      * The UPDATE event occurs once the patient tabbed menu is created, so
       * that modifications can be made to the tabs at the top of the patient menu
@@ -32,14 +31,12 @@ class PatientMenuEvent extends Event
      */
     const MENU_RESTRICT = 'patient.menu.restrict';
 
-
-
-    /** @var array The menu list */
-    private $menu;
-
-    public function __construct($menu = [])
-    {
-        $this->menu = $menu;
+    /**
+     * @param mixed[] $menu The menu list
+     */
+    public function __construct(
+        private $menu = []
+    ) {
     }
 
     /**

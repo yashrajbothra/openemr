@@ -1,26 +1,78 @@
 <?php
 
+/**
+ * FhirEncounterService
+ *
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    Yash Bothra <yashrajbothra786@gmail.com>
+ * @author    Stephen Waite <stephen.waite@cmsvt.com>
+ * @author    Vishnu Yarmaneni <vardhanvishnu@gmail.com>
+ * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Stephen Nielson snielson@discoverandchange.com
+ * @author    Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2020 Yash Bothra <yashrajbothra786@gmail.com>
+ * @copyright Copyright (c) 2020, 2022 Stephen Waite <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2020 Vishnu Yarmaneni <vardhanvishnu@gmail.com>
+ * @copyright Copyright (c) 2021 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2022 Stephen Nielson <snielson@discoverandchange.com>
+ * @copyright Copyright (c) 2026 Jerry Padgett <sjpadgett@gmail.com>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
 namespace OpenEMR\Services\FHIR;
 
-use OpenEMR\FHIR\Export\ExportCannotEncodeException;
-use OpenEMR\FHIR\Export\ExportException;
-use OpenEMR\FHIR\Export\ExportJob;
-use OpenEMR\FHIR\Export\ExportStreamWriter;
-use OpenEMR\FHIR\Export\ExportWillShutdownException;
-use OpenEMR\Services\EncounterService;
-use OpenEMR\Services\FHIR\FhirServiceBase;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\FHIR\R4\FHIRDomainResource\FHIREncounter;
 use OpenEMR\FHIR\R4\FHIRElement\FHIRCode;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRId;
 use OpenEMR\FHIR\R4\FHIRElement\FHIRCodeableConcept;
 use OpenEMR\FHIR\R4\FHIRElement\FHIRCoding;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRDateTime;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRId;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRIdentifier;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRInstant;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRMeta;
 use OpenEMR\FHIR\R4\FHIRElement\FHIRPeriod;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRReference;
+use OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource;
+use OpenEMR\FHIR\R4\FHIRResource\FHIREncounter\FHIREncounterHospitalization;
+use OpenEMR\FHIR\R4\FHIRResource\FHIREncounter\FHIREncounterLocation;
 use OpenEMR\FHIR\R4\FHIRResource\FHIREncounter\FHIREncounterParticipant;
+use OpenEMR\Services\EncounterService;
+use OpenEMR\Services\FHIR\Traits\BulkExportSupportAllOperationsTrait;
+use OpenEMR\Services\FHIR\Traits\FhirBulkExportDomainResourceTrait;
+use OpenEMR\Services\FHIR\Traits\FhirServiceBaseEmptyTrait;
+use OpenEMR\Services\FHIR\Traits\PatientSearchTrait;
+use OpenEMR\Services\FHIR\Traits\VersionedProfileTrait;
+use OpenEMR\Services\Search\FhirSearchParameterDefinition;
+use OpenEMR\Services\Search\ISearchField;
+use OpenEMR\Services\Search\SearchFieldType;
+use OpenEMR\Services\Search\ServiceField;
 use OpenEMR\Validators\ProcessingResult;
 
-class FhirEncounterService extends FhirServiceBase implements IFhirExportableResourceService
+class FhirEncounterService extends FhirServiceBase implements
+    IFhirExportableResourceService,
+    IPatientCompartmentResourceService,
+    IResourceUSCIGProfileService
 {
+    use PatientSearchTrait;
+    use FhirServiceBaseEmptyTrait;
+    use BulkExportSupportAllOperationsTrait;
+    use FhirBulkExportDomainResourceTrait;
+    use VersionedProfileTrait;
+
+    public const ENCOUNTER_STATUS_FINISHED = "finished";
+
+    public const ENCOUNTER_TYPE_CHECK_UP = "185349003";
+    public const ENCOUNTER_TYPE_CHECK_UP_DESCRIPTION = "Encounter for check up (procedure)";
+
+    public const ENCOUNTER_PARTICIPANT_TYPE_PRIMARY_PERFORMER = "PPRF";
+    public const ENCOUNTER_PARTICIPANT_TYPE_PRIMARY_PERFORMER_TEXT = "Primary Performer";
+
+    public const ENCOUNTER_PARTICIPANT_TYPE_REFERRER = "REF";
+    public const ENCOUNTER_PARTICIPANT_TYPE_REFERRER_TEXT = "Referrer";
+    const USCGI_PROFILE_URI = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter';
+
+
     /**
      * @var EncounterService
      */
@@ -36,13 +88,28 @@ class FhirEncounterService extends FhirServiceBase implements IFhirExportableRes
      * Returns an array mapping FHIR Encounter Resource search parameters to OpenEMR Encounter search parameters
      * @return array The search parameters
      */
-    protected function loadSearchParameters()
+    protected function loadSearchParameters(): array
     {
         return  [
-            '_id' => ['uuid'],
-            'patient' => ['pid'],
-            'date' => ['date']
+            '_id' => new FhirSearchParameterDefinition(
+                '_id',
+                SearchFieldType::TOKEN,
+                [
+                    new ServiceField(
+                        'euuid',
+                        ServiceField::TYPE_UUID
+                    )
+                ]
+            ),
+            'patient' => $this->getPatientContextSearchField(),
+            'date' => new FhirSearchParameterDefinition('date', SearchFieldType::DATETIME, ['date']),
+            '_lastUpdated' => $this->getLastModifiedSearchField(),
         ];
+    }
+
+    public function getLastModifiedSearchField(): ?FhirSearchParameterDefinition
+    {
+        return new FhirSearchParameterDefinition('_lastUpdated', SearchFieldType::DATETIME, ['last_update']);
     }
 
     /**
@@ -50,77 +117,175 @@ class FhirEncounterService extends FhirServiceBase implements IFhirExportableRes
      * https://build.fhir.org/ig/HL7/US-Core-R4/StructureDefinition-us-core-encounter-definitions.html
      *
      * @param array $dataRecord The source OpenEMR data record
-     * @param boolean $encode Indicates if the returned resource is encoded into a string. Defaults to false.
+     * @param bool $encode Indicates if the returned resource is encoded into a string. Defaults to false.
      * @return FHIREncounter
      */
-    public function parseOpenEMRRecord($dataRecord = array(), $encode = false)
+    public function parseOpenEMRRecord($dataRecord = [], $encode = false)
     {
         $encounterResource = new FHIREncounter();
 
-        $meta = array('versionId' => '1', 'lastUpdated' => gmdate('c'));
+        $meta = new FHIRMeta();
+        $meta->setVersionId('1');
+        $meta->setLastUpdated(new FHIRInstant((new \DateTime($dataRecord['last_update']))->format(DATE_ATOM))); // stored as utc
         $encounterResource->setMeta($meta);
 
         $id = new FhirId();
-        $id->setValue($dataRecord['uuid']);
+        $id->setValue($dataRecord['euuid']);
         $encounterResource->setId($id);
 
-        $status = new FHIRCode('finished');
+        // identifier - required
+        $identifier = new FHIRIdentifier();
+        $identifier->setValue($dataRecord['euuid']);
+        // the system is a unique urn
+        $identifier->setSystem("urn:uuid:" . strtolower((string) $dataRecord['euuid']));
+        $encounterResource->addIdentifier($identifier);
+
+        // status - required
+        $status = new FHIRCode(self::ENCOUNTER_STATUS_FINISHED);
         $encounterResource->setStatus($status);
 
-        if (!empty($dataRecord['provider_id'])) {
-            $parctitioner = new FHIRReference(['reference' => 'Practitioner/' . $dataRecord['provider_id']]);
-            $participant = new FHIREncounterParticipant(array(
-                'individual' => $parctitioner,
-                'period' => ['start' => gmdate('c', strtotime($dataRecord['date']))]
-            ));
-            $participantType = new FHIRCodeableConcept();
-            $participantType->addCoding(array(
-                "system" => "http://terminology.hl7.org/CodeSystem/v3-ParticipationType",
-                "code" => "PPRF"
-            ));
-            $participantType->setText("Primary Performer");
+        // class
+        if (!empty($dataRecord['class_code'])) {
+            $class = new FHIRCoding();
+            $class->setSystem(FhirCodeSystemConstants::HL7_V3_ACT_CODE);
+            $class->setCode($dataRecord['class_code']);
+            $class->setDisplay($dataRecord['class_title']);
+            $encounterResource->setClass($class);
+        } else {
+            $encounterResource->setClass(UtilsService::createDataAbsentUnknownCodeableConcept());
+        }
+
+        // TODO: @adunsulag check with @brady.miller and find out if this really is the only possible encounter type
+        // ...  it was here originally
+        $type = UtilsService::createCodeableConcept(
+            [self::ENCOUNTER_TYPE_CHECK_UP => [
+                'code' => self::ENCOUNTER_TYPE_CHECK_UP
+                , "description" => self::ENCOUNTER_TYPE_CHECK_UP_DESCRIPTION
+                , "system" => FhirCodeSystemConstants::SNOMED_CT
+            ]]
+        );
+        $encounterResource->addType($type);
+
+        // subject - required
+        if (!empty($dataRecord['puuid'])) {
+            $encounterResource->setSubject(UtilsService::createRelativeReference('Patient', $dataRecord['puuid']));
+        } else {
+            $encounterResource->setSubject(UtilsService::createDataMissingExtension());
+        }
+
+        // participant - must support
+        if (!empty($dataRecord['provider_uuid'])) {
+            $participant = new FHIREncounterParticipant();
+            $participant->setIndividual(
+                UtilsService::createRelativeReference(
+                    "Practitioner",
+                    $dataRecord['provider_uuid']
+                )
+            );
+            $period = new FHIRPeriod();
+            $period->setStart(new FHIRDateTime(UtilsService::getLocalDateAsUTC($dataRecord['date'])));
+            $participant->setPeriod($period);
+
+            $participantType = UtilsService::createCodeableConcept([
+                self::ENCOUNTER_PARTICIPANT_TYPE_PRIMARY_PERFORMER =>
+                [
+                    'code' => self::ENCOUNTER_PARTICIPANT_TYPE_PRIMARY_PERFORMER
+                    ,'description' => self::ENCOUNTER_PARTICIPANT_TYPE_PRIMARY_PERFORMER_TEXT
+                    ,'system' => FhirCodeSystemConstants::HL7_PARTICIPATION_TYPE
+                ]
+            ]);
             $participant->addType($participantType);
             $encounterResource->addParticipant($participant);
         }
 
-        if (!empty($dataRecord['facility_id'])) {
-            $serviceOrg = new FHIRReference(['reference' => 'Organization/' . $dataRecord['facility_id']]);
-            $encounterResource->setServiceProvider($serviceOrg);
+        // referring provider
+        if (!empty($dataRecord['referrer_uuid'])) {
+            $participant = new FHIREncounterParticipant();
+            $participant->setIndividual(
+                UtilsService::createRelativeReference(
+                    "Practitioner",
+                    $dataRecord['referrer_uuid']
+                )
+            );
+            $period = new FHIRPeriod();
+            $period->setStart(new FHIRDateTime(UtilsService::getLocalDateAsUTC($dataRecord['date'])));
+            $participant->setPeriod($period);
+
+            $participantType = UtilsService::createCodeableConcept([
+                self::ENCOUNTER_PARTICIPANT_TYPE_REFERRER =>
+                [
+                    'code' => self::ENCOUNTER_PARTICIPANT_TYPE_REFERRER
+                    ,'description' => self::ENCOUNTER_PARTICIPANT_TYPE_REFERRER_TEXT
+                    ,'system' => FhirCodeSystemConstants::HL7_PARTICIPATION_TYPE
+                ]
+            ]);
+            $participant->addType($participantType);
+            $encounterResource->addParticipant($participant);
         }
 
-        if (!empty($dataRecord['reason'])) {
-            $reason = new FHIRCodeableConcept();
-            $reason->setText($dataRecord['reason']);
-            $encounterResource->addReasonCode($reason);
-        }
-
-        if (!empty($dataRecord['puuid'])) {
-            $patient = new FHIRReference(['reference' => 'Patient/' . $dataRecord['puuid']]);
-            $encounterResource->setSubject($patient);
-        }
-
+        // period - must support
         if (!empty($dataRecord['date'])) {
             $period = new FHIRPeriod();
-            $period->setStart(gmdate('c', strtotime($dataRecord['date'])));
+            $period->setStart(new FHIRDateTime(UtilsService::getLocalDateAsUTC($dataRecord['date'])));
             $encounterResource->setPeriod($period);
         }
 
-        if (!empty($dataRecord['class_code'])) {
-            $class = new FHIRCoding();
-            $class->setSystem("http://terminology.hl7.org/CodeSystem/v3-ActCode");
-            $class->setCode($dataRecord['class_code']);
-            $class->setDisplay($dataRecord['class_title']);
-            $encounterResource->setClass($class);
+        // reasonCode - must support OR must support reasonReference
+        if (!empty($dataRecord['reason'])) {
+            // Note: that we use the encounter textual representation for the reason here which is just fine as ccda
+            // uses a textual representation of this.  According to HL7 chat this is just fine as epoch and
+            // other systems do it this way
+            // @see https://chat.fhir.org/#narrow/stream/179175-argonaut/topic/Encounter.20Reason.20For.20Visit
+            // (beware of link rot)
+            $reason = new FHIRCodeableConcept();
+            $reasonText = $dataRecord['reason'] ?? "";
+            $reason->setText(trim((string) $reasonText));
+            $encounterResource->addReasonCode($reason);
+        }
+        // hospitalization - must support
+
+        // hospitalization.dischargeDisposition - must support
+        if (!empty($dataRecord['discharge_disposition'])) {
+            $code = $dataRecord['discharge_disposition'];
+            $text = $dataRecord['discharge_disposition_text'];
+
+            $hospitalization = new FHIREncounterHospitalization();
+            $hospitalization->setDischargeDisposition(UtilsService::createCodeableConcept(
+                [
+                    $code => [
+                        'code' => $text,
+                        'description' => $text,
+                        'system' => FhirCodeSystemConstants::HL7_DISCHARGE_DISPOSITION
+                    ]
+                ]
+            ));
+            $encounterResource->setHospitalization($hospitalization);
         }
 
-        // Encounter.type
-        $type = new FHIRCodeableConcept();
-        $type->addCoding(array(
-            "system" => "http://snomed.info/sct",
-            "code" => "185349003"
-        ));
-        $type->setText("Encounter for check up (procedure)");
-        $encounterResource->addType($type);
+        // SHALL support either location.location OR serviceProvider
+        // however ONC inferno requires both serviceProvider AND location.location
+        // location.location - must support
+        // serviceProvider - must support
+        if (!empty($dataRecord['facility_uuid'])) {
+            $encounterResource->setServiceProvider(
+                UtilsService::createRelativeReference(
+                    'Organization',
+                    $dataRecord['facility_uuid']
+                )
+            );
+
+            // grab the facility location address
+            if (!empty($dataRecord['facility_location_uuid'])) {
+                $location = new FHIREncounterLocation();
+                $location->setLocation(
+                    UtilsService::createRelativeReference(
+                        "Location",
+                        $dataRecord['facility_location_uuid']
+                    )
+                );
+                $encounterResource->addLocation($location);
+            }
+        }
 
         if ($encode) {
             return json_encode($encounterResource);
@@ -130,116 +295,352 @@ class FhirEncounterService extends FhirServiceBase implements IFhirExportableRes
     }
 
     /**
-     * Performs a FHIR Encounter Resource lookup by FHIR Resource ID
-     * @param $fhirResourceId //The OpenEMR record's FHIR Encounter Resource ID.
-     * @param $puuidBind - Optional variable to only allow visibility of the patient with this puuid.
+     * Parses a FHIR Encounter resource, returning the equivalent OpenEMR record.
+     *
+     * @param FHIRDomainResource $fhirResource The source FHIR resource
+     * @return array a mapped OpenEMR data record
      */
-    public function getOne($fhirResourceId, $puuidBind = null)
+    public function parseFhirResource(FHIRDomainResource $fhirResource): array
     {
-        $processingResult = $this->encounterService->getEncounter($fhirResourceId, $puuidBind);
-        if (!$processingResult->hasErrors()) {
-            if (count($processingResult->getData()) > 0) {
-                $openEmrRecord = $processingResult->getData()[0];
-                $fhirRecord = $this->parseOpenEMRRecord($openEmrRecord);
-                $processingResult->setData([]);
-                $processingResult->addData($fhirRecord);
+        if (!($fhirResource instanceof FHIREncounter)) {
+            throw new \InvalidArgumentException(
+                'Expected FHIREncounter resource, got ' . $fhirResource::class
+            );
+        }
+
+        // Use jsonSerialize() to get a normalized array representation since
+        // the FHIR R4 library does not deeply hydrate nested objects
+        $json = $fhirResource->jsonSerialize();
+        $data = [];
+
+        $resourceId = $json['id'] ?? null;
+        if (is_string($resourceId) && $resourceId !== '') {
+            $data['uuid'] = $resourceId;
+        }
+
+        // Subject -> puuid (required in US Core)
+        $subjectRef = FhirPayloadReader::reference($json['subject'] ?? null);
+        if ($subjectRef !== null) {
+            $subjectUuid = UtilsService::parseReferenceString($subjectRef, 'Patient')['uuid'] ?? null;
+            if (is_string($subjectUuid) && $subjectUuid !== '') {
+                $data['puuid'] = $subjectUuid;
             }
         }
-        return $processingResult;
+
+        // Class -> class_code (required in FHIR R4)
+        $class = $json['class'] ?? null;
+        $classCode = is_array($class) ? ($class['code'] ?? null) : null;
+        if (is_string($classCode) && $classCode !== '') {
+            $data['class_code'] = $classCode;
+        }
+
+        // Period -> date (normalize to Y-m-d H:i:s for database). An encounter
+        // names a specific point in time, so partial precision is rejected. The
+        // previous fallback wrote the raw unparsable string into a DATETIME
+        // column; the parser raises a 400 instead.
+        $period = $json['period'] ?? null;
+        $encounterDate = FhirDateTimeParser::toDbDateTime(
+            is_array($period) ? ($period['start'] ?? null) : null,
+            'Encounter.period.start'
+        );
+        if ($encounterDate !== null) {
+            $data['date'] = $encounterDate;
+        }
+
+        // Participant -> provider_uuid and referrer_uuid. A participant that supplies a
+        // reference we cannot resolve is rejected — silently skipping it creates a partial
+        // Encounter while telling the caller the write succeeded — so we throw
+        // InvalidArgumentException and the controller emits a 400 with a clear
+        // OperationOutcome. A participant with no individual at all is a different case and
+        // is skipped; see below.
+        $participants = $json['participant'] ?? null;
+        if (is_array($participants)) {
+            foreach ($participants as $idx => $participant) {
+                $individual = is_array($participant) ? ($participant['individual'] ?? null) : null;
+                $reference = is_array($individual) ? ($individual['reference'] ?? null) : null;
+                if (!is_string($reference) || $reference === '') {
+                    // Encounter.participant.individual is 0..1 in R4, so a type-only
+                    // participant is conformant. It carries no attribution for us to map,
+                    // so skip it rather than rejecting the whole resource with a 400.
+                    continue;
+                }
+                $practitionerUuid = UtilsService::parseReferenceString($reference, 'Practitioner')['uuid'] ?? null;
+                if (
+                    !is_string($practitionerUuid) || $practitionerUuid === ''
+                    || !\OpenEMR\Common\Uuid\UuidRegistry::isValidStringUUID($practitionerUuid)
+                ) {
+                    throw new \InvalidArgumentException(
+                        'Encounter.participant[' . (int) $idx . '].individual.reference is not a valid Practitioner reference'
+                    );
+                }
+
+                // Determine participant type from type codings
+                $isPrimaryPerformer = false;
+                $isReferrer = false;
+                // $participant is provably an array here: reaching this line
+                // required $individual, and therefore $participant, to be one.
+                $participantTypes = $participant['type'] ?? null;
+                foreach (is_array($participantTypes) ? $participantTypes : [] as $pType) {
+                    $code = FhirPayloadReader::firstCodingCode($pType);
+                    if ($code === self::ENCOUNTER_PARTICIPANT_TYPE_PRIMARY_PERFORMER) {
+                        $isPrimaryPerformer = true;
+                    } elseif ($code === self::ENCOUNTER_PARTICIPANT_TYPE_REFERRER) {
+                        $isReferrer = true;
+                    }
+                }
+
+                if ($isReferrer) {
+                    $data['referrer_uuid'] = $practitionerUuid;
+                } elseif ($isPrimaryPerformer || !isset($data['provider_uuid'])) {
+                    $data['provider_uuid'] = $practitionerUuid;
+                }
+            }
+        }
+
+        // ReasonCode -> reason
+        $reasonCodes = $json['reasonCode'] ?? null;
+        $reason = is_array($reasonCodes) ? ($reasonCodes[0] ?? null) : null;
+        if (is_array($reason)) {
+            $reasonText = $reason['text'] ?? null;
+            $reasonDisplay = FhirPayloadReader::firstCodingValue($reason, 'display');
+            if (is_string($reasonText) && $reasonText !== '') {
+                $data['reason'] = $reasonText;
+            } elseif ($reasonDisplay !== '') {
+                $data['reason'] = $reasonDisplay;
+            }
+        }
+
+        // ServiceProvider -> facility_id (via Organization uuid)
+        $serviceProviderRef = FhirPayloadReader::reference($json['serviceProvider'] ?? null);
+        if ($serviceProviderRef !== null) {
+            $organizationUuid = UtilsService::parseReferenceString($serviceProviderRef, 'Organization')['uuid'] ?? null;
+            if (
+                is_string($organizationUuid) && $organizationUuid !== ''
+                && \OpenEMR\Common\Uuid\UuidRegistry::isValidStringUUID($organizationUuid)
+            ) {
+                $facilityUuidBytes = \OpenEMR\Common\Uuid\UuidRegistry::uuidToBytes($organizationUuid);
+                $facilityId = $this->encounterService->getIdByUuid($facilityUuidBytes, 'facility', 'id');
+                if ($facilityId) {
+                    $data['facility_id'] = $facilityId;
+                }
+            }
+        }
+
+        // Hospitalization -> discharge_disposition
+        $hospitalization = $json['hospitalization'] ?? null;
+        $dischargeCode = FhirPayloadReader::firstCodingCode(
+            is_array($hospitalization) ? ($hospitalization['dischargeDisposition'] ?? null) : null
+        );
+        if ($dischargeCode !== '') {
+            $data['discharge_disposition'] = $dischargeCode;
+        }
+
+        return $data;
+    }
+
+    /**
+     * Resolves the default encounter category id from the database rather than
+     * hardcoding a site-specific numeric value.
+     *
+     * @return int
+     */
+    private function getDefaultEncounterCategoryId(): int
+    {
+        // The 'office_visit' constant is the well-known well-defined default
+        // installed by every schema (sql/database.sql). Look it up by constant
+        // id only — never fall back to "pick any active row" because that
+        // returns an arbitrary category and would silently misattribute the
+        // encounter type (also a fresh cross-tenant write path in any future
+        // multi-site scoping). If the row is genuinely missing the schema
+        // default of 5 is correct.
+        $category = QueryUtils::querySingleRow(
+            "SELECT pc_catid FROM openemr_postcalendar_categories WHERE pc_constant_id = ? LIMIT 1",
+            ['office_visit']
+        );
+        $categoryId = is_array($category) ? ($category['pc_catid'] ?? null) : null;
+        if (is_numeric($categoryId) && (int) $categoryId > 0) {
+            return (int) $categoryId;
+        }
+        return 5;
+    }
+
+    /**
+     * Inserts an OpenEMR record into the system.
+     *
+     * @param mixed $openEmrRecord The parsed record from parseFhirResource()
+     * @return ProcessingResult
+     */
+    protected function insertOpenEMRRecord($openEmrRecord)
+    {
+        if (!is_array($openEmrRecord)) {
+            throw new \InvalidArgumentException('Expected a parsed OpenEMR Encounter record array');
+        }
+
+        $puuid = $openEmrRecord['puuid'] ?? '';
+        unset($openEmrRecord['puuid']);
+
+        // Default pc_catid for new encounters (required by EncounterValidator). This is
+        // deliberately not applied in parseFhirResource(): the update path shares that
+        // parser, and FHIR Encounter carries no element that maps to the category, so a
+        // default there would silently reset the stored category on every PUT.
+        $openEmrRecord['pc_catid'] ??= $this->getDefaultEncounterCategoryId();
+
+        // EncounterService::insertEncounter passes user and group straight to addForm()
+        // without defaulting them, so both keys have to exist here. Outside a web request
+        // -- a CLI import, or a test driving the service directly -- there is no session
+        // to read them from, and they fall back to the empty string rather than being
+        // left undefined.
+        $session = $this->getSession();
+        if (($openEmrRecord['user'] ?? '') === '') {
+            $openEmrRecord['user'] = $session?->get('authUser') ?? '';
+        }
+        if (($openEmrRecord['group'] ?? '') === '') {
+            $openEmrRecord['group'] = $session?->get('authProvider') ?? '';
+        }
+
+        $this->resolveProviderUuids($openEmrRecord);
+
+        // EncounterService::insertEncounter unconditionally reads
+        // $data['provider_id'] / $data['user']. resolveProviderUuids only sets
+        // provider_id when a participant performer was supplied; when the FHIR
+        // payload has no participant we fall back to the authenticated user.
+        if (!isset($openEmrRecord['provider_id'])) {
+            $authUserIdRaw = $session?->get('authUserID');
+            $openEmrRecord['provider_id'] = is_scalar($authUserIdRaw)
+                ? (int) $authUserIdRaw
+                : 0;
+        }
+
+        return $this->encounterService->insertEncounter($puuid, $openEmrRecord);
+    }
+
+    /**
+     * Updates an existing OpenEMR record.
+     *
+     * @param string $fhirResourceId The OpenEMR record's FHIR Resource ID (uuid)
+     * @param array<array-key, mixed> $updatedOpenEMRRecord The updated OpenEMR record
+     * @return ProcessingResult
+     */
+    protected function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord)
+    {
+        $puuid = $updatedOpenEMRRecord['puuid'] ?? '';
+        unset($updatedOpenEMRRecord['puuid']);
+
+        // user and group are required by EncounterValidator for updates; as on the insert
+        // path both keys must exist even when there is no session to source them from.
+        $session = $this->getSession();
+        if (($updatedOpenEMRRecord['user'] ?? '') === '') {
+            $updatedOpenEMRRecord['user'] = $session?->get('authUser') ?? '';
+        }
+        if (($updatedOpenEMRRecord['group'] ?? '') === '') {
+            $updatedOpenEMRRecord['group'] = $session?->get('authProvider') ?? '';
+        }
+
+        $this->resolveProviderUuids($updatedOpenEMRRecord);
+
+        return $this->encounterService->updateEncounter($puuid, $fhirResourceId, $updatedOpenEMRRecord);
+    }
+
+    /**
+     * Resolves provider and referrer UUIDs to their numeric IDs.
+     *
+     * Authorization: a caller may only attribute an encounter to a provider
+     * other than themselves if they hold the admin/users ACL. Without it the
+     * write is rejected (InvalidArgumentException → 400) rather than silently
+     * dropping the attribution. Silent demotion would tell the client the
+     * write succeeded while billing/audit attributes the visit to a default
+     * provider — worse than failing outright.
+     *
+     * @param array<array-key, mixed> &$record The OpenEMR record to modify in place
+     */
+    private function resolveProviderUuids(array &$record): void
+    {
+        $policy = new PractitionerAttributionPolicy($this->getSession());
+
+        $this->resolveSingleProviderField(
+            $record,
+            'provider_uuid',
+            'provider_id',
+            'Encounter.participant performer',
+            $policy
+        );
+        $this->resolveSingleProviderField(
+            $record,
+            'referrer_uuid',
+            'referring_provider_id',
+            'Encounter.participant referrer',
+            $policy
+        );
+    }
+
+    /**
+     * Shared helper for the two provider-attribution paths (performer and
+     * referrer). Verifies the requested user exists, then enforces the
+     * admin/users-or-self policy. Throws on policy violation rather than
+     * silently dropping.
+     *
+     * @param array<array-key, mixed> &$record
+     */
+    private function resolveSingleProviderField(
+        array &$record,
+        string $uuidKey,
+        string $idKey,
+        string $fhirLabel,
+        PractitionerAttributionPolicy $policy
+    ): void {
+        $uuid = $record[$uuidKey] ?? null;
+        $existingId = $record[$idKey] ?? null;
+        $alreadyResolved = is_numeric($existingId) && (int) $existingId > 0;
+        if (!is_string($uuid) || $uuid === '' || $alreadyResolved) {
+            unset($record[$uuidKey]);
+            return;
+        }
+        // Dropped before the policy runs so a rejected attribution cannot leave the raw uuid
+        // behind for a downstream writer to pick up.
+        unset($record[$uuidKey]);
+        $record[$idKey] = $policy->resolveAndAssert(
+            $uuid,
+            $fhirLabel,
+            fn(string $bytes) => $this->encounterService->getIdByUuid($bytes, 'users', 'id')
+        );
+    }
+
+    public function createProvenanceResource($dataRecord = [], $encode = false)
+    {
+        if (!($dataRecord instanceof FHIREncounter)) {
+            throw new \BadMethodCallException("Data record should be correct instance class");
+        }
+        $provenanceService = new FhirProvenanceService();
+        $author = null;
+        if (!empty($dataRecord->getParticipant())) {
+            // grab the first one for author
+            $participant = reset($dataRecord->getParticipant());
+            $author = $participant->getIndividual() ?? null;
+        }
+        $provenance = $provenanceService->createProvenanceForDomainResource($dataRecord, $author);
+        return $provenance;
     }
 
     /**
      * Searches for OpenEMR records using OpenEMR search parameters
      *
-     * @param array openEMRSearchParameters OpenEMR search fields
-     * @param $puuidBind - Optional variable to only allow visibility of the patient with this puuid.
+     * @param array<string, ISearchField> $openEMRSearchParameters OpenEMR search fields
      * @return ProcessingResult
      */
-    public function searchForOpenEMRRecords($searchParam, $puuidBind = null)
+    protected function searchForOpenEMRRecords($searchParam): ProcessingResult
     {
-        return $this->encounterService->getEncountersBySearch($searchParam, true, $puuidBind);
-    }
-
-    public function parseFhirResource($fhirResource = array())
-    {
-        // TODO: If Required in Future
-    }
-
-    public function insertOpenEMRRecord($openEmrRecord)
-    {
-        // TODO: If Required in Future
-    }
-
-    public function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord)
-    {
-        // TODO: If Required in Future
-    }
-
-    public function createProvenanceResource($dataRecord = array(), $encode = false)
-    {
-        // TODO: If Required in Future
+        return $this->encounterService->search($searchParam, true);
     }
 
     /**
-     * Grabs all the objects in my service that match the criteria specified in the ExportJob.  If a
-     * $lastResourceIdExported is provided, The service executes the same data collection query it used previously and
-     * startes processing at the resource that is immediately after (ordered by date) the resource that matches the id of
-     * $lastResourceIdExported.  This allows processing of the service to be resumed or paused.
-     * @param ExportStreamWriter $writer Object that writes out to a stream any object that extend the FhirResource object
-     * @param ExportJob $job The export job we are processing the request for.  Holds all of the context information needed for the export service.
-     * @return void
-     * @throws ExportWillShutdownException  Thrown if the export is about to be shutdown and all processing must be halted.
-     * @throws ExportException  If there is an error in processing the export
-     * @throws ExportCannotEncodeException Thrown if the resource cannot be properly converted into the right format (ie JSON).
+     * Returns the Canonical URIs for the FHIR resource for each of the US Core Implementation Guide Profiles that the
+     * resource implements.  Most resources have only one profile, but several like DiagnosticReport and Observation
+     * has multiple profiles that must be conformed to.
+     * @see https://www.hl7.org/fhir/us/core/CapabilityStatement-us-core-server.html for the list of profiles
+     * @return string[]
      */
-    public function export(ExportStreamWriter $writer, ExportJob $job, $lastResourceIdExported = null): void
+    public function getProfileURIs(): array
     {
-        // TODO: encounter search should support multiple date parameter searches for interval period search
-//        $date = [
-//            'le' . $job->getStartTime()->format(\DateTime::RFC3339_EXTENDED)
-//            ,'ge' . $job->getResourceIncludeTime()->format(\DateTime::RFC3339_EXTENDED)
-//        ];
-        $date = 'le' . $job->getStartTime()->format(\DateTime::RFC3339_EXTENDED);
-        $result = $this->getAll(['date' => $date]);
-        $encounters = $result->getData();
-        if (!empty($encounters)) {
-            foreach ($encounters as $encounter) {
-                $writer->append($encounter);
-            }
-        }
-    }
-
-    /**
-     * Returns whether the service supports the system export operation
-     * @see https://hl7.org/fhir/uv/bulkdata/export/index.html#endpoint---system-level-export
-     * @return bool true if this resource service should be called for a system export operation, false otherwise
-     */
-    public function supportsSystemExport()
-    {
-        return true;
-    }
-
-    /**
-     * Returns whether the service supports the group export operation.
-     * Note only resources in the Patient compartment SHOULD be returned unless the resource assists in interpreting
-     * patient data (such as Organization or Practitioner)
-     * @see https://hl7.org/fhir/uv/bulkdata/export/index.html#endpoint---group-of-patients
-     * @return bool true if this resource service should be called for a group export operation, false otherwise
-     */
-    public function supportsGroupExport()
-    {
-        return true;
-    }
-
-    /**
-     * Returns whether the service supports the all patient export operation
-     * Note only resources in the Patient compartment SHOULD be returned unless the resource assists in interpreting
-     * patient data (such as Organization or Practitioner)
-     * @see https://hl7.org/fhir/uv/bulkdata/export/index.html#endpoint---all-patients
-     * @return bool true if this resource service should be called for a patient export operation, false otherwise
-     */
-    public function supportsPatientExport()
-    {
-        return true;
+        return $this->getProfileForVersions(self::USCGI_PROFILE_URI, $this->getSupportedVersions());
     }
 }

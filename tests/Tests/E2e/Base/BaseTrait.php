@@ -1,0 +1,443 @@
+<?php
+
+/**
+ * BaseTrait trait
+ *
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
+ * @copyright Copyright (c) 2024 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2025-2026 OpenCoreEMR Inc <https://opencoreemr.com/>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
+declare(strict_types=1);
+
+namespace OpenEMR\Tests\E2e\Base;
+
+use Facebook\WebDriver\Exception\Internal\UnexpectedResponseException;
+use Facebook\WebDriver\Exception\NoAlertOpenException;
+use Facebook\WebDriver\Exception\NoSuchAlertException;
+use Facebook\WebDriver\Exception\StaleElementReferenceException;
+use Facebook\WebDriver\Exception\TimeoutException;
+use Facebook\WebDriver\Exception\UnexpectedAlertOpenException;
+use Facebook\WebDriver\Exception\WebDriverException;
+use Facebook\WebDriver\Remote\DesiredCapabilities;
+use Facebook\WebDriver\Remote\RemoteWebDriver;
+use Facebook\WebDriver\WebDriverBy;
+use Facebook\WebDriver\WebDriverElement;
+use Facebook\WebDriver\WebDriverExpectedCondition;
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Tests\E2e\Xpaths\XpathsConstants;
+use RuntimeException;
+use Symfony\Component\Panther\Client;
+use Symfony\Component\Panther\DomCrawler\Crawler;
+
+trait BaseTrait
+{
+    private Client $client;
+    /**
+     * Panther refreshCrawler() output cached between assertions. Shared via
+     * the trait so test classes don't have to redeclare the holder — a
+     * class-level $crawler without a type annotation was the main source of
+     * missingType.property baseline entries picked up by every E2e class.
+     */
+    private ?Crawler $crawler = null;
+
+    private function base(): void
+    {
+        $useGrid = getenv("SELENIUM_USE_GRID", true) ?: "false";
+
+        if ($useGrid === "true") {
+            // Use Selenium Grid (consistent testing environment with goal of stability)
+            $seleniumHost = getenv("SELENIUM_HOST", true) ?: "selenium";
+            $e2eBaseUrl = getenv("SELENIUM_BASE_URL", true) ?: "http://openemr";
+            $forceHeadless = getenv("SELENIUM_FORCE_HEADLESS", true) ?: "false";
+            // Implicit wait must be 0 when using explicit waits (waitFor,
+            // waitForVisibility, wait()->until()). A non-zero implicit wait
+            // causes each findElement() call inside an explicit wait condition
+            // to block for the full implicit wait duration before throwing,
+            // consuming the entire explicit wait timeout in a single attempt
+            // instead of retrying.
+            $implicitWait = (int)(getenv("SELENIUM_IMPLICIT_WAIT") ?: 0);
+            $pageLoadTimeout = (int)(getenv("SELENIUM_PAGE_LOAD_TIMEOUT") ?: 60);
+
+            $capabilities = DesiredCapabilities::chrome();
+
+            $chromeArgs = [
+                '--window-size=1920,1080',  // Matches SE_SCREEN_WIDTH/HEIGHT
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ];
+
+            // Add headless if forced (but VNC won't work in headless mode)
+            if ($forceHeadless === "true") {
+                $chromeArgs[] = '--headless';
+            }
+
+            $capabilities->setCapability('goog:chromeOptions', [
+                'args' => $chromeArgs
+            ]);
+
+            // Note on unhandledPromptBehavior: added defensively
+            // 2025-07-05 in #8555 during the Selenium-grid transition,
+            // never observed catching an actual alert on the source-
+            // side E2e suite. Acceptance side yanked its two copies
+            // (#13358 grid + #13364 local) after proving the CDP
+            // muzzle installed below is what actually handles the
+            // alerts we encounter. Yanked here for the same reason.
+            $capabilities->setCapability('pageLoadStrategy', 'normal');
+
+            $seleniumUrl = "http://$seleniumHost:4444/wd/hub";
+            $this->client = Client::createSeleniumClient($seleniumUrl, $capabilities, $e2eBaseUrl);
+
+            $this->client->manage()->timeouts()->implicitlyWait($implicitWait);
+            $this->client->manage()->timeouts()->pageLoadTimeout($pageLoadTimeout);
+        } else {
+            // Use local ChromeDriver (not a consistent testing environment, which is thus not stable, good luck :) )
+            $this->client = static::createPantherClient(['external_base_uri' => "http://localhost"]);
+            $this->client->manage()->window()->maximize();
+        }
+
+        $this->muzzleBrowserPrompts();
+    }
+
+    /**
+     * Install a browser-prompt muzzle via CDP for the rest of this
+     * WebDriver session. Overrides window.alert / .confirm / .prompt
+     * with recording stubs (alert returns undefined; confirm returns
+     * true; prompt returns "") on every subsequent page navigation,
+     * using ChromeDriver's `Page.addScriptToEvaluateOnNewDocument`
+     * (runs before any page JS). Each stub pushes the message it
+     * swallowed onto `window.__e2eMuzzledPrompts` on the window that
+     * received the call, so diagnostics can read back what the page
+     * tried to say (see UserAddTrait::gatherModalDiagnostics).
+     *
+     * Motivation: the Medical Record Dashboard fires a native
+     * browser alert from `library/clinical_rules.php` via
+     * `<img src="empty.gif" onload="alert(...)">` when the widget
+     * computes New Due Clinical Reminders for a newly-created
+     * patient. On slow runners the alert races test-side waits and
+     * blocks the WebDriver session with UnexpectedAlertOpenException,
+     * producing false-positive failures despite the underlying flow
+     * being fine. Muzzling `window.alert` at the source removes the
+     * popup entirely so there is no popup for the driver to race
+     * on. Same mechanism the acceptance suite adopted 2026-08-02 in
+     * #13358 after multiple wait-based / capability-based
+     * mitigations failed to zero out the flake class.
+     *
+     * Idempotent — CDP happily accepts the same script being
+     * registered multiple times; the stubs just get installed
+     * repeatedly. Cheap.
+     *
+     * Alert-dismissal call sites in this file (goToMainMenuLink
+     * $acceptAlert branch, UnexpectedAlertOpenException catch in
+     * the retry loop, PatientAddTrait's alertIsPresent wait) become
+     * redundant on the happy path but remain as belt-and-suspenders
+     * for any residual alert emitter the muzzle doesn't cover.
+     */
+    private function muzzleBrowserPrompts(): void
+    {
+        $script = <<<'JS_WRAP'
+            window.__e2eMuzzledPrompts = [];
+            window.alert = function (message) {
+                window.__e2eMuzzledPrompts.push({type: 'alert', message: String(message)});
+            };
+            window.confirm = function (message) {
+                window.__e2eMuzzledPrompts.push({type: 'confirm', message: String(message)});
+                return true;
+            };
+            window.prompt = function (message) {
+                window.__e2eMuzzledPrompts.push({type: 'prompt', message: String(message)});
+                return '';
+            };
+            JS_WRAP;
+        // Panther's Client::getWebDriver() returns the WebDriver
+        // interface; the CDP escape hatch lives on RemoteWebDriver
+        // (the concrete class both driver paths actually return).
+        // Narrow explicitly so phpstan sees the method.
+        $webDriver = $this->client->getWebDriver();
+        if (!$webDriver instanceof RemoteWebDriver) {
+            throw new RuntimeException(sprintf(
+                'muzzleBrowserPrompts requires a RemoteWebDriver instance for CDP execute; got %s',
+                $webDriver::class,
+            ));
+        }
+        $webDriver->executeCustomCommand(
+            '/session/:sessionId/goog/cdp/execute',
+            'POST',
+            [
+                'cmd' => 'Page.addScriptToEvaluateOnNewDocument',
+                'params' => ['source' => $script],
+            ],
+        );
+    }
+
+    /**
+     * Wait for the application to be fully initialized after login.
+     *
+     * Verifies Knockout.js has applied bindings by checking that the
+     * #mainMenu div has children (rendered by the menu template).
+     * Without this gate, tests that immediately navigate menus can
+     * fail because the page HTML loaded but the JS framework hasn't
+     * finished rendering.
+     *
+     * @param int $timeout Seconds to wait before giving up
+     * @return bool True if app initialized, false if timeout
+     */
+    private function waitForAppReady(int $timeout = 30): bool
+    {
+        try {
+            $this->client->wait($timeout)->until(
+                fn(RemoteWebDriver $driver): bool => (bool) $driver->executeScript(
+                    'return document.getElementById("mainMenu")?.children.length > 0'
+                )
+            );
+            // Log state on success to verify hypothesis that koAvailable
+            // is always true when the menu renders successfully
+            $state = $this->client->executeScript(<<<'JS_WRAP'
+                return JSON.stringify({
+                    koAvailable: typeof ko !== 'undefined',
+                    mainMenuChildren: document.getElementById('mainMenu')?.children.length ?? 0
+                });
+            JS_WRAP);
+            fwrite(STDERR, "[E2E] waitForAppReady succeeded: " . (is_string($state) ? $state : '(non-string state)') . "\n");
+            return true;
+        } catch (TimeoutException) {
+            return false;
+        }
+    }
+
+    /**
+     * Create a TimeoutException with diagnostic information about the page state.
+     *
+     * Call this after waitForAppReady() returns false to get a detailed exception
+     * with information about why the app didn't initialize.
+     */
+    private function createAppReadyTimeoutException(): TimeoutException
+    {
+        try {
+            $raw = $this->client->executeScript(<<<'JS_WRAP'
+                return JSON.stringify({
+                    url: location.href,
+                    readyState: document.readyState,
+                    title: document.title,
+                    koAvailable: typeof ko !== 'undefined',
+                    mainMenuExists: document.getElementById('mainMenu') !== null,
+                    mainMenuChildren: document.getElementById('mainMenu')?.children.length ?? 0,
+                    bodyLength: document.body?.innerHTML?.length ?? 0
+                });
+            JS_WRAP);
+            $diagnostics = is_string($raw) ? $raw : '(non-string diagnostics)';
+        } catch (WebDriverException) {
+            // executeScript may fail on a stale session; narrower than
+            // catching Throwable so Error-tier programmer-bug failures
+            // here are not swallowed silently.
+            $diagnostics = 'unable to gather diagnostics (executeScript failed)';
+        }
+        return new TimeoutException(
+            "waitForAppReady() timed out after retry. Page state: {$diagnostics}"
+        );
+    }
+
+    private function switchToIFrame(string $xpath): void
+    {
+        $selector = WebDriverBy::xpath($xpath);
+        $iframe = $this->client->findElement($selector);
+        $this->client->switchTo()->frame($iframe);
+        $this->crawler = $this->client->refreshCrawler();
+    }
+
+    private function assertActiveTab(string $text, string $loading = "Loading", bool $looseTabTitle = false): void
+    {
+        // Retry loop to handle page transitions that can cause the active tab
+        // element to become stale. After accepting a JS alert dialog (e.g.,
+        // "Create Visit" when a visit already exists), the page may reload and
+        // replace the active tab element during waitForElementToNotContain.
+        $maxRetries = 3;
+        $lastException = null;
+
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            try {
+                // Wait for the active tab element to exist (handles page transitions)
+                $this->client->waitFor(XpathsConstants::ACTIVE_TAB);
+
+                // Wait for each loading indicator to disappear from the live DOM
+                foreach (explode('||', $loading) as $loadingText) {
+                    $this->client->waitForElementToNotContain(XpathsConstants::ACTIVE_TAB, $loadingText);
+                }
+
+                // Success - exit retry loop
+                $lastException = null;
+                break;
+            } catch (UnexpectedResponseException | StaleElementReferenceException $e) {
+                // Element became stale during the page transition - retry
+                $lastException = $e;
+                if ($attempt < $maxRetries) {
+                    usleep(500_000); // 500ms before retry
+                }
+            } catch (UnexpectedAlertOpenException $e) {
+                // An alert appeared after the goToMainMenuLink() wait window.
+                // Accept it and retry (the page may reload after accepting).
+                try {
+                    $this->client->getWebDriver()->switchTo()->alert()->accept();
+                } catch (NoAlertOpenException | NoSuchAlertException) {
+                    // Alert already dismissed (Error-tier failures propagate).
+                }
+                $lastException = $e;
+                if ($attempt < $maxRetries) {
+                    usleep(500_000); // 500ms before retry
+                }
+            }
+        }
+
+        if ($lastException !== null) {
+            throw $lastException;
+        }
+
+        $this->crawler = $this->client->refreshCrawler();
+        if ($looseTabTitle) {
+            $this->assertTrue(str_contains($this->crawler->filterXPath(XpathsConstants::ACTIVE_TAB)->text(), $text), "[$text] tab load FAILED");
+        } else {
+            $this->assertSame($text, $this->crawler->filterXPath(XpathsConstants::ACTIVE_TAB)->text(), "[$text] tab load FAILED");
+        }
+    }
+
+    private function assertActivePopup(string $text): void
+    {
+        $this->client->waitForElementToContain(XpathsConstants::MODAL_TITLE, $text);
+        $this->crawler = $this->client->refreshCrawler();
+        $this->assertSame($text, $this->crawler->filterXPath(XpathsConstants::MODAL_TITLE)->text(), "[$text] popup load FAILED");
+    }
+
+    private function goToMainMenuLink(string $menuLink, bool $acceptAlert = false): void
+    {
+        // ensure on main page (ie. not in an iframe)
+        $this->client->switchTo()->defaultContent();
+        // go to and click the menu link
+        $menuLinkSequenceArray = explode('||', $menuLink);
+        $counter = 0;
+        foreach ($menuLinkSequenceArray as $menuLinkItem) {
+            if ($counter == 0) {
+                if (count($menuLinkSequenceArray) > 1) {
+                    // start clicking through a dropdown/nested menu item
+                    $menuLink = '//div[@id="mainMenu"]/div/div/div/div[text()="' . $menuLinkItem . '"]';
+                } else {
+                    // just clicking a simple/single menu item
+                    $menuLink = '//div[@id="mainMenu"]/div/div/div[text()="' . $menuLinkItem . '"]';
+                }
+            } elseif ($counter == 1) {
+                if (count($menuLinkSequenceArray) == 2) {
+                    // click the nested menu item
+                    $menuLink = '//div[@id="mainMenu"]/div/div/div/div[text()="' . $menuLinkSequenceArray[0] . '"]/../ul/li/div[text()="' . $menuLinkItem . '"]';
+                } else {
+                    // continue clicking through a dropdown/nested menu item
+                    $menuLink = '//div[@id="mainMenu"]/div/div/div/div[text()="' . $menuLinkSequenceArray[0] . '"]/../ul/li/div/div[text()="' . $menuLinkItem . '"]';
+                }
+            } else { // $counter > 1
+                // click the nested menu item
+                $menuLink = '//div[@id="mainMenu"]/div/div/div/div[text()="' . $menuLinkSequenceArray[0] . '"]/../ul/li/div/div[text()="' . $menuLinkSequenceArray[1] . '"]/../ul/li/div[text()="' . $menuLinkItem . '"]';
+            }
+
+            // Use elementToBeClickable + direct WebDriver click instead of
+            // Panther's refreshCrawler/filterXPath/click, which can fail
+            // with stale DOM references if the page updates between the
+            // crawler snapshot and the click
+            $this->waitForClickable($menuLink, 30)->click();
+            $counter++;
+        }
+
+        if ($acceptAlert) {
+            // Accept any JavaScript alert/confirm that appears after clicking.
+            // Some menu items (e.g., "Create Visit") show a confirm dialog if
+            // a visit already exists for the patient today. Handle immediately
+            // after clicking to prevent the alert from blocking subsequent
+            // WebDriver operations.
+            try {
+                $this->client->wait(2)->until(function (RemoteWebDriver $driver): bool {
+                    try {
+                        $driver->switchTo()->alert()->accept();
+                        return true;
+                    } catch (NoAlertOpenException | NoSuchAlertException) {
+                        // No alert present on this poll (Error-tier
+                        // failures propagate).
+                        return false;
+                    }
+                });
+            } catch (TimeoutException) {
+                // No alert appeared, which is fine
+            }
+        }
+    }
+
+    private function goToUserMenuLink(string $menuTreeIcon): void
+    {
+        $menuLink = XpathsConstants::USER_MENU_ICON;
+        $menuLink2 = '//ul[@id="userdropdown"]//i[contains(@class, "' . $menuTreeIcon . '")]';
+        $this->waitForClickable($menuLink, 10)->click();
+        $this->waitForClickable($menuLink2, 10)->click();
+    }
+
+    /**
+     * Wait for the element matching the xpath to become clickable and return
+     * it as a WebDriverElement. Factored out so the mixed-return narrowing
+     * from WebDriverWait::until() lives in one place; typing it here keeps
+     * every caller's phpstan.ignore for method.nonObject off.
+     */
+    private function waitForClickable(string $xpath, int $timeoutSeconds): WebDriverElement
+    {
+        $element = $this->client->wait($timeoutSeconds)->until(
+            WebDriverExpectedCondition::elementToBeClickable(
+                WebDriverBy::xpath($xpath)
+            )
+        );
+        if (!$element instanceof WebDriverElement) {
+            throw new RuntimeException("waitForClickable did not resolve to a WebDriverElement for xpath: $xpath");
+        }
+        return $element;
+    }
+
+    private function isUserExist(string $username): bool
+    {
+        $usernameDatabase = QueryUtils::querySingleRow(
+            "SELECT `username` FROM `users` WHERE `username` = ?",
+            [$username]
+        );
+        return ($usernameDatabase['username'] ?? '') == $username;
+    }
+
+    private function isPatientExist(string $firstname, string $lastname, string $dob, string $sex): bool
+    {
+        $patientDatabase = QueryUtils::querySingleRow(
+            "SELECT `fname` FROM `patient_data` WHERE `fname` = ? AND `lname` = ? AND `DOB` = ? AND `sex` = ?",
+            [$firstname, $lastname, $dob, $sex]
+        );
+        $fname = $patientDatabase['fname'] ?? null;
+        return is_string($fname) && $fname !== '' && $fname === $firstname;
+    }
+
+    private function isEncounterExist(string $firstname, string $lastname, string $dob, string $sex): bool
+    {
+        $patientDatabase = QueryUtils::querySingleRow(
+            "SELECT `patient_data`.`fname`
+             FROM `patient_data`
+             INNER JOIN `form_encounter`
+             ON `patient_data`.`pid` = `form_encounter`.`pid`
+             WHERE `patient_data`.`fname` = ? AND `patient_data`.`lname` = ? AND `patient_data`.`DOB` = ? AND `patient_data`.`sex` = ?",
+            [$firstname, $lastname, $dob, $sex]
+        );
+        $fname = $patientDatabase['fname'] ?? null;
+        return is_string($fname) && $fname !== '' && $fname === $firstname;
+    }
+
+    private function logOut(): void
+    {
+        $this->client->switchTo()->defaultContent();
+        $this->goToUserMenuLink('fa-sign-out-alt');
+        $this->client->waitFor('//input[@id="authUser"]');
+        $title = $this->client->getTitle();
+        $this->assertSame('OpenEMR Login', $title, 'Logout FAILED');
+    }
+}

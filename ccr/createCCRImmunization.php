@@ -18,23 +18,30 @@
  *
  * @package OpenEMR
  * @author  Garden State Health Systems <http://www.gshsys.com/>
- * @link    http://www.open-emr.org
+ * @link    https://www.open-emr.org
  */
+
+use OpenEMR\BC\ServiceContainer;
 
     $result = getImmunizationData();
     $row = sqlFetchArray($result);
+
+/**
+ * @var \DOMDocument $ccr (created in createCCR.php)
+ * @var \DOMDocument $e_Immunizations (created in createCCR.php)
+ */
 
 do {
     $e_Immunization = $ccr->createElement('Immunization');
     $e_Immunizations->appendChild($e_Immunization);
 
-    $e_CCRDataObjectID = $ccr->createElement('CCRDataObjectID', getUuid());
+    $e_CCRDataObjectID = $ccr->createElement('CCRDataObjectID', ServiceContainer::getUuidFactory()->uuid4()->toString());
     $e_Immunization->appendChild($e_CCRDataObjectID);
 
     $e_DateTime = $ccr->createElement('DateTime');
     $e_Immunization->appendChild($e_DateTime);
 
-    $date = date_create($row['administered_date']);
+    $date = date_create($row['administered_date'] ?? '');
 
     $e_ExactDateTime = $ccr->createElement('ExactDateTime', $date->format('Y-m-d\TH:i:s\Z'));
     $e_DateTime->appendChild($e_ExactDateTime);
@@ -59,7 +66,7 @@ do {
     $e_ProductName = $ccr->createElement('ProductName');
     $e_Product->appendChild($e_ProductName);
 
-    $e_Text = $ccr->createElement('Text', $row['title']);
+    $e_Text = $ccr->createElement('Text', $row['title'] ?? '');
     $e_ProductName->appendChild($e_Text);
 
     $e_Directions = $ccr->createElement('Directions');
@@ -71,7 +78,7 @@ do {
     $e_Description = $ccr->createElement('Description');
     $e_Direction->appendChild($e_Description);
 
-    $e_Text = $ccr->createElement('Text', $row['note']);
+    $e_Text = $ccr->createElement('Text', $row['note'] ?? '');
     $e_Description->appendChild($e_Text);
 
     $e_Code = $ccr->createElement('Code');

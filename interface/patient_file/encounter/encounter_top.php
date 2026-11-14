@@ -4,43 +4,62 @@
  * This contains the tab set for encounter forms.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2017 Rod Roark <rod@sunsetsystems.com>
  * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(dirname(__FILE__) . '/../../globals.php');
-require_once("$srcdir/pid.inc");
-require_once("$srcdir/encounter.inc");
-require_once("$srcdir/forms.inc");
+// globals.php decides read-only vs writable session before it hands control
+// back, so the request has to be read here. globals.php calls CurrentRequest::get()
+// itself, so this is the same instance, not a second one.
+require_once dirname(__DIR__, 3) . '/vendor/autoload.php';
 
-use OpenEMR\Tabs\TabsWrapper;
+use OpenEMR\Common\Http\CurrentRequest;
+use OpenEMR\Common\Session\PatientSessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Tabs\TabsWrapper;
 
-if (isset($_GET["set_encounter"])) {
+// When invoked with set_encounter this script writes pid/encounter to the
+// session, so declare the write intent up front and take the session lock once.
+// Without it globals.php opens the session read-only (read_and_close) and each
+// setpid()/setencounter() call has to reopen it mid-request, which logs a
+// "Session reopened for writing after read_and_close" warning per write.
+// Requests without set_encounter (returning from an encounter form) do not
+// write, so they stay lock-free.
+$request = CurrentRequest::get();
+$sessionAllowWrite = $request->query->has('set_encounter');
+
+require_once(__DIR__ . '/../../globals.php');
+$srcdir = \OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir();
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+$encounter = $session->get('encounter', 0);
+$rootdir = \OpenEMR\Core\OEGlobalsBag::getInstance()->getString('rootdir');
+
+if ($request->query->has('set_encounter')) {
     // The billing page might also be setting a new pid.
-    if (isset($_GET["set_pid"])) {
-        $set_pid = $_GET["set_pid"];
-    } elseif (isset($_GET["pid"])) {
-        $set_pid = $_GET["pid"];
-    } else {
-        $set_pid = false;
+    $setPid = $request->query->getInt('set_pid') ?: $request->query->getInt('pid');
+    $setEncounter = $request->query->getInt('set_encounter');
+    // Switching to another patient or encounter needs a CSRF token in the link.
+    PatientSessionUtil::requireCsrfForLinkSwitch($request, $setPid ?: PatientSessionUtil::getPid(), $setEncounter);
+
+    if ($setPid > 0 && $setPid !== PatientSessionUtil::getPid()) {
+        setpid($setPid);
     }
 
-    if ($set_pid && $set_pid != $_SESSION["pid"]) {
-        setpid($set_pid);
-    }
-
-    setencounter($_GET["set_encounter"]);
+    setencounter($setEncounter);
 }
 
 $tabset = new TabsWrapper('enctabs');
 $tabset->declareInitialTab(
     xl('Summary'),
-    "<iframe frameborder='0' class='w-100' style='height:94.5%' src='forms.php'>Oops</iframe>"
+    "<iframe class='w-100' style='height:94.5vh;border: 0;' src='forms.php'>" . xlt('Problem loading.') . "</iframe>"
 );
 // We might have been invoked to load a particular encounter form.
 // In that case it will be the second tab, and removable.
@@ -48,16 +67,16 @@ if (!empty($_GET['formname'])) {
     $url = $rootdir . "/patient_file/encounter/load_form.php?formname=" . attr_url($_GET['formname']);
     $tabset->declareInitialTab(
         $_GET['formdesc'],
-        "<iframe name='enctabs-2' frameborder='0' class='w-100' style='height:94.5%' src='$url'>Oops</iframe>",
+        "<iframe name='enctabs-2' class='w-100' style='height:94.5vh;border: 0;' src='$url'>" . xlt('Problem loading.') . "</iframe>",
         true
     );
 }
 
 // This is for making the page title which will be picked up as the tab label.
 $dateres = getEncounterDateByEncounter($encounter);
-$encounter_date = date("Y-m-d", strtotime($dateres["date"]));
+$encounter_date = date("Y-m-d", strtotime((string) $dateres["date"]));
 ?>
-
+<!DOCTYPE html>
 <html>
 <head>
 <title><?php echo text(oeFormatShortDate($encounter_date)) . ' ' . xlt('Encounter'); ?></title>

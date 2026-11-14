@@ -4,7 +4,7 @@
  * Work/School Note Form print.php
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Nikolai Vitsyn
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2004-2005 Nikolai Vitsyn
@@ -14,26 +14,33 @@
 
 
 require_once(__DIR__ . "/../../globals.php");
-require_once("$srcdir/api.inc");
 
+use OpenEMR\Common\Forms\EncounterFormAccess;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$srcdir = OEGlobalsBag::getInstance()->getSrcDir();
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 
 $returnurl = 'encounter_top.php';
-$provider_results = sqlQuery("select fname, lname from users where username=?", array($_SESSION["authUser"]));
+$provider_results = sqlQuery("select fname, lname from users where username=?", [$session->get('authUser')]);
 
 /* name of this form */
 $form_name = "note";
 
+$formIdInput = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+$formId = is_int($formIdInput) && $formIdInput >= 0 ? $formIdInput : 0;
+EncounterFormAccess::assertFormBelongsToSessionPatient($formId, $form_name);
+
 // get the record from the database
-if ($_GET['id'] != "") {
-    $obj = formFetch("form_" . $form_name, $_GET["id"]);
+$obj = [];
+if ($formId > 0) {
+    $obj = formFetch("form_" . $form_name, $formId);
 }
 
-/* remove the time-of-day from the date fields */
-if ($obj['date_of_signature'] != "") {
-    $dateparts = explode(" ", $obj['date_of_signature']);
-    $obj['date_of_signature'] = $dateparts[0];
-}
 ?>
 <html><head>
 <title><?php echo "Form: note"?></title>
@@ -67,7 +74,7 @@ if ($obj['date_of_signature'] != "") {
 </td><td>
 <span class="text"><?php echo xlt('Date'); ?></span>
    <input type='text' size='10' name='date_of_signature' id='date_of_signature'
-    value='<?php echo attr($obj['date_of_signature']); ?>'
+    value='<?php echo attr(oeFormatShortDate($obj['date_of_signature'])); ?>'
     />
 </td></tr>
 </table>

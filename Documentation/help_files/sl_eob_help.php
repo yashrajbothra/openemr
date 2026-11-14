@@ -4,16 +4,18 @@
  * Access Control List Help.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Ranganath Pathak <pathak01@hotmail.com>
   * @version 1.0.0
  * @copyright Copyright (c) 2017 Ranganath Pathak <pathak01@hotmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
 
 require_once("../../interface/globals.php");
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 ?>
 <!DOCTYPE html>
 <html>
@@ -108,7 +110,7 @@ require_once("../../interface/globals.php");
                         </fieldset>
                 </form>
                 <br />
-                <p><?php echo xlt("Upon a successful search you are presented with a list of invoices. You may click on one of the invoice numbers to open a second window, which is the data entry page for manual posting. You may also click on a patient name if you want to enter a note that the front office staff will see when the patient checks in, and you may select invoices to appear on patient statements and print those statements.");?></p>
+                <p><?php echo xlt("Upon a successful search you are presented with a list of invoices. You may click on one of the invoice numbers to open a second window, which is the data entry page for manual posting. You may also click on the chart ID in the Billing Note column if you want to enter a note that the front office staff will see when the patient checks in, or on a patient name to open their encounters. Patient statements are printed, downloaded or emailed from Fees, Patient Statements.");?></p>
 
                 <p><?php echo xlt("Upon clicking an invoice number the 'manual posting window' appears. Here you can change the due date and notes for the invoice, select the party for whom you are posting, and select the insurances for which all expected payments have been received. Most importantly, for each billing code for which an amount was charged, you can enter payment and adjustment information.");?></p>
 
@@ -159,7 +161,7 @@ require_once("../../interface/globals.php");
                     <span><strong>
                     <?php
                     $url = (!empty($_SERVER['HTTPS']) && ($_SERVER['HTTPS'] == 'on')) ? 'https' : 'http';
-                    $url .= "://" . $_SERVER['HTTP_HOST'] . "$web_root/sites/" . $_SESSION['site_id'] . "/documents/era/";
+                    $url .= "://" . $_SERVER['HTTP_HOST'] . "$web_root/sites/" . $session->get('site_id') . "/documents/era/";
                     echo "$url";
                     ?>
                     </strong></span>

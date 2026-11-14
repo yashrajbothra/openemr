@@ -10,7 +10,7 @@
 namespace OpenEMR\Events\Globals;
 
 use OpenEMR\Services\Globals\GlobalsService;
-use Symfony\Component\EventDispatcher\Event;
+use Symfony\Contracts\EventDispatcher\Event;
 
 /**
  * Event object for creating custom global settings
@@ -28,19 +28,11 @@ class GlobalsInitializedEvent extends Event
     const EVENT_HANDLE = 'globals.initialized';
 
     /**
-     * @var array
-     *
-     * The globals service for manipulating globals data structure
-     */
-    private $globalsService = null;
-
-    /**
      * GlobalsInitializedEvent constructor.
-     * @param array $globalsService
+     * @param GlobalsService $globalsService
      */
-    public function __construct(GlobalsService $globalsService)
+    public function __construct(private readonly GlobalsService $globalsService)
     {
-        $this->globalsService = $globalsService;
     }
 
     /**

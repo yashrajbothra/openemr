@@ -6,271 +6,280 @@
  * @package   OpenEMR
  * @link      https://www.open-emr.org
  * @author    Jerry Padgett <sjpadgett@gmail.com>
- * @copyright Copyright (c) 2016-2017 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2016-2026 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
-var actpage = {
+const actpage = {
+    onsiteActivityViews: new model.OnsiteActivityViewCollection(),
+    isInitialized: false,
+    isInitializing: false,
+    fetchParams: {filter: '', orderBy: 'patientId', orderDesc: 'DESC', page: 1, status: 'waiting', requireAudit: 1},
+    fetchInProgress: false,
+    dialogIsOpen: false,
 
-	onsiteActivityViews: new model.OnsiteActivityViewCollection(),
-	collectionView: null,
-	onsiteActivityView: null,
-	modelView: null,
-	isInitialized: false,
-	isInitializing: false,
-	fetchParams: { filter: '', orderBy: 'patientId', orderDesc: 'DESC', page: 1, status: 'waiting' },
-	fetchInProgress: false,
-	dialogIsOpen: false,
+    /**
+     * Sets up the review list once: the return button, the payment, profile and document dialogs, and the list with its filter, sorting and paging.
+     */
+    init: function () {
+        // ensure initialization only occurs once
+        if (actpage.isInitialized || actpage.isInitializing) return;
+        actpage.isInitializing = true;
 
-	init: function() {
-		// ensure initialization only occurs once
-		if (actpage.isInitialized || actpage.isInitializing) return;
-		actpage.isInitializing = true;
+        // make the return button clickable
+        $("#returnHome").click(function (e) {
+            e.preventDefault();
+            window.location.href = './provider';
+        });
 
-		if (!$.isReady && console) console.warn('page was initialized before dom is ready.  views may not render properly.');
-
-		// make the return button clickable
-		$("#returnHome").click(function(e) {
-			e.preventDefault();
-			window.location.href = './provider';
-		});
-		function showPaymentModal(cpid,recid){
-			var title = 'Patient Online Payment';
-            var params = {
+        function showPaymentModal(cpid, recid) {
+            let title = 'Patient Online Payment';
+            const urlParams = new URLSearchParams({
+                pid: cpid,
+                recid: recid,
+                user: cuser
+            });
+            let params = {
                 buttons: [
                     {text: 'Help', close: false, style: 'info btn-sm', id: 'formHelp'},
-                    {text: 'Cancel', close: true, style: 'secondary btn-sm'},
                     {text: 'Done', style: 'danger btn-sm', close: true}],
                 onClosed: 'reload',
                 type: 'GET',
-                url: './../portal_payment.php?pid=' + encodeURIComponent(cpid) + '&user=' + encodeURIComponent(cuser) + '&recid=' + encodeURIComponent(recid)
+                url: './../portal_payment.php?' + urlParams
             };
             dlgopen('', '', 'modal-lg', 625, '', '', params);
-		}
+        }
+
         function showProfileModal(cpid) {
-            var title = 'Demographics Legend Red: Charted Values. Blue: Patient Edits' + ' ';
-            var params = {
+            let title = 'Profile Edits' + ' ';
+            const urlParams = new URLSearchParams({
+                pid: cpid,
+                user: cuser
+            });
+            let params = {
                 buttons: [
-                    { text: 'Help', close: false, style: 'info btn-sm',id: 'formHelp'},
-                    { text: 'Cancel', close: true, style: 'default btn-sm'},
-                    { text: 'Revert Edits', close: false, style: 'success btn-sm', id:'replaceAllButton'},
-                    { text: 'Commit to Chart', style: 'danger btn-sm', close: false, id:'savePatientButton'}],
+                    {text: 'Help', close: false, style: 'info btn-sm', id: 'formHelp'},
+                    {text: 'Cancel', close: true, style: 'default btn-sm'},
+                    {text: 'Revert Edits', close: false, style: 'success btn-sm', id: 'replaceAllButton'},
+                    {text: 'Commit to Chart', style: 'danger btn-sm', close: false, id: 'savePatientButton'}],
                 onClosed: 'reload',
                 sizeHeight: 'full',
                 allowDrag: false,
                 type: 'GET',
-                url: top.webroot_url + '/portal/patient/patientdata?pid=' + encodeURIComponent(cpid) + '&user=' + encodeURIComponent(cuser)
+                url: top.webroot_url + '/portal/patient/patientdata?' + urlParams
             };
-            dlgopen('','','modal-xl', '', '', title, params);
+            dlgopen('', '', 'modal-xl', '', '', title, params);
         }
+
         function showDocumentModal(cpid, recid) {
-            var title = 'Audit Document';
-            var params = {
+            let title = 'Audit Document';
+            const urlParams = new URLSearchParams({
+                pid: cpid,
+                recid: recid,
+                user: cuser
+            });
+            let params = {
                 buttons: [
                     {text: 'Help', close: false, style: 'info btn-sm', id: 'formHelp'},
-                    {text: 'Cancel', close: true, style: 'default btn-sm'},
                     {text: 'Done', style: 'danger btn-sm', close: true}],
                 sizeHeight: 'full',
                 onClosed: 'reload',
-                url: './onsitedocuments?pid=' + cpid + '&user=' + encodeURIComponent(cuser) + '&recid=' + encodeURIComponent(recid)
+                url: './onsitedocuments?' + urlParams
             };
             dlgopen('', '', 'modal-lg', '', '', '', params);
         }
 
-		// initialize the collection view
-		this.collectionView = new view.CollectionView({
-			el: $("#onsiteActivityViewCollectionContainer"),
-			templateEl: $("#onsiteActivityViewCollectionTemplate"),
-			collection: actpage.onsiteActivityViews
-		});
+        // initialize the search filter
+        $('#filter').change(function (obj) {
+            actpage.fetchParams.filter = $('#filter').val();
+            actpage.fetchParams.page = 1;
+            actpage.fetchOnsiteActivityViews(actpage.fetchParams);
+        });
 
-		// initialize the search filter
-		$('#filter').change(function(obj) {
-			actpage.fetchParams.filter = $('#filter').val();
-			actpage.fetchParams.page = 1;
-			actpage.fetchOnsiteActivityViews(actpage.fetchParams);
-		});
+        // make the rows clickable once the list is drawn
+        actpage.bindCollection = function () {
+            document.querySelectorAll('.delete-button').forEach(function (button) {
+                button.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    const updateId = this.getAttribute('data-update-id');
+                    const deleteId = this.getAttribute('data-delete-id');
+                    const url = '../lib/doc_lib.php';
 
-		// make the rows clickable ('rendered' is a custom event, not a standard backbone event)
-		this.collectionView.on('rendered',function(){
-			// attach click handler to the table rows for selection
-			$('table.collection tbody tr').click(function(e) {
-				e.preventDefault();
-				var m = actpage.onsiteActivityViews.get(this.id);
-				var cpid = m.get('patientId');
-				var activity = m.get('activity');
-				if(activity == 'document') {
+                    if (confirm(jsText('Are you sure you want to delete this audit?\nThis action cannot be undone.'))) {
+                        // Create a FormData object to hold POST data
+                        let formData = new FormData();
+                        formData.append('dispose', 'audit_delete');
+                        formData.append('update_id', updateId);
+                        formData.append('delete_id', deleteId);
+                        formData.append('csrf_token_form', csrfToken);
+
+                        fetch(url, {
+                            method: 'POST',
+                            body: formData
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success) {
+                                this.closest('tr').remove();
+                            } else {
+                                alert('Error deleting document: ' + jsText(data.message));
+                            }
+                        })
+                        .catch(error => {
+                            alert('An error occurred: ' + jsText(error.message));
+                        });
+
+                        return false; // Stop the event propagation
+                    }
+                    return false;
+                });
+            });
+
+            // attach click handler to the table rows for selection
+            $('table.collection tbody tr').click(function (e) {
+                e.preventDefault();
+                // ignore event on the last cell (the delete button)
+                if ($(e.target).closest('td').is($(this).find('td').last())) {
+                    return;
+                }
+
+                let m = actpage.onsiteActivityViews.get(this.id);
+                let cpid = m.get('patientId');
+                let activity = m.get('activity');
+                let eventData = {
+                    activity: activity
+                    , cpid: cpid
+                    , modelAttributes: m.attributes
+                };
+
+                // this is a custom event that will bubble up to the window
+                let node = document.createElement("tr");
+                // note this is a synchronous operation! event consumers should not do anything that takes a long time
+                // or they should fire off async work and return immediately
+                let event = new CustomEvent('openemr:portal:provider:onsiteactivityview:click',
+                    {bubbles: true, detail: eventData, cancelable: true});
+                let continueExecution = e.target.dispatchEvent(event);
+                if (!continueExecution) { // prevent default was called
+                    return;
+                }
+
+                if (activity === 'document') {
                     let recid = m.get('tableArgs');
                     showDocumentModal(cpid, recid);
-                }
-				else if(activity == 'profile') {
+                } else if (activity === 'profile') {
                     showProfileModal(cpid);
-                }
-				else if(activity == 'payment') {
+                } else if (activity === 'payment') {
                     let recid = m.get('id');
                     showPaymentModal(cpid, recid);
                 }
-			});
+            });
+            // make the headers clickable for sorting
+            $('table.collection thead tr th').click(function (e) {
+                e.preventDefault();
+                let prop = this.id.replace('header_', '');
+                // toggle the ascending/descending before we change the sort prop
+                actpage.fetchParams.orderDesc = (prop == actpage.fetchParams.orderBy && !actpage.fetchParams.orderDesc) ? '1' : '';
+                actpage.fetchParams.orderBy = prop;
+                actpage.fetchParams.page = 1;
+                actpage.fetchOnsiteActivityViews(actpage.fetchParams);
+            });
+            // attach click handlers to the pagination controls
+            $('.pageButton').click(function (e) {
+                e.preventDefault();
+                actpage.fetchParams.page = this.id.substr(5);
+                actpage.fetchOnsiteActivityViews(actpage.fetchParams);
+            });
 
-			// make the headers clickable for sorting
- 			$('table.collection thead tr th').click(function(e) {
- 				e.preventDefault();
-				var prop = this.id.replace('header_','');
+            actpage.isInitialized = true;
+            actpage.isInitializing = false;
+        };
 
-				// toggle the ascending/descending before we change the sort prop
-				actpage.fetchParams.orderDesc = (prop == actpage.fetchParams.orderBy && !actpage.fetchParams.orderDesc) ? '1' : '';
-				actpage.fetchParams.orderBy = prop;
-				actpage.fetchParams.page = 1;
- 				actpage.fetchOnsiteActivityViews(actpage.fetchParams);
- 			});
+        const initialParams = {
+            filter: '',
+            orderBy: 'Date',
+            orderDesc: 'DESC',
+            page: 1,
+            status: 'waiting',
+            requireAudit: 1
+        };
+        const requestedActivity = new URLSearchParams(window.location.search).get('activity');
+        if (requestedActivity === 'payment') {
+            initialParams.activity = requestedActivity;
+        }
+        this.fetchOnsiteActivityViews(initialParams);
+    },
 
-			// attach click handlers to the pagination controls
-			$('.pageButton').click(function(e) {
-				e.preventDefault();
-				actpage.fetchParams.page = this.id.substr(5);
-				actpage.fetchOnsiteActivityViews(actpage.fetchParams);
-			});
+    /**
+     * Draw the list from the last fetch: a row per activity, then the pager.
+     */
+    renderCollection: function () {
+        const container = view.renderTemplate('onsiteActivityViewCollectionTemplate', 'onsiteActivityViewCollectionContainer');
+        const tbody = container.querySelector('tbody');
+        actpage.onsiteActivityViews.forEach(function (item) {
+            const row = view.copyTemplate('onsiteActivityViewRowTemplate').firstElementChild;
+            const cell = (field) => row.querySelector('[data-field="' + field + '"]');
+            row.id = item.get('id') ?? '';
+            cell('id').textContent = item.get('id') || '';
+            cell('date').textContent = item.get('date')
+                ? moment(app.parseDate(item.get('date'))).format('MMM D, YYYY h:mm A')
+                : 'NULL';
+            ['patientId', 'fname', 'mname', 'lname', 'narrative', 'activity', 'pendingAction', 'status'].forEach(function (field) {
+                cell(field).textContent = item.get(field) || '';
+            });
+            cell('amount').textContent = actpage.amountText(item);
+            const deleteButton = row.querySelector('.delete-button');
+            deleteButton.setAttribute('data-update-id', item.get('id') || '');
+            deleteButton.setAttribute('data-delete-id', item.get('tableArgs') || '');
+            tbody.append(row);
+        });
+        container.append(view.pagination(actpage.onsiteActivityViews));
+        actpage.bindCollection();
+    },
 
-			actpage.isInitialized = true;
-			actpage.isInitializing = false;
-		});
+    /**
+     * The Amount column: the payment total for a payment, a label for a profile change, and
+     * otherwise the activity's arguments as stored.
+     */
+    amountText: function (item) {
+        if (item.get('activity') === 'profile') {
+            return 'Demographic Profile Changes';
+        }
+        try {
+            const args = JSON.parse(item.get('tableArgs') || '{}');
+            if (args.form_paytotal) {
+                return '$' + args.form_paytotal;
+            }
+        } catch {
+            // not JSON: show it as stored
+        }
+        return item.get('tableArgs') || '';
+    },
 
-		this.fetchOnsiteActivityViews({ filter: '', orderBy: 'Date', orderDesc: 'DESC', page: 1, status: 'waiting' });
+    /**
+     * Fetch the collection data from the server
+     * @param object params passed through to collection.fetch
+     * @param bool true to hide the loading animation
+     */
+    fetchOnsiteActivityViews: function (params, hideLoader) {
+        // persist the params so that paging/sorting/filtering will play together nicely
+        //params.status = 'waiting';
+        actpage.fetchParams = params;
 
-		// initialize the model view
-		this.modelView = new view.ModelView({
-			el: $("#onsiteActivityViewModelContainer")
-		});
+        if (actpage.fetchInProgress) {
+            if (console) console.log('supressing fetch because it is already in progress');
+        }
 
-		this.modelView.templateEl = $("#onsiteActivityViewModelTemplate");
+        actpage.fetchInProgress = true;
 
-		if (model.longPollDuration > 0)	{
-			setInterval(function () {
+        if (!hideLoader) app.showProgress('loader');
 
-				if (!actpage.dialogIsOpen)	{
-					actpage.fetchOnsiteActivityViews(actpage.fetchParams,true);
-				}
-
-			}, model.longPollDuration);
-		}
-	},
-
-	/**
-	 * Fetch the collection data from the server
-	 * @param object params passed through to collection.fetch
-	 * @param bool true to hide the loading animation
-	 */
-	fetchOnsiteActivityViews: function(params, hideLoader) {
-		// persist the params so that paging/sorting/filtering will play together nicely
-		//params.status = 'waiting';
-		actpage.fetchParams = params;
-
-		if (actpage.fetchInProgress) {
-			if (console) console.log('supressing fetch because it is already in progress');
-		}
-
-		actpage.fetchInProgress = true;
-
-		if (!hideLoader) app.showProgress('loader');
-
-		actpage.onsiteActivityViews.fetch({
-
-			data: params,
-
-			success: function() {
-				if (actpage.onsiteActivityViews.collectionHasChanged) {
-					// TODO: add any logic necessary if the collection has changed
-					// the sync event will trigger the view to re-render
-				}
-				app.hideProgress('loader');
-				actpage.fetchInProgress = false;
-			},
-			error: function(m, r) {
-				app.appendAlert(app.getErrorMessage(r), 'alert-error',0,'collectionAlert');
-				app.hideProgress('loader');
-				actpage.fetchInProgress = false;
-			}
-		});
-	},
-
-	/**
-	 * show the dialog for editing a model
-	 * @param model
-	 */
-	showDetailDialog: function(m) {
-
-		// show the modal dialog
-		$('#onsiteActivityViewDetailDialog').modal({ show: true });
-
-		// if a model was specified then that means a user is editing an existing record
-		// if not, then the user is creating a new record
-		actpage.onsiteActivityView = m ? m : new model.OnsiteActivityViewModel();
-
-		actpage.modelView.model = actpage.onsiteActivityView;
-
-		if (actpage.onsiteActivityView.id == null || actpage.onsiteActivityView.id == '') {
-			// this is a new record, there is no need to contact the server
-			actpage.renderModelView(false);
-		} else {
-			app.showProgress('modelLoader');
-
-			// fetch the model from the server so we are not updating stale data
-			actpage.onsiteActivityView.fetch({
-
-				success: function() {
-					// data returned from the server.  render the model view
-					actpage.renderModelView(true);
-				},
-
-				error: function(m, r) {
-					app.appendAlert(app.getErrorMessage(r), 'alert-error',0,'modelAlert');
-					app.hideProgress('modelLoader');
-				}
-
-			});
-		}
-	},
-
-	/**
-	 * Render the model template in the popup
-	 * @param bool show the delete button
-	 */
-	renderModelView: function(showDeleteButton)	{
-		actpage.modelView.render();
-
-		app.hideProgress('modelLoader');
-		// initialize any special controls
-		try {
-			$('.date-picker')
-				.datepicker()
-				.on('changeDate', function(ev){
-					$('.date-picker').datepicker('hide');
-				});
-		} catch (error) {
-			// this happens if the datepicker input.value isn't a valid date
-			if (console) console.log('datepicker error: '+error.message);
-		}
-		if (showDeleteButton) {
-			// attach click handlers to the delete buttons
-			$('#deleteOnsiteActivityViewButton').click(function(e) {
-				e.preventDefault();
-				$('#confirmDeleteOnsiteActivityViewContainer').show('fast');
-			});
-
-			$('#cancelDeleteOnsiteActivityViewButton').click(function(e) {
-				e.preventDefault();
-				$('#confirmDeleteOnsiteActivityViewContainer').hide('fast');
-			});
-
-			$('#confirmDeleteOnsiteActivityViewButton').click(function(e) {
-				e.preventDefault();
-				actpage.deleteModel();
-			});
-
-		} else {
-			// no point in initializing the click handlers if we don't show the button
-			$('#deleteOnsiteActivityViewButtonContainer').hide();
-		}
-	},
-
+        actpage.onsiteActivityViews.fetch(params).then(function () {
+            app.hideProgress('loader');
+            actpage.fetchInProgress = false;
+            actpage.renderCollection();
+        }, function (error) {
+            app.appendAlert(app.getErrorMessage(error), 'alert-error', 0, 'collectionAlert');
+            app.hideProgress('loader');
+            actpage.fetchInProgress = false;
+        });
+    }
 };
-

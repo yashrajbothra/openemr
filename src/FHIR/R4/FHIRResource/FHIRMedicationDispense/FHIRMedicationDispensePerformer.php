@@ -155,7 +155,7 @@ class FHIRMedicationDispensePerformer extends FHIRBackboneElement implements \Js
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -163,7 +163,7 @@ class FHIRMedicationDispensePerformer extends FHIRBackboneElement implements \Js
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->function)) {
@@ -176,15 +176,13 @@ class FHIRMedicationDispensePerformer extends FHIRBackboneElement implements \Js
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<MedicationDispensePerformer xmlns="http://hl7.org/fhir"></MedicationDispensePerformer>');
-        }
+        $sxe ??= new \SimpleXMLElement('<MedicationDispensePerformer xmlns="http://hl7.org/fhir"></MedicationDispensePerformer>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->function)) {
             $this->function->xmlSerialize(true, $sxe->addChild('function'));

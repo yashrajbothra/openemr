@@ -5,7 +5,7 @@
  * export data for the system.  If a Fhir Resource Service is in the correct namespace and implements this service it
  * will be picked up the by export service locator.
  * @package openemr
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Stephen Nielson <stephen@nielson.org>
  * @copyright Copyright (c) 2021 Stephen Nielson <stephen@nielson.org>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -18,6 +18,8 @@ use OpenEMR\FHIR\Export\ExportException;
 use OpenEMR\FHIR\Export\ExportJob;
 use OpenEMR\FHIR\Export\ExportStreamWriter;
 use OpenEMR\FHIR\Export\ExportWillShutdownException;
+use OpenEMR\Services\Search\FhirSearchParameterDefinition;
+use OpenEMR\Services\Search\ISearchField;
 
 interface IFhirExportableResourceService
 {
@@ -33,14 +35,14 @@ interface IFhirExportableResourceService
      * @throws ExportException  If there is an error in processing the export
      * @return void
      */
-    function export(ExportStreamWriter $writer, ExportJob $job, $lastResourceIdExported = null): void;
+    public function export(ExportStreamWriter $writer, ExportJob $job, $lastResourceIdExported = null): void;
 
     /**
      * Returns whether the service supports the system export operation
      * @see https://hl7.org/fhir/uv/bulkdata/export/index.html#endpoint---system-level-export
      * @return bool true if this resource service should be called for a system export operation, false otherwise
      */
-    function supportsSystemExport();
+    public function supportsSystemExport();
 
     /**
      * Returns whether the service supports the group export operation.
@@ -49,7 +51,7 @@ interface IFhirExportableResourceService
      * @see https://hl7.org/fhir/uv/bulkdata/export/index.html#endpoint---group-of-patients
      * @return bool true if this resource service should be called for a group export operation, false otherwise
      */
-    function supportsGroupExport();
+    public function supportsGroupExport();
 
     /**
      * Returns whether the service supports the all patient export operation
@@ -58,5 +60,13 @@ interface IFhirExportableResourceService
      * @see https://hl7.org/fhir/uv/bulkdata/export/index.html#endpoint---all-patients
      * @return bool true if this resource service should be called for a patient export operation, false otherwise
      */
-    function supportsPatientExport();
+    public function supportsPatientExport();
+
+    /**
+     * Returns the search field that represents the last modified date for the resource used in the export _since
+     * parameter for the export operation.  If the resource does not support the _since parameter then this method
+     * will return null and the export should return ALL the resources for the resource service.
+     * @return ISearchField|null The search field that represents the last modified date for the resource
+     */
+    public function getLastModifiedSearchField(): ?FhirSearchParameterDefinition;
 }

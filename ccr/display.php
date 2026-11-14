@@ -1,68 +1,100 @@
 <?php
 
-require_once(dirname(__FILE__) . "/../interface/globals.php");
+/**
+ * display.php  Is responsible for display a CCR/CCD/CCDA document previewed from the documents folder.
+ *
+ * @package openemr
+ * @link      https://www.open-emr.org
+ * @author    Ajil P.M <ajilpm@zhservices.com>
+ * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
+ * @deprecated 7.0.0 People should use the /interface/modules/zend_modules/public/encountermanager/previewDocument?docId=<id> REST action instead of this file
+ * @copyright Copyright (c) 2011 Z&H Consultancy Services Private Limited <ajilpm@zhservices.com>
+ * @copyright Copyright (c) 2013 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2022 Discover and Change <snielson@discoverandchange.com>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
+require_once(__DIR__ . "/../interface/globals.php");
+
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Http\RequestTerminator;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\PatientDocuments\PatientDocumentViewCCDAEvent;
+use Symfony\Component\HttpFoundation\Response;
 
 $type = $_GET['type'];
 $document_id = $_GET['doc_id'];
 $d = new Document($document_id);
-$url =  $d->get_url();
-$storagemethod = $d->get_storagemethod();
-$couch_docid = $d->get_couch_docid();
-$couch_revid = $d->get_couch_revid();
 
-if ($couch_docid && $couch_revid) {
-    $couch = new CouchDB();
-    $resp = $couch->retrieve_doc($couch_docid);
-    $xml = base64_decode($resp->data);
-    if ($content == '' && $GLOBALS['couchdb_log'] == 1) {
-        $log_content = date('Y-m-d H:i:s') . " ==> Retrieving document\r\n";
-        $log_content = date('Y-m-d H:i:s') . " ==> URL: " . $url . "\r\n";
-        $log_content .= date('Y-m-d H:i:s') . " ==> CouchDB Document Id: " . $couch_docid . "\r\n";
-        $log_content .= date('Y-m-d H:i:s') . " ==> CouchDB Revision Id: " . $couch_revid . "\r\n";
-        $log_content .= date('Y-m-d H:i:s') . " ==> Failed to fetch document content from CouchDB.\r\n";
-        //$log_content .= date('Y-m-d H:i:s')." ==> Will try to download file from HardDisk if exists.\r\n\r\n";
-        $this->document_upload_download_log($d->get_foreign_id(), $log_content);
-        die(xlt("File retrieval from CouchDB failed"));
-    }
-} else {
-    $url = preg_replace("|^(.*)://|", "", $url);
-  // Collect filename and path
-    $from_all = explode("/", $url);
-    $from_filename = array_pop($from_all);
-    $from_pathname_array = array();
-    for ($i = 0; $i < $d->get_path_depth(); $i++) {
-        $from_pathname_array[] = array_pop($from_all);
-    }
-
-    $from_pathname_array = array_reverse($from_pathname_array);
-    $from_pathname = implode("/", $from_pathname_array);
-    $temp_url = $GLOBALS['OE_SITE_DIR'] . '/documents/' . $from_pathname . '/' . $from_filename;
-    if (!file_exists($temp_url)) {
-        echo xl('The requested document is not present at the expected location on the filesystem or there are not sufficient permissions to access it.', '', '', ' ') . $temp_url;
+$ccrDisplaySession = SessionWrapperFactory::getInstance()->getActiveSession();
+$ccrDisplaySessionPid = (int) ($ccrDisplaySession->get('pid') ?? 0);
+$ccrDisplayDocPid = (int) $d->get_foreign_id();
+$ccrDisplayPatientAuthorized = false;
+if ($ccrDisplayDocPid > 0) {
+    if ($ccrDisplaySessionPid > 0) {
+        $ccrDisplayPatientAuthorized = $ccrDisplaySessionPid === $ccrDisplayDocPid;
     } else {
-        $url = $temp_url;
-        $f = fopen($url, "r");
-        $xml = fread($f, filesize($url));
-        fclose($f);
+        $ccrDisplayPatientAuthorized = AclMain::aclCheckCore('patients', 'docs') !== false;
     }
 }
 
-if ($type == "CCR") {
-    $xmlDom = new DOMDocument();
-    $xmlDom->loadXML($xml);
-    $ss = new DOMDocument();
-    $ss->load(dirname(__FILE__) . '/stylesheet/ccr.xsl');
-    $proc = new XSLTProcessor();
-    $proc->importStylesheet($ss);
-    $s_html = $proc->transformToXML($xmlDom);
-    echo $s_html;
-} else {
-    $xmlDom = new DOMDocument();
-    $xmlDom->loadXML($xml);
-    $ss = new DOMDocument();
-        $ss->load(dirname(__FILE__) . '/stylesheet/cda.xsl');
-        $xslt = new XSLTProcessor();
-        $xslt->importStyleSheet($ss);
-        $html = $xslt->transformToXML($xmlDom);
-        echo $html;
+try {
+    $twig = ServiceContainer::getTwig();
+    // The script runs in a legacy entry point whose output may already have
+    // been buffered by the time RequestTerminator wants to set a status.
+    // Emit the HTTP status with http_response_code() before any rendering so
+    // the deny path reaches the wire with the intended code instead of a 200.
+    // can_access will check session if no params are passed.
+    if (!$d->can_access() || !$ccrDisplayPatientAuthorized) {
+        http_response_code(Response::HTTP_UNAUTHORIZED);
+        (new RequestTerminator())->respond(new Response(
+            $twig->render("error/400.html.twig", ['statusCode' => 401, 'errorMessage' => 'Access Denied']),
+            Response::HTTP_UNAUTHORIZED,
+        ));
+    } elseif ($d->is_deleted()) {
+        http_response_code(Response::HTTP_NOT_FOUND);
+        (new RequestTerminator())->respond(new Response(
+            $twig->render("error/404.html.twig"),
+            Response::HTTP_NOT_FOUND,
+        ));
+    }
+
+    $xml = $d->get_data();
+    if (empty($xml)) {
+        http_response_code(Response::HTTP_NOT_FOUND);
+        (new RequestTerminator())->respond(new Response(
+            $twig->render("error/404.html.twig"),
+            Response::HTTP_NOT_FOUND,
+        ));
+    }
+
+    $viewCCDAEvent = new PatientDocumentViewCCDAEvent();
+    $viewCCDAEvent->setCcdaType($type); // not sure if we want to send the old CCR... but I guess module authors can use it if they want
+    if (!empty($d->get_foreign_reference_id())) {
+        $viewCCDAEvent->setCcdaId($d->get_foreign_reference_id());
+    }
+
+    $viewCCDAEvent->setDocumentId($d->get_id());
+    $viewCCDAEvent->setContent($d->get_data());
+    $viewCCDAEvent->setFormat("html");
+
+    $updatedViewCCDAEvent = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher()->dispatch($viewCCDAEvent, PatientDocumentViewCCDAEvent::EVENT_NAME);
+
+    $content = $updatedViewCCDAEvent->getContent();
+    if (empty($content)) {
+        // TODO: @adunsulag log the security error as someone is trying to do a remote file inclusion
+        (new RequestTerminator())->respond(new Response(
+            $twig->render("error/general_http_error.html.twig", ['statusCode' => 500, 'errorMessage' => 'System error occurred in processing content']),
+            Response::HTTP_INTERNAL_SERVER_ERROR,
+        ));
+    }
+    echo $updatedViewCCDAEvent->getContent();
+} catch (\Throwable $exception) {
+    ServiceContainer::getLogger()->error(
+        "Failed to generate ccda for view",
+        ['exception' => $exception, 'type' => $type, 'document_id' => $document_id]
+    );
 }

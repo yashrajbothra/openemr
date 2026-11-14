@@ -14,16 +14,12 @@
 
 require_once("../../interface/globals.php");
 
+use Html2Text\Html2Text;
 use OpenEMR\Common\Csrf\CsrfUtils;
 use OpenEMR\Common\Logging\EventAuditLogger;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 
-if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-    CsrfUtils::csrfNotVerified();
-}
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 
-$instance = new html2text($_POST['comments']);
-$h2t = &$instance;
-$h2t->width = 0;
-$h2t->_convert(false);
-
-EventAuditLogger::instance()->newEvent("print", $_SESSION['authUser'], $_SESSION['authProvider'], 1, $h2t->get_text());
+EventAuditLogger::getInstance()->newEvent("print", $session->get('authUser'), $session->get('authProvider'), 1, (new Html2Text($_POST['comments'], ['do_links' => 'none', 'width' => 0]))->getText());

@@ -2,7 +2,7 @@
  * frame_proxies.js
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Kevin Yeh <kevin.y@integralemr.com>
  * @copyright Copyright (c) 2016 Kevin Yeh <kevin.y@integralemr.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -24,7 +24,7 @@ var left_nav = {
 
 };
 
-left_nav.setPatient = function(pname, pid, pubpid, frname, str_dob)
+left_nav.setPatient = function(pname, pid, pubpid, frname, str_dob, hasPicture)
 {
     if((app_view_model.application_data.patient()!==null) && (pid===app_view_model.application_data.patient().pid()))
     {
@@ -34,9 +34,15 @@ left_nav.setPatient = function(pname, pid, pubpid, frname, str_dob)
 
         return;
     }
-    var new_patient=new patient_data_view_model(pname,pid,pubpid,str_dob);
+    var new_patient=new patient_data_view_model(pname,pid,pubpid,str_dob,hasPicture);
     app_view_model.application_data.patient(new_patient);
     app_view_model.application_data.therapy_group(null);
+
+    if (WindowTitleAddPatient)
+    {
+        top.document.title = WindowTitleBase + " - " + pname;
+    }
+
     navigateTab(webroot_url+"/interface/patient_file/history/encounters.php","enc", function () {
         tabCloseByName('rev');
     });
@@ -99,6 +105,23 @@ left_nav.loadFrame=function(id,name,url)
         activateTabByName(name,true);
     });
 };
+
+// Promise-based loadFrame function
+function asyncLoadFrame(id, name, url) {
+    return new Promise((resolve, reject) => {
+        try {
+            if (name === "") {
+                name = 'enc';
+            }
+            navigateTab(webroot_url + "/interface/" + url, name, function () {
+                activateTabByName(name, true);
+                resolve(); // Resolve the Promise after successful tab activation
+            });
+        } catch (error) {
+            reject(error); // Reject the Promise on error
+        }
+    });
+}
 
 left_nav.syncRadios = function()
 {

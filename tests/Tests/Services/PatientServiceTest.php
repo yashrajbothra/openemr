@@ -2,31 +2,39 @@
 
 namespace OpenEMR\Tests\Services;
 
-use PHPUnit\Framework\TestCase;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\Services\PatientService;
 use OpenEMR\Tests\Fixtures\FixtureManager;
+use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\TestCase;
 
 /**
  * Patient Service Tests
- * @coversDefaultClass OpenEMR\Services\PatientService
+ *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Dixon Whitmire <dixonwh@gmail.com>
  * @copyright Copyright (c) 2020 Dixon Whitmire <dixonwh@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  *
  */
+
 class PatientServiceTest extends TestCase
 {
+    /**
+     * @var PatientService
+     */
     private $patientService;
     private $fixtureManager;
+
+    private array $patientFixture;
 
     protected function setUp(): void
     {
         $this->patientService = new PatientService();
         $this->fixtureManager = new FixtureManager();
-        $this->patientFixture = (array) $this->fixtureManager->getSinglePatientFixture();
+        $this->patientFixture = $this->fixtureManager->getSinglePatientFixture();
     }
 
     protected function tearDown(): void
@@ -34,23 +42,21 @@ class PatientServiceTest extends TestCase
         $this->fixtureManager->removePatientFixtures();
     }
 
-    /**
-     * @covers ::getFreshPid
-     */
-    public function testGetFreshPid()
+    #[Test]
+    public function testGetFreshPid(): void
     {
         $actualValue = $this->patientService->getFreshPid();
         $this->assertGreaterThan(0, $actualValue);
     }
 
-    /**
-     * @covers ::insert when the data is invalid
-     */
-    public function testInsertFailure()
+    #[Test]
+    public function testInsertFailure(): void
     {
-        $this->patientFixture["fname"] = "A";
+        $this->patientFixture["fname"] = "";
         $this->patientFixture["DOB"] = "12/27/2017";
-        unset($this->patientFixture["sex"]);
+        if (isset($this->patientFixture["sex"])) {
+            unset($this->patientFixture["sex"]);
+        }
 
         $actualResult = $this->patientService->insert($this->patientFixture);
 
@@ -62,10 +68,8 @@ class PatientServiceTest extends TestCase
         $this->assertEquals(3, count($actualResult->getValidationMessages()));
     }
 
-    /**
-     * @covers ::insert when the data is valid
-     */
-    public function testInsertSuccess()
+    #[Test]
+    public function testInsertSuccess(): void
     {
         $actualResult = $this->patientService->insert($this->patientFixture);
         $this->assertTrue($actualResult->isValid());
@@ -83,14 +87,12 @@ class PatientServiceTest extends TestCase
         $this->assertFalse($actualResult->hasInternalErrors());
     }
 
-    /**
-     * @covers ::update when the data is not valid
-     */
-    public function testUpdateFailure()
+    #[Test]
+    public function testUpdateFailure(): void
     {
         $this->patientService->insert($this->patientFixture);
 
-        $this->patientFixture["fname"] = "A";
+        $this->patientFixture["fname"] = "";
 
         $actualResult = $this->patientService->update("not-a-uuid", $this->patientFixture);
 
@@ -101,10 +103,8 @@ class PatientServiceTest extends TestCase
         $this->assertEquals(2, count($actualResult->getValidationMessages()));
     }
 
-    /**
-     * @covers ::update when the data is valid
-     */
-    public function testUpdateSuccess()
+    #[Test]
+    public function testUpdateSuccess(): void
     {
         $actualResult = $this->patientService->insert($this->patientFixture);
         $this->assertTrue($actualResult->isValid());
@@ -127,11 +127,40 @@ class PatientServiceTest extends TestCase
         $this->assertEquals("555-111-4444", $result["phone_home"]);
     }
 
-    /**
-     * @cover ::getOne
-     * @cover ::getAll
-     */
-    public function testPatientQueries()
+    #[Test]
+    public function testUpdateBackfillsPortalLoginUsername(): void
+    {
+        $actualResult = $this->patientService->insert($this->patientFixture);
+        $this->assertTrue($actualResult->isValid());
+        $data = $actualResult->getData();
+        $this->assertIsArray($data);
+        $dataResult = $data[0];
+        $this->assertIsArray($dataResult);
+        $pid = $dataResult['pid'];
+
+        // Create portal credentials with a username but empty login username
+        QueryUtils::sqlStatementThrowException(
+            "INSERT INTO patient_access_onsite (pid, portal_username, portal_login_username) VALUES (?, ?, '')",
+            [$pid, 'testportaluser']
+        );
+
+        try {
+            // Update patient with portal access enabled via databaseUpdate() —
+            // this is the code path used by demographics_save.php where the fix lives
+            $this->patientFixture['pid'] = $pid;
+            $this->patientFixture['allow_patient_portal'] = 'YES';
+            $this->patientService->databaseUpdate($this->patientFixture);
+
+            $row = QueryUtils::querySingleRow("SELECT portal_login_username FROM patient_access_onsite WHERE pid = ?", [$pid]);
+            $this->assertIsArray($row);
+            $this->assertSame('testportaluser', $row['portal_login_username']);
+        } finally {
+            QueryUtils::sqlStatementThrowException("DELETE FROM patient_access_onsite WHERE pid = ?", [$pid]);
+        }
+    }
+
+    #[Test]
+    public function testPatientQueries(): void
     {
         $this->fixtureManager->installPatientFixtures();
 
@@ -163,11 +192,11 @@ class PatientServiceTest extends TestCase
         $this->assertEquals(0, count($actualResult->getData()));
 
         // getAll
-        $actualResult = $this->patientService->getAll(array("postal_code" => "90210"));
+        $actualResult = $this->patientService->getAll(["postal_code" => "90210"]);
         $this->assertNotNull($actualResult);
         $this->assertGreaterThan(1, count($actualResult->getData()));
 
-        foreach ($actualResult->getData() as $index => $patientRecord) {
+        foreach ($actualResult->getData() as $patientRecord) {
             $this->assertArrayHasKey("fname", $resultData);
             $this->assertArrayHasKey("lname", $resultData);
             $this->assertArrayHasKey("sex", $resultData);
@@ -175,5 +204,17 @@ class PatientServiceTest extends TestCase
             $this->assertArrayHasKey("uuid", $resultData);
             $this->assertEquals("90210", $patientRecord["postal_code"]);
         }
+    }
+
+    #[Test]
+    public function testGetDateColumnsClassifiesPatientDataColumns(): void
+    {
+        $columns = $this->patientService->getDateColumns();
+
+        $this->assertContains('DOB', $columns['date']);
+        $this->assertContains('date', $columns['datetime']);
+        $this->assertNotContains('DOB', $columns['datetime']);
+        $this->assertNotContains('fname', $columns['date']);
+        $this->assertNotContains('fname', $columns['datetime']);
     }
 }

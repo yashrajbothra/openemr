@@ -4,7 +4,14 @@ var clickmap = function(args) {
 	let counter = 0;
 
 	const fn_buildMarker = function(x, y, pos, annotation) {
-        const legendItem = $("<li class='legend-item'><b>" + pos + "</b> " + decodeURIComponent(annotation) + "</li>");
+        // Build legend item safely using DOM methods to prevent XSS
+        const legendItem = $("<li class='legend-item'></li>");
+        const decodedAnnotation = annotation ? decodeURIComponent(annotation) : "";
+        legendItem.append(
+            $("<b></b>").text(pos),
+            " ",
+            document.createTextNode(decodedAnnotation)
+        );
         $(".legend .body ul").append(legendItem);
 
         const marker = $(".marker-template").clone();
@@ -48,7 +55,7 @@ var clickmap = function(args) {
 				const marker = fn_buildMarker(x, y, label, detail);
 				container.append(marker);
 				if (fn_isnumber(label)) {
-				    counter = parseInt(label);
+                    counter = parseInt(label);
 				}
 			}
 		}
@@ -91,7 +98,7 @@ var clickmap = function(args) {
             if (hasOptions) {
                 optionsTitle = typeof(optionsLabel) != "undefined" ? optionsLabel : "Select one";
                 for (let attr in options) {
-                    if (options.hasOwnProperty(attr)) {
+                    if (Object.prototype.hasOwnProperty.call(options, attr)) {
                         optionsSelect+= "<option value='" + attr + "'>" + options[attr] + "</option>";
                     }
                 }
@@ -157,5 +164,5 @@ var clickmap = function(args) {
 
     if (hideNav) {
         $(".nav").hide();
-    };
+    }
 };

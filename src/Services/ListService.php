@@ -4,7 +4,7 @@
  * ListService
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Matthew Vita <matthewvita48@gmail.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2018 Matthew Vita <matthewvita48@gmail.com>
@@ -14,11 +14,16 @@
 
 namespace OpenEMR\Services;
 
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Services\Search\FhirSearchWhereClauseBuilder;
+use OpenEMR\Services\Search\SearchFieldException;
+use OpenEMR\Validators\ProcessingResult;
 use Particle\Validator\Validator;
 
+// TODO: @adunsulag should we rename this to be ListOptions service since that is the table it corresponds to?  The lists table is a patient issues table so this could confuse new developers
 class ListService
 {
-
   /**
    * Default constructor.
    */
@@ -34,19 +39,117 @@ class ListService
         $validator->required('type')->lengthBetween(2, 255);
         $validator->required('pid')->numeric();
         $validator->optional('diagnosis')->lengthBetween(2, 255);
-        $validator->required('begdate')->datetime('Y-m-d');
-        $validator->optional('enddate')->datetime('Y-m-d');
+        $validator->optional('begdate')->datetime('Y-m-d H:i:s');
+        $validator->optional('enddate')->datetime('Y-m-d H:i:s');
 
         return $validator->validate($list);
     }
 
-    public function getAll($pid, $list_type)
+    public function getAll($pid, $list_type): array
     {
         $sql = "SELECT * FROM lists WHERE pid=? AND type=? ORDER BY date DESC";
 
-        $statementResults = sqlStatement($sql, array($pid, $list_type));
+        $statementResults = sqlStatement($sql, [$pid, $list_type]);
 
-        $results = array();
+        $results = [];
+        while ($row = sqlFetchArray($statementResults)) {
+            $row['uuid'] = self::uuidOrNull($row['uuid'] ?? null);
+            array_push($results, $row);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Rows inserted before uuids were assigned here can still have a NULL uuid,
+     * and Uuid::fromBytes() throws on that.
+     */
+    private static function uuidOrNull(mixed $uuidBytes): ?string
+    {
+        if (!is_string($uuidBytes) || $uuidBytes === '') {
+            return null;
+        }
+
+        return UuidRegistry::uuidToString($uuidBytes);
+    }
+
+    public function getListOptionsForLists($lists): array
+    {
+        $sql = "SELECT * FROM list_options WHERE list_id IN (" . str_repeat('?,', count($lists) - 1) . "?) "
+            . " ORDER BY list_id, seq";
+        $records = QueryUtils::fetchRecords($sql, $lists, false);
+        return $records;
+    }
+
+    /**
+     * Allows searching on the top level lists in the lists_options table.  Will return the top level lists that match
+     * the search criteria as well as the last updated date of the sublist.
+     * @param $search
+     * @param $isAndCondition
+     */
+    public function searchLists($search, $isAndCondition = true): ProcessingResult
+    {
+        // TODO: @adunsulag this is copy-pasta from BaseService... need to investigate if we can just have ListService extend BaseService
+        $processingResult = new ProcessingResult();
+        try {
+            $sql = "SELECT
+                        lo.*,
+                        sub_list.sublist_updated_date
+                    FROM
+                        list_options lo
+                    JOIN(
+                        SELECT lo2.list_id AS sublist_list_id,
+                            MAX(last_updated) AS sublist_updated_date
+                        FROM
+                            list_options lo2
+                        WHERE
+                            lo2.list_id != 'lists'
+                        GROUP BY
+                            list_id
+                    ) sub_list
+                    ON
+                        lo.option_id = sub_list.sublist_list_id ";
+            $whereFragment = FhirSearchWhereClauseBuilder::build($search, $isAndCondition);
+            $sql .= $whereFragment->getFragment() . " AND lo.list_id = 'lists' ORDER BY lo.seq, lo.list_id, lo.option_id ";
+            $records = QueryUtils::fetchRecords($sql, $whereFragment->getBoundValues());
+            if (!empty($records)) {
+                foreach ($records as $row) {
+                    $processingResult->addData($row);
+                }
+            }
+        } catch (SearchFieldException $exception) {
+            $processingResult->setValidationMessages([$exception->getField() => $exception->getMessage()]);
+        }
+
+        return $processingResult;
+    }
+
+    public function getListIds()
+    {
+        $sql = "SELECT DISTINCT list_id FROM list_options ORDER BY list_id";
+        return QueryUtils::fetchTableColumn($sql, 'list_id', []);
+    }
+
+    public function getOptionsByListName($list_name, $search = []): array
+    {
+        $sql = "SELECT * FROM list_options WHERE list_id = ? ";
+        $binding = [$list_name];
+
+
+        $whitelisted_columns = [
+            "option_id", "seq", "is_default", "option_value", "mapping", "notes", "codes", "activity", "edit_options", "toggle_setting_1", "toggle_setting_2", "subtype"
+        ];
+        foreach ($whitelisted_columns as $column) {
+            if (!empty($search[$column])) {
+                $sql .= " AND $column = ? ";
+                $binding[] = $search[$column];
+            }
+        }
+        $sql .= " ORDER BY `seq` ";
+
+        $statementResults = sqlStatementThrowException($sql, $binding);
+
+        $results = [];
         while ($row = sqlFetchArray($statementResults)) {
             array_push($results, $row);
         }
@@ -54,30 +157,53 @@ class ListService
         return $results;
     }
 
-    public function getOptionsByListName($list_name)
+    /**
+     * Returns the list option record that was found
+     * @param $list_id
+     * @param $option_id
+     * @param array $search
+     * @return array Record
+     */
+    public function getListOption($list_id, $option_id)
     {
-        $sql = "SELECT * FROM list_options WHERE list_id = ?";
-
-        $statementResults = sqlStatement($sql, array($list_name));
-
-        $results = array();
-        while ($row = sqlFetchArray($statementResults)) {
-            array_push($results, $row);
+        $records = $this->getOptionsByListName($list_id, ['option_id' => $option_id]);
+        if (!empty($records)) { // should only be one record
+            return $records[0];
         }
+        return null;
+    }
 
-        return $results;
+    /**
+     * Retrieves a list option for a given list by the code value
+     * @param string $list_id
+     * @param string $code The exact code(s) to match.  This must match the string precisely and fuzzy matching is not currently supported.
+     * @return array|null
+     */
+    public function getListOptionByCode(string $list_id, string $code)
+    {
+        $records = $this->getOptionsByListName($list_id, ['codes' => $code]);
+        if (!empty($records)) { // should only be one record
+            return $records[0];
+        }
+        return null;
     }
 
     public function getOne($pid, $list_type, $list_id)
     {
         $sql = "SELECT * FROM lists WHERE pid=? AND type=? AND id=? ORDER BY date DESC";
 
-        return sqlQuery($sql, array($pid, $list_type, $list_id));
+        $row = sqlQuery($sql, [$pid, $list_type, $list_id]);
+        if (is_array($row)) {
+            $row['uuid'] = self::uuidOrNull($row['uuid'] ?? null);
+        }
+
+        return $row;
     }
 
     public function insert($data)
     {
         $sql  = " INSERT INTO lists SET";
+        $sql .= "     uuid=?,";
         $sql .= "     date=NOW(),";
         $sql .= "     activity=1,";
         $sql .= "     pid=?,";
@@ -89,42 +215,61 @@ class ListService
 
         return sqlInsert(
             $sql,
-            array(
+            [
+                UuidRegistry::getRegistryForTable('lists')->createUuid(),
                 $data['pid'],
                 $data['type'],
                 $data["title"],
                 $data["begdate"],
                 $data["enddate"],
                 $data["diagnosis"]
-            )
+            ]
         );
     }
 
-    public function update($data)
+    /**
+     * @param array<string, mixed> $data
+     */
+    public function update(string $pid, string $list_id, string $list_type, array $data): int
     {
+        // Scope by pid+type so a leaked list_id can't rewrite a record on
+        // another patient's chart or under a different list type. Pre-check
+        // via SELECT drives the 200/404 outcome — affected rows would falsely
+        // 404 when the client resubmits identical values.
+        $existing = QueryUtils::querySingleRow(
+            "SELECT id FROM lists WHERE id=? AND pid=? AND type=?",
+            [$list_id, $pid, $list_type]
+        );
+        if (!is_array($existing) || $existing === []) {
+            return 0;
+        }
+
         $sql  = " UPDATE lists SET";
         $sql .= "     title=?,";
         $sql .= "     begdate=?,";
         $sql .= "     enddate=?,";
         $sql .= "     diagnosis=?";
-        $sql .= " WHERE id=?";
+        $sql .= " WHERE id=? AND pid=? AND type=?";
 
-        return sqlStatement(
+        QueryUtils::sqlStatementThrowException(
             $sql,
-            array(
+            [
                 $data["title"],
                 $data["begdate"],
                 $data["enddate"],
                 $data["diagnosis"],
-                $data["id"]
-            )
+                $list_id,
+                $pid,
+                $list_type,
+            ]
         );
+        return 1;
     }
 
     public function delete($pid, $list_id, $list_type)
     {
         $sql  = "DELETE FROM lists WHERE pid=? AND id=? AND type=?";
 
-        return sqlStatement($sql, array($pid, $list_id, $list_type));
+        return sqlStatement($sql, [$pid, $list_id, $list_type]);
     }
 }

@@ -5,66 +5,55 @@
  * any existing data for the specified patient is included.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2009-2015 Rod Roark <rod@sunsetsystems.com>
  * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 require_once("../../globals.php");
+$srcdir = \OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir();
+$webserver_root = \OpenEMR\Core\OEGlobalsBag::getInstance()->getProjectDir();
+$session = \OpenEMR\Common\Session\SessionWrapperFactory::getInstance()->getActiveSession();
+$pid = $session->get('pid', 0);
 
 // Option to substitute a custom version of this script.
+$customDemographicsPrint = $webserver_root . '/custom/demographics_print.php';
 if (
-    !empty($GLOBALS['gbl_rapid_workflow']) &&
-    $GLOBALS['gbl_rapid_workflow'] == 'LBFmsivd' &&
-    file_exists('../../../custom/demographics_print.php')
+    !empty(\OpenEMR\Core\OEGlobalsBag::getInstance()->get('gbl_rapid_workflow')) &&
+    \OpenEMR\Core\OEGlobalsBag::getInstance()->get('gbl_rapid_workflow') == 'LBFmsivd' &&
+    file_exists($customDemographicsPrint)
 ) {
-    include('../../../custom/demographics_print.php');
-    exit();
+    include($customDemographicsPrint);
+    return;
 }
 
-require_once("$srcdir/options.inc.php");
-require_once("$srcdir/patient.inc");
+require_once($srcdir . "/options.inc.php");
 
 use Mpdf\Mpdf;
+use OpenEMR\Common\Acl\AccessDeniedHelper;
 use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Pdf\Config_Mpdf;
+
 
 $patientid = empty($_REQUEST['patientid']) ? 0 : 0 + $_REQUEST['patientid'];
 if ($patientid < 0) {
-    $patientid = 0 + $pid; // -1 means current pid
+    $patientid = (int) $pid; // -1 means current pid
 }
 
 // True if to display as a form to complete, false to display as information.
 $isform = empty($_REQUEST['isform']) ? 0 : 1;
 
-// Html2pdf fails to generate checked checkboxes properly, so write plain HTML
-// if we are doing a patient-specific complete form.
-// TODO - now use mPDF, so should test if still need this fix
 $PDF_OUTPUT = ($patientid && $isform) ? false : true;
 
 if ($PDF_OUTPUT) {
-    $config_mpdf = array(
-        'tempDir' => $GLOBALS['MPDF_WRITE_DIR'],
-        'mode' => $GLOBALS['pdf_language'],
-        'format' => 'Letter',
-        'default_font_size' => '9',
-        'default_font' => 'dejavusans',
-        'margin_left' => $GLOBALS['pdf_left_margin'],
-        'margin_right' => $GLOBALS['pdf_right_margin'],
-        'margin_top' => $GLOBALS['pdf_top_margin'],
-        'margin_bottom' => $GLOBALS['pdf_bottom_margin'],
-        'margin_header' => '',
-        'margin_footer' => '',
-        'orientation' => 'P',
-        'shrink_tables_to_fit' => 1,
-        'use_kwt' => true,
-        'autoScriptToLang' => true,
-        'keep_table_proportions' => true
-    );
+    $config_mpdf = Config_Mpdf::getConfigMpdf();
     $pdf = new mPDF($config_mpdf);
-    if ($_SESSION['language_direction'] == 'rtl') {
+    if ($session->get('language_direction') == 'rtl') {
         $pdf->SetDirectionality('rtl');
     }
     ob_start();
@@ -72,9 +61,9 @@ if ($PDF_OUTPUT) {
 
 $CPR = 4; // cells per row
 
-$prow = array();
-$erow = array();
-$irow = array();
+$prow = [];
+$erow = [];
+$irow = [];
 
 if ($patientid) {
     $prow = getPatientData($pid, "*, DATE_FORMAT(DOB,'%Y-%m-%d') as DOB_YMD");
@@ -82,16 +71,16 @@ if ($patientid) {
   // Check authorization.
     $thisauth = AclMain::aclCheckCore('patients', 'demo');
     if (!$thisauth) {
-        die(xlt('Demographics not authorized'));
+        AccessDeniedHelper::deny('Demographics access not authorized');
     }
     if ($prow['squad'] && ! AclMain::aclCheckCore('squads', $prow['squad'])) {
-        die(xlt('You are not authorized to access this squad'));
+        AccessDeniedHelper::deny('Unauthorized access to patient squad');
     }
   // $irow = getInsuranceProviders(); // needed?
 }
 
 // Load array of properties for this layout and its groups.
-$grparr = array();
+$grparr = [];
 getLayoutProperties('DEM', $grparr);
 
 $fres = sqlStatement("SELECT * FROM layout_options " .
@@ -206,15 +195,14 @@ td.dcols3 { width: 80%; }
 <?php
 // Generate header with optional logo.
 $logo = '';
-$ma_logo_path = "sites/" . $_SESSION['site_id'] . "/images/ma_logo.png";
-if (is_file("$webserver_root/$ma_logo_path")) {
-    $logo = "<img src='$web_root/$ma_logo_path' style='height:" . round(9 * 5.14) . "pt' />";
-} else {
-    $logo = "<!-- '$ma_logo_path' does not exist. -->";
+$ma_logo_path = "sites/" . $session->get('site_id') . "/images/ma_logo.png";
+if (is_file($webserver_root . "/$ma_logo_path")) {
+    $logo = \OpenEMR\Core\OEGlobalsBag::getInstance()->getWebRoot() . "/$ma_logo_path";
 }
+
 echo genFacilityTitle(xl('Registration Form'), -1, $logo);
 
-function end_cell()
+function demographics_end_cell(): void
 {
     global $item_count, $cell_count;
     if ($item_count > 0) {
@@ -223,10 +211,10 @@ function end_cell()
     }
 }
 
-function end_row()
+function demographics_end_row(): void
 {
     global $cell_count, $CPR;
-    end_cell();
+    demographics_end_cell();
     if ($cell_count > 0) {
         for (; $cell_count < $CPR; ++$cell_count) {
             echo "<td></td>";
@@ -237,38 +225,14 @@ function end_row()
     }
 }
 
-function end_group()
+function demographics_end_group(): void
 {
     global $last_group;
-    if (strlen($last_group) > 0) {
-        end_row();
+    if (strlen((string) $last_group) > 0) {
+        demographics_end_row();
         echo " </table>\n";
         echo "</div>\n";
     }
-}
-
-function getContent()
-{
-    global $web_root, $webserver_root;
-    $content = ob_get_clean();
-    // Fix a nasty html2pdf bug - it ignores document root!
-    // TODO - now use mPDF, so should test if still need this fix
-    $i = 0;
-    $wrlen = strlen($web_root);
-    $wsrlen = strlen($webserver_root);
-    while (true) {
-        $i = stripos($content, " src='/", $i + 1);
-        if ($i === false) {
-            break;
-        }
-        if (
-            substr($content, $i + 6, $wrlen) === $web_root &&
-            substr($content, $i + 6, $wsrlen) !== $webserver_root
-        ) {
-            $content = substr($content, 0, $i + 6) . $webserver_root . substr($content, $i + 6 + $wrlen);
-        }
-    }
-    return $content;
 }
 
 $last_group = '';
@@ -284,8 +248,8 @@ while ($frow = sqlFetchArray($fres)) {
     $list_id    = $frow['list_id'];
     $currvalue  = '';
 
-    if (strpos($field_id, 'em_') === 0) {
-        $tmp = substr($field_id, 3);
+    if (str_starts_with((string) $field_id, 'em_')) {
+        $tmp = substr((string) $field_id, 3);
         if (isset($erow[$tmp])) {
             $currvalue = $erow[$tmp];
         }
@@ -296,8 +260,8 @@ while ($frow = sqlFetchArray($fres)) {
     }
 
   // Handle a data category (group) change.
-    if (strcmp($this_group, $last_group) != 0) {
-        end_group();
+    if (strcmp((string) $this_group, (string) $last_group) != 0) {
+        demographics_end_group();
 
         // if (strlen($last_group) > 0) echo "<br />\n";
 
@@ -305,7 +269,7 @@ while ($frow = sqlFetchArray($fres)) {
         // nasty html2pdf bug. When a table overflows to the next page, vertical
         // positioning for whatever follows it is off and can cause overlap.
         // TODO - now use mPDF, so should test if still need this fix
-        if (strlen($last_group) > 0) {
+        if (strlen((string) $last_group) > 0) {
             echo "</nobreak><br /><div><table><tr><td>&nbsp;</td></tr></table></div><br />\n";
         }
 
@@ -324,7 +288,7 @@ while ($frow = sqlFetchArray($fres)) {
 
   // Handle starting of a new row.
     if (($titlecols > 0 && $cell_count >= $CPR) || $cell_count == 0) {
-        end_row();
+        demographics_end_row();
         echo "  <tr>";
     }
 
@@ -334,7 +298,7 @@ while ($frow = sqlFetchArray($fres)) {
 
   // Handle starting of a new label cell.
     if ($titlecols > 0) {
-        end_cell();
+        demographics_end_cell();
         echo "<td colspan='" . attr($titlecols) . "' ";
         echo "class='lcols" . attr($titlecols) . " stuff " . (($frow['uor'] == 2) ? "required'" : "bold'");
         if ($cell_count == 2) {
@@ -358,7 +322,7 @@ while ($frow = sqlFetchArray($fres)) {
 
     // Handle starting of a new data cell.
     if ($datacols > 0) {
-        end_cell();
+        demographics_end_cell();
         echo "<td colspan='" . attr($datacols) . "' class='dcols" . attr($datacols) . " stuff under'";
         /*****************************************************************
         // Underline is wanted only for fill-in-the-blank data types.
@@ -386,11 +350,11 @@ while ($frow = sqlFetchArray($fres)) {
     }
 }
 
-end_group();
+demographics_end_group();
 
 // Ending the last nobreak section for html2pdf.
 // TODO - now use mPDF, so should test if still need this fix
-if (strlen($last_group) > 0) {
+if (strlen((string) $last_group) > 0) {
     echo "</nobreak>\n";
 }
 ?>
@@ -399,7 +363,7 @@ if (strlen($last_group) > 0) {
 
 <?php
 if ($PDF_OUTPUT) {
-    $content = getContent();
+    $content = ob_get_clean();
     $pdf->writeHTML($content);
     $pdf->Output('Demographics_form.pdf', 'D'); // D = Download, I = Inline
 } else {

@@ -13,8 +13,35 @@
  * @license https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+/**
+ * DISABLED BY DEFAULT — set OPENEMR_ADMIN_PHP_ENABLED=1 as an environment
+ * variable to enable.
+ *
+ *   Apache (vhost or .htaccess):
+ *     SetEnv OPENEMR_ADMIN_PHP_ENABLED 1
+ *
+ *   PHP-FPM (pool config):
+ *     env[OPENEMR_ADMIN_PHP_ENABLED] = 1
+ *
+ *   Shell:
+ *     export OPENEMR_ADMIN_PHP_ENABLED=1
+ *
+ * When enabled, restrict access via network controls — this script performs
+ * no user authentication.
+ */
+
+if (
+    filter_input(INPUT_SERVER, 'OPENEMR_ADMIN_PHP_ENABLED') !== '1'
+    && (getenv('OPENEMR_ADMIN_PHP_ENABLED') ?: '') !== '1'
+) {
+    http_response_code(403);
+    header('Content-Type: text/plain');
+    echo "admin.php is disabled by default. See the header comment in this file to enable.\n";
+    exit;
+}
+
 // Checks if the server's PHP version is compatible with OpenEMR:
-require_once(dirname(__FILE__) . "/src/Common/Compatibility/Checker.php");
+require_once(__DIR__ . "/src/Common/Compatibility/Checker.php");
 $response = OpenEMR\Common\Compatibility\Checker::checkPhpVersion();
 if ($response !== true) {
     die(htmlspecialchars($response));
@@ -22,14 +49,14 @@ if ($response !== true) {
 
 require_once "version.php";
 
-$webserver_root = dirname(__FILE__);
+$webserver_root = __DIR__;
 if (stripos(PHP_OS, 'WIN') === 0) {
     $webserver_root = str_replace("\\", "/", $webserver_root);
 }
 
 $OE_SITES_BASE = "$webserver_root/sites";
 
-function sqlQuery($statement, $link)
+function adminSqlQuery($statement, $link)
 {
     $row = mysqli_fetch_array(mysqli_query($link, $statement), MYSQLI_ASSOC);
     return $row;
@@ -38,6 +65,7 @@ function sqlQuery($statement, $link)
 <html>
 <head>
     <title>OpenEMR Site Administration</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="public/assets/bootstrap/dist/css/bootstrap.min.css">
     <script src="public/assets/jquery/dist/jquery.min.js"></script>
     <script src="public/assets/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
@@ -68,6 +96,7 @@ function sqlQuery($statement, $link)
                             <th>Version</th>
                             <th>Is Current</th>
                             <th>Log In</th>
+                            <th>Patient Portal</th>
                         </tr>
                         <?php
                         $dh = opendir($OE_SITES_BASE);
@@ -75,10 +104,10 @@ function sqlQuery($statement, $link)
                             die("Cannot read directory '$OE_SITES_BASE'.");
                         }
 
-                        $siteslist = array();
+                        $siteslist = [];
 
                         while (false !== ($sfname = readdir($dh))) {
-                            if (substr($sfname, 0, 1) == '.') {
+                            if (str_starts_with($sfname, '.')) {
                                 continue;
                             }
 
@@ -111,6 +140,7 @@ function sqlQuery($statement, $link)
 
                         // Access the site's database.
                             include "$sitedir/sqlconf.php";
+                            $dbase = is_string($dbase ?? null) ? $dbase : '';
 
                             if ($config) {
                                 $dbh = mysqli_connect("$host", "$login", "$pass", $dbase, $port);
@@ -119,25 +149,25 @@ function sqlQuery($statement, $link)
                                 }
                             }
 
-                            echo "  <td>$sfname</td>\n";
-                            echo "  <td>$dbase</td>\n";
+                            echo "  <td>" . htmlspecialchars($sfname, ENT_NOQUOTES) . "</td>\n";
+                            echo "  <td>" . htmlspecialchars($dbase, ENT_NOQUOTES) . "</td>\n";
 
                             if (!$config) {
-                                echo "  <td colspan='3'><a href='setup.php?site=$sfname' class='text-decoration-none'>Needs setup, click here to run it</a></td>\n";
+                                echo "  <td colspan='3'><a href='setup.php?site=" . htmlspecialchars(urlencode($sfname), ENT_QUOTES) . "' class='text-decoration-none'>Needs setup, click here to run it</a></td>\n";
                             } elseif ($errmsg) {
-                                echo "  <td colspan='3' class='text-danger'>$errmsg</td>\n";
+                                echo "  <td colspan='3' class='text-danger'>" . htmlspecialchars($errmsg, ENT_NOQUOTES) . "</td>\n";
                             } else {
                                 // Get site name for display.
-                                $row = sqlQuery("SELECT gl_value FROM globals WHERE gl_name = 'openemr_name' LIMIT 1", $dbh);
-                                $openemr_name = $row ? $row['gl_value'] : '';
+                                $row = adminSqlQuery("SELECT gl_value FROM globals WHERE gl_name = 'openemr_name' LIMIT 1", $dbh);
+                                $openemr_name = is_string($row['gl_value'] ?? null) ? $row['gl_value'] : '';
 
                                 // Get version indicators from the database.
-                                $row = sqlQuery("SHOW TABLES LIKE 'version'", $dbh);
+                                $row = adminSqlQuery("SHOW TABLES LIKE 'version'", $dbh);
                                 if (empty($row)) {
                                     $openemr_version = 'Unknown';
                                     $database_version = 0;
                                 } else {
-                                    $row = sqlQuery("SELECT * FROM version LIMIT 1", $dbh);
+                                    $row = adminSqlQuery("SELECT * FROM version LIMIT 1", $dbh);
                                     $database_patch_txt = "";
                                     if (!(empty($row['v_realpatch'])) && $row['v_realpatch'] != 0) {
                                         $database_patch_txt = " (" . $row['v_realpatch'] . ")";
@@ -151,20 +181,22 @@ function sqlQuery($statement, $link)
                                 }
 
                                 // Display relevant columns.
-                                echo "  <td>$openemr_name</td>\n";
-                                echo "  <td>$openemr_version</td>\n";
+                                echo "  <td>" . htmlspecialchars($openemr_name, ENT_NOQUOTES) . "</td>\n";
+                                echo "  <td>" . htmlspecialchars($openemr_version, ENT_NOQUOTES) . "</td>\n";
                                 if ($v_database != $database_version) {
-                                    echo "  <td><a href='sql_upgrade.php?site=$sfname' class='text-decoration-none'>Upgrade Database</a></td>\n";
+                                    echo "  <td><a href='sql_upgrade.php?site=" . htmlspecialchars(urlencode($sfname), ENT_QUOTES) . "' class='text-decoration-none'>Upgrade Database</a></td>\n";
                                 } elseif (($v_acl > $database_acl)) {
-                                    echo "  <td><a href='acl_upgrade.php?site=$sfname' class='text-decoration-none'>Upgrade Access Controls</a></td>\n";
+                                    echo "  <td><a href='acl_upgrade.php?site=" . htmlspecialchars(urlencode($sfname), ENT_QUOTES) . "' class='text-decoration-none'>Upgrade Access Controls</a></td>\n";
                                 } elseif (($v_realpatch != $database_patch)) {
-                                    echo "  <td><a href='sql_patch.php?site=$sfname' class='text-decoration-none'>Patch Database</a></td>\n";
+                                    echo "  <td><a href='sql_patch.php?site=" . htmlspecialchars(urlencode($sfname), ENT_QUOTES) . "' class='text-decoration-none'>Patch Database</a></td>\n";
                                 } else {
                                     echo "  <td><i class='fa fa-check fa-lg text-success' aria-hidden='true' ></i></a></td>\n";
                                 }
                                 if (($v_database == $database_version) && ($v_acl <= $database_acl) && ($v_realpatch == $database_patch)) {
-                                    echo "  <td><a href='interface/login/login.php?site=$sfname' class='text-decoration-none'><i class='fa fa-sign-in-alt fa-lg' aria-hidden='true' data-toggle='tooltip' data-placement='top' title ='Login to site $sfname'></i></a></td>\n";
+                                    echo "  <td><a href='interface/login/login.php?site=" . htmlspecialchars(urlencode($sfname), ENT_QUOTES) . "' class='text-decoration-none'><i class='fa fa-sign-in-alt fa-lg' aria-hidden='true' data-toggle='tooltip' data-placement='top' title ='Login to site " . htmlspecialchars($sfname, ENT_QUOTES) . "'></i></a></td>\n";
+                                    echo "  <td><a href='portal/index.php?site=" . htmlspecialchars(urlencode($sfname), ENT_QUOTES) . "' class='text-decoration-none'><i class='fa fa-sign-in-alt fa-lg' aria-hidden='true' data-toggle='tooltip' data-placement='top' title ='Login to site " . htmlspecialchars($sfname, ENT_QUOTES) . "'></i></a></td>\n";
                                 } else {
+                                    echo "  <td><i class='fa fa-ban fa-lg text-secondary' aria-hidden='true'></i></td>\n";
                                     echo "  <td><i class='fa fa-ban fa-lg text-secondary' aria-hidden='true'></i></td>\n";
                                 }
                             }

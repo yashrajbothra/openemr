@@ -4,7 +4,7 @@
  * LocationService
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Yash Bothra <yashrajbothra786gmail.com>
  * @copyright Copyright (c) 2020 Yash Bothra <yashrajbothra786gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -12,8 +12,11 @@
 
 namespace OpenEMR\Services;
 
-use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Uuid\UuidMapping;
+use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Services\Search\FhirSearchWhereClauseBuilder;
+use OpenEMR\Services\Search\ISearchField;
 use OpenEMR\Validators\BaseValidator;
 use OpenEMR\Validators\ProcessingResult;
 
@@ -23,17 +26,24 @@ class LocationService extends BaseService
     private const PRACTITIONER_TABLE = "users";
     private const FACILITY_TABLE = "facility";
 
+    const TYPE_FACILITY = "facility";
+    const TYPE_USER = "user";
+    const TYPE_PATIENT = "patient";
+
     /**
      * Default constructor.
      */
     public function __construct()
     {
-        (new UuidRegistry(['table_name' => self::PATIENT_TABLE]))->createMissingUuids();
+        UuidRegistry::createMissingUuidsForTables([self::PATIENT_TABLE, self::PRACTITIONER_TABLE, self::FACILITY_TABLE]);
         UuidMapping::createMissingResourceUuids("Location", self::PATIENT_TABLE);
-        (new UuidRegistry(['table_name' => self::PRACTITIONER_TABLE]))->createMissingUuids();
         UuidMapping::createMissingResourceUuids("Location", self::PRACTITIONER_TABLE);
-        (new UuidRegistry(['table_name' => self::FACILITY_TABLE]))->createMissingUuids();
         UuidMapping::createMissingResourceUuids("Location", self::FACILITY_TABLE);
+    }
+
+    public function getUuidFields(): array
+    {
+        return ['uuid'];
     }
 
     /**
@@ -41,19 +51,20 @@ class LocationService extends BaseService
      * Search criteria is conveyed by array where key = field/column name, value = field value.
      * If no search criteria is provided, all records are returned.
      *
-     * @param  $search search array parameters
+     * @param array<string, ISearchField|string> $search search array parameters
      * @param  $isAndCondition specifies if AND condition is used for multiple criteria. Defaults to true.
-     * @return ProcessingResult which contains validation messages, internal error messages, and the data
-     * payload.
      */
-    public function getAll($search = array(), $isAndCondition = true)
+    public function getAll(array $search = [], $isAndCondition = true): ProcessingResult
     {
-        $sqlBindArray = array();
+        $sqlBindArray = [];
 
+        // TODO: @adunsulag we need to add the contact,contact_address,address records to this Location service which requires uuids in the tables
         $sql = 'SELECT location.*, uuid_mapping.uuid FROM
                 (SELECT
-                    uuid as target_uuid,
-                    CONCAT(fname,"\'s Home") as name,
+                    uuid as table_uuid,
+                    "Home Address" as name,
+                    \'\' AS identifier,
+                    \'none\' AS identifier_type,
                     street,
                     city,
                     postal_code,
@@ -62,10 +73,17 @@ class LocationService extends BaseService
                     phone_cell as phone,
                     null as fax,
                     null as website,
-                    email from patient_data
+                    email,
+                    `date` AS last_updated,
+                    "' . self::TYPE_PATIENT . '" AS `type`,
+                    \'\' AS location_role_type
+                from
+                    patient_data
                 UNION SELECT
-                    uuid as target_uuid,
+                    uuid as table_uuid,
                     name,
+                    facility_npi AS identifier,
+                    \'npi\' AS identifier_type,
                     street,
                     city,
                     postal_code,
@@ -74,38 +92,45 @@ class LocationService extends BaseService
                     phone,
                     fax,
                     website,
-                    email from facility
+                    email,
+                    last_updated,
+                   "' . self::TYPE_FACILITY . '" AS `type`,
+                    pos_code AS location_role_type
+                from
+                     facility
                 UNION SELECT
-                    uuid as target_uuid,
-                    CONCAT(fname,"\'s Home") as name,
+                    uuid as table_uuid,
+                    "Home Address" as name,
+                    \'\' AS identifier,
+                    \'none\' AS identifier_type,
                     street,
                     city,
                     zip as postal_code,
                     state,
-                    null as country_code,
+                    country_code,
                     phone,
                     fax,
                     url as website,
-                    email from users) as location
-                    LEFT JOIN uuid_mapping ON uuid_mapping.target_uuid=location.target_uuid AND uuid_mapping.resource="Location"';
+                    email,
+                    last_updated,
+                    "' . self::TYPE_USER . '" AS `type`,
+                    \'\' AS location_role_type
+                from
+                     users
+            ) as location
+            LEFT JOIN uuid_mapping ON uuid_mapping.target_uuid=location.table_uuid AND uuid_mapping.resource="Location"';
 
-        if (!empty($search)) {
-            $sql .= ' WHERE ';
-            $whereClauses = array();
-            foreach ($search as $fieldName => $fieldValue) {
-                array_push($whereClauses, $fieldName . ' = ?');
-                array_push($sqlBindArray, $fieldValue);
-            }
-            $sqlCondition = ($isAndCondition == true) ? 'AND' : 'OR';
-            $sql .= implode(' ' . $sqlCondition . ' ', $whereClauses);
-        }
+        $whereClause = FhirSearchWhereClauseBuilder::build($search, $isAndCondition);
 
-        $statementResults = sqlStatement($sql, $sqlBindArray);
+        $sql .= $whereClause->getFragment();
+
+        $sqlBindArray = $whereClause->getBoundValues();
+        $statementResults =  QueryUtils::sqlStatementThrowException($sql, $sqlBindArray);
 
         $processingResult = new ProcessingResult();
-        while ($row = sqlFetchArray($statementResults)) {
-            $row['uuid'] = UuidRegistry::uuidToString($row['uuid']);
-            $processingResult->addData($row);
+        foreach ($statementResults as $result) {
+            $record = $this->createResultRecordFromDatabaseResult($result);
+            $processingResult->addData($record);
         }
 
         return $processingResult;
@@ -114,10 +139,8 @@ class LocationService extends BaseService
     /**
      * Returns a single location record by id.
      * @param $uuid - The location uuid identifier in string format.
-     * @return ProcessingResult which contains validation messages, internal error messages, and the data
-     * payload.
      */
-    public function getOne($uuid)
+    public function getOne($uuid): ProcessingResult
     {
         $processingResult = new ProcessingResult();
 

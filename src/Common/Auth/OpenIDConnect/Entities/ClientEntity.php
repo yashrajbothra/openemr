@@ -4,14 +4,15 @@
  * Authorization Server Member
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Jerry Padgett <sjpadgett@gmail.com>
- * @copyright Copyright (c) 2020 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2020-2026 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Common\Auth\OpenIDConnect\Entities;
 
+use InvalidArgumentException;
 use League\OAuth2\Server\Entities\ClientEntityInterface;
 use League\OAuth2\Server\Entities\Traits\ClientTrait;
 use League\OAuth2\Server\Entities\Traits\EntityTrait;
@@ -21,6 +22,7 @@ class ClientEntity implements ClientEntityInterface
     use EntityTrait;
     use ClientTrait;
 
+    const DSI_TYPES = ["DSI_TYPE_NONE" => self::DSI_TYPE_NONE, "DSI_TYPE_EVIDENCE" => self::DSI_TYPE_EVIDENCE, "DSI_TYPE_PREDICTIVE" => self::DSI_TYPE_PREDICTIVE];
     protected $userId;
     protected $clientRole;
     protected $scopes;
@@ -31,17 +33,68 @@ class ClientEntity implements ClientEntityInterface
     protected $jwksUri;
 
     /**
-     * Confidential apps or apps with a 'launch' scope must be manually authorized by an adminstrator before their
+     * Confidential apps or apps with a 'launch' scope must be manually authorized by an administrator before their
      * client can be used.
      * @var bool
      */
     protected $isEnabled;
 
+    /**
+     * @var array[] Array of trusted user objects
+     */
+    protected $trustedUsers;
+
+    /**
+     * @var string[] The list of contact email addresses to reach out for questions about the client app
+     */
+    protected $contacts;
+
+    /**
+     * @var string The logout uri to send users to to logout from the application.
+     */
+    protected $logoutRedirectUris;
+
+    protected $registrationDate;
+
+    /**
+     * @var bool true if the authorization flow (authentication and scope authorization) should be skipped for logged in ehr users
+     */
+    private $skipEHRLaunchAuthorizationFlow;
+
+
+    private int $dsiType;
+
+    /**
+     * @var list<string> OAuth2 grant types the client registered for (oauth_clients.grant_types)
+     */
+    private array $grantTypes = [];
+
+    /**
+     * The address book entry this client acts for (its users.uuid), or null for a client not limited to one.
+     */
+    private ?string $addressBookUuid = null;
+
+    const DSI_TYPE_NONE = 0;
+
+    const DSI_TYPE_EVIDENCE = 1;
+    const DSI_TYPE_PREDICTIVE = 2;
+
+
     public function __construct()
     {
         $this->scopes = [];
+        $this->skipEHRLaunchAuthorizationFlow = false;
+        $this->isEnabled = false;
+        $this->dsiType = self::DSI_TYPE_NONE;
     }
 
+    public function setDSIType($type)
+    {
+        if (!in_array($type, [self::DSI_TYPE_NONE, self::DSI_TYPE_PREDICTIVE, self::DSI_TYPE_EVIDENCE])) {
+            throw new \InvalidArgumentException("Invalid DSI type");
+        }
+        $this->dsiType = $type;
+    }
     public function setName($name): void
     {
         $this->name = $name;
@@ -49,7 +102,13 @@ class ClientEntity implements ClientEntityInterface
 
     public function setRedirectUri($uri): void
     {
-        $this->redirectUri = $uri;
+        if (\is_string($uri)) {
+            $this->redirectUri = [$uri];
+        } elseif (\is_array($uri)) {
+            $this->redirectUri = $uri;
+        } else {
+            throw new \InvalidArgumentException("redirectUri must be a string or array");
+        }
     }
 
     public function setIsConfidential($set): void
@@ -77,6 +136,22 @@ class ClientEntity implements ClientEntityInterface
         return $this->userId;
     }
 
+    /**
+     * The address book entry this client is limited to, or null when it has no such limit.
+     */
+    public function getAddressBookUuid(): ?string
+    {
+        return $this->addressBookUuid;
+    }
+
+    /**
+     * Sets the address book entry this client is limited to, or null for no limit.
+     */
+    public function setAddressBookUuid(?string $uuid): void
+    {
+        $this->addressBookUuid = $uuid;
+    }
+
     public function setClientRole($role): void
     {
         $this->clientRole = $role;
@@ -91,6 +166,42 @@ class ClientEntity implements ClientEntityInterface
     {
         return $this->scopes;
     }
+
+    /**
+     * FHIR resource write scopes requested at registration, for administrator review.
+     * This is informational and does not change client authorization.
+     *
+     * @return list<string>
+     */
+    public function getFhirWriteScopes(): array
+    {
+        if (!is_array($this->scopes)) {
+            return [];
+        }
+
+        $writeScopes = [];
+        foreach ($this->scopes as $scopeString) {
+            // Standard API resource names are lowercase; FHIR names start with a capital letter.
+            if (
+                !is_string($scopeString)
+                || preg_match('/^(?:patient|user|system)\/(?:[A-Z][A-Za-z0-9]*|\*)\./', $scopeString) !== 1
+            ) {
+                continue;
+            }
+            try {
+                $scope = ScopeEntity::createFromString($scopeString);
+            } catch (InvalidArgumentException) {
+                // A malformed stored scope should not prevent administrators from reviewing a client.
+                continue;
+            }
+            $permissions = $scope->getPermissions();
+            if ($scope->isResourcePermissionScope() && ($permissions->create || $permissions->update || $permissions->delete)) {
+                $writeScopes[] = $scopeString;
+            }
+        }
+        return $writeScopes;
+    }
+
     public function setScopes($scopes)
     {
         // clear out the scopes if our scopes are empty
@@ -101,10 +212,32 @@ class ClientEntity implements ClientEntityInterface
 
         if (is_string($scopes)) {
             $scopes = explode(" ", $scopes);
-        } else if (!is_array($scopes)) {
+        } elseif (!is_array($scopes)) {
             throw new \InvalidArgumentException("scopes parameter must be a valid array or string");
         }
         $this->scopes = $scopes;
+    }
+
+    /**
+     * @return list<string> the grant types stored for this client; empty when none were recorded
+     */
+    public function getGrantTypes(): array
+    {
+        return $this->grantTypes;
+    }
+
+    /**
+     * @param string|array<array-key, mixed>|null $grantTypes pipe-delimited string (as stored) or list
+     */
+    public function setGrantTypes(string|array|null $grantTypes): void
+    {
+        if (is_string($grantTypes)) {
+            $grantTypes = explode('|', $grantTypes);
+        }
+        $this->grantTypes = array_values(array_filter(
+            $grantTypes ?? [],
+            static fn(mixed $grantType): bool => is_string($grantType) && $grantType !== ''
+        ));
     }
 
     /**
@@ -112,7 +245,7 @@ class ClientEntity implements ClientEntityInterface
      * @param $scope
      * @return bool
      */
-    public function hasScope($scope)
+    public function hasScope($scope): bool
     {
         return in_array($scope, $this->scopes);
     }
@@ -123,9 +256,9 @@ class ClientEntity implements ClientEntityInterface
      * @params $launchParams string A URL query string params to append to the launch uri.
      * @return string
      */
-    public function getLaunchUri($launchParams = '')
+    public function getLaunchUri($launchParams = ''): string
     {
-        $launchParams = isset($launchParams) ? $launchParams : '';
+        $launchParams ??= '';
         return $this->launchUri . $launchParams;
     }
 
@@ -164,5 +297,89 @@ class ClientEntity implements ClientEntityInterface
     public function setJwksUri($jwksUri): void
     {
         $this->jwksUri = $jwksUri;
+    }
+
+    /**
+     * Array of records from the oauth2_trusted_users table
+     * @return array[]
+     */
+    public function getTrustedUsers(): array
+    {
+        return $this->trustedUsers;
+    }
+
+    /**
+     * Set the trusted user records (these come from the oauth2_trusted_users table
+     * @param array $trustedUsers
+     */
+    public function setTrustedUsers(array $trustedUsers)
+    {
+        $this->trustedUsers = $trustedUsers;
+    }
+
+    public function getContacts()
+    {
+        $this->contacts = (!empty($this_contacts)) ?: [];
+        return $this->contacts;
+    }
+
+    public function setContacts($contacts)
+    {
+        $this->contacts = $contacts;
+    }
+
+    public function setRegistrationDate($registerDate)
+    {
+        $this->registrationDate = $registerDate;
+    }
+
+    public function getRegistrationDate()
+    {
+        return $this->registrationDate;
+    }
+
+    /**
+     * @return string
+     */
+    public function getLogoutRedirectUris(): string
+    {
+        return $this->logoutRedirectUris;
+    }
+
+    /**
+     * @param string $logoutRedirectUris
+     */
+    public function setLogoutRedirectUris(?string $logoutRedirectUris): void
+    {
+        $this->logoutRedirectUris = $logoutRedirectUris;
+    }
+
+    /**
+     * Whether the ehr launch should skip the authorization flow for a logged in user.
+     * @return bool
+     */
+    public function shouldSkipEHRLaunchAuthorizationFlow(): bool
+    {
+        return $this->skipEHRLaunchAuthorizationFlow;
+    }
+
+    public function setSkipEHRLaunchAuthorizationFlow(bool $shouldSkip)
+    {
+        $this->skipEHRLaunchAuthorizationFlow = $shouldSkip;
+    }
+
+    public function hasDSI(): bool
+    {
+        return $this->dsiType != self::DSI_TYPE_NONE;
+    }
+
+    public function hasPredictiveDSI(): bool
+    {
+        return self::DSI_TYPE_PREDICTIVE == $this->dsiType;
+    }
+
+    public function hasEvidenceDSI(): bool
+    {
+        return self::DSI_TYPE_EVIDENCE == $this->dsiType;
     }
 }

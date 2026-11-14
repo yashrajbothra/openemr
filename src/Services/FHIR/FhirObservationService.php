@@ -2,167 +2,438 @@
 
 namespace OpenEMR\Services\FHIR;
 
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Uuid\UuidMapping;
+use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRObservation;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRCodeableConcept;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRCoding;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRId;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRReference;
-use OpenEMR\Services\FHIR\FhirServiceBase;
+use OpenEMR\FHIR\R4\FHIRResource\FHIRDomainResource;
+use OpenEMR\Services\BaseService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationAdvanceDirectiveService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationCareExperiencePreferenceService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationEmployerService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationHistorySdohService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationLaboratoryService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationObservationFormService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationPatientService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationQuestionnaireItemService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationSocialHistoryService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationTreatmentInterventionPreferenceService;
+use OpenEMR\Services\FHIR\Observation\FhirObservationVitalsService;
+use OpenEMR\Services\FHIR\Traits\BulkExportSupportAllOperationsTrait;
+use OpenEMR\Services\FHIR\Traits\FhirBulkExportDomainResourceTrait;
+use OpenEMR\Services\FHIR\Traits\FhirServiceBaseEmptyTrait;
+use OpenEMR\Services\FHIR\Traits\MappedServiceCodeTrait;
+use OpenEMR\Services\FHIR\Traits\PatientSearchTrait;
+use OpenEMR\Services\FHIR\Traits\VersionedProfileTrait;
 use OpenEMR\Services\ObservationLabService;
-use OpenEMR\FHIR\R4\FHIRElement\FHIRQuantity;
+use OpenEMR\Services\Search\FhirSearchParameterDefinition;
+use OpenEMR\Services\Search\SearchFieldException;
+use OpenEMR\Services\Search\SearchFieldType;
+use OpenEMR\Services\Search\TokenSearchField;
+use OpenEMR\Validators\ProcessingResult;
 
 /**
  * FHIR Observation Service
  *
- * @coversDefaultClass OpenEMR\Services\FHIR\FhirObservationService
  * @package            OpenEMR
- * @link               http://www.open-emr.org
+ * @link               https://www.open-emr.org
  * @author             Yash Bothra <yashrajbothra786gmail.com>
  * @copyright          Copyright (c) 2020 Yash Bothra <yashrajbothra786gmail.com>
  * @license            https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
-class FhirObservationService extends FhirServiceBase
+class FhirObservationService extends FhirServiceBase implements IResourceSearchableService, IResourceUSCIGProfileService, IPatientCompartmentResourceService, IFhirExportableResourceService
 {
+    use FhirServiceBaseEmptyTrait;
+    use MappedServiceCodeTrait;
+    use PatientSearchTrait;
+    use BulkExportSupportAllOperationsTrait;
+    use FhirBulkExportDomainResourceTrait;
+    use VersionedProfileTrait;
+
     /**
      * @var ObservationLabService
      */
     private $observationService;
 
+    /**
+     * @var BaseService[]
+     */
+    private $innerServices;
+
     public function __construct()
     {
         parent::__construct();
-        $this->observationService = new ObservationLabService();
+        $this->innerServices = [];
+        $this->addMappedService(new FhirObservationSocialHistoryService());
+        $this->addMappedService(new FhirObservationVitalsService());
+        $this->addMappedService(new FhirObservationLaboratoryService());
+        $this->addMappedService(new FhirObservationObservationFormService());
+        $this->addMappedService(new FhirObservationHistorySdohService());
+        $this->addMappedService(new FhirObservationPatientService());
+        $this->addMappedService(new FhirObservationEmployerService());
+        $this->addMappedService(new FhirObservationAdvanceDirectiveService());
+        $this->addMappedService(new FhirObservationTreatmentInterventionPreferenceService());
+        $this->addMappedService(new FhirObservationCareExperiencePreferenceService());
     }
 
     /**
-     * Returns an array mapping FHIR Observation Resource search parameters to OpenEMR Observation search parameters
-     *
-     * @return array The search parameters
+     * Returns an array mapping FHIR Resource search parameters to OpenEMR search parameters
      */
-    protected function loadSearchParameters()
+    protected function loadSearchParameters(): array
     {
-        return  [];
+        return  [
+            'patient' => $this->getPatientContextSearchField(),
+            'code' => new FhirSearchParameterDefinition('status', SearchFieldType::TOKEN, ['code']),
+            'category' => new FhirSearchParameterDefinition('category', SearchFieldType::TOKEN, ['category']),
+            'date' => new FhirSearchParameterDefinition('date', SearchFieldType::DATETIME, ['date']),
+            '_id' => new FhirSearchParameterDefinition('_id', SearchFieldType::TOKEN, ['uuid']),
+            '_lastUpdated' => $this->getLastModifiedSearchField()
+        ];
+    }
+
+    public function getLastModifiedSearchField(): ?FhirSearchParameterDefinition
+    {
+        return new FhirSearchParameterDefinition('_lastUpdated', SearchFieldType::DATETIME, ['date_modified']);
     }
 
     /**
-     * Parses an OpenEMR observation record, returning the equivalent FHIR Observation Resource
-     *
-     * @param  array   $dataRecord The source OpenEMR data record
-     * @param  boolean $encode     Indicates if the returned resource is encoded into a string. Defaults to false.
-     * @return FHIRObservation
+     * Retrieves all of the fhir observation resources mapped to the underlying openemr data elements.
      */
-    public function parseOpenEMRRecord($dataRecord = array(), $encode = false)
+    public function getAll($fhirSearchParameters, $puuidBind = null): ProcessingResult
     {
-        $observationResource = new FHIRObservation();
-
-        $meta = array('versionId' => '1', 'lastUpdated' => gmdate('c'));
-        $observationResource->setMeta($meta);
-
-        $id = new FHIRId();
-        $id->setValue($dataRecord['uuid']);
-        $observationResource->setId($id);
-
-        $categoryCoding = new FHIRCoding();
-        $categoryCode = new FHIRCodeableConcept();
-        if (!empty($dataRecord['procedure_code'])) {
-            $categoryCoding->setCode($dataRecord['procedure_code']);
-            $categoryCoding->setSystem('http://loinc.org');
-            $categoryCoding->setDisplay($dataRecord['procedure_name']);
-            $categoryCode->addCoding($categoryCoding);
-            $observationResource->setCode($categoryCode);
-        }
-
-        $subject = new FHIRReference();
-        $subject->setReference('Patient/' . $dataRecord['puuid']);
-        $observationResource->setSubject($subject);
-
-        if (!empty($dataRecord['date_report'])) {
-            $observationResource->setEffectiveDateTime(gmdate('c', strtotime($dataRecord['date_report'])));
-        }
-
-        if (!empty($dataRecord['result_status'])) {
-            $observationResource->setStatus(($dataRecord['result_status']));
-        } else {
-            $observationResource->setStatus("unknown");
-        }
-
-        if (!empty($dataRecord['units'])) {
-            $observationResource->setValueQuantity($dataRecord['units']);
-        }
-
-        if (!empty($dataRecord['range'])) {
-            $observationResource->setValueRange($dataRecord['range']);
-        }
-
-        if (!empty($dataRecord['result'])) {
-            $quantity = new FHIRQuantity();
-            $quantity->setValue($dataRecord['result']);
-            if (!empty($dataRecord['units'])) {
-                $quantity->setUnit($dataRecord['units']);
+        $fhirSearchResult = new ProcessingResult();
+        try {
+            if (isset($fhirSearchParameters['_id'])) {
+                $result = $this->populateSurrogateSearchFieldsForUUID($fhirSearchParameters['_id'], $fhirSearchParameters);
+                if ($result instanceof ProcessingResult) { // failed to populate so return the results
+                    return $result;
+                }
             }
-            $observationResource->setValueQuantity($quantity);
-        }
 
+            if (isset($puuidBind)) {
+                $field = $this->getPatientContextSearchField();
+                $fhirSearchParameters[$field->getName()] = $puuidBind;
+            }
 
-        if (!empty($dataRecord['comments'])) {
-            $observationResource->addNote(['text' => $dataRecord['comments']]);
-        }
+            $servicesMap = [];
+            $services = [];
+            if (isset($fhirSearchParameters['category'])) {
+                /**
+                 * @var TokenSearchField
+                 */
+                $category = $fhirSearchParameters['category'];
 
-        if ($encode) {
-            return json_encode($observationResource);
-        } else {
-            return $observationResource;
+                $catServices = $this->getServiceListForCategory(
+                    TokenSearchField::fromEscapedFHIRString('category', $category)
+                );
+                foreach ($catServices as $service) {
+                    $servicesMap[$service::class] = $service;
+                }
+                $services = $servicesMap;
+            }
+            $codeMap = [];
+            if (isset($fhirSearchParameters['code'])) {
+                // we narrow our services down by code
+                $codeServices = $this->getServiceListForCode(
+                    new TokenSearchField('code', $fhirSearchParameters['code']),
+                );
+                $codeMap = [];
+                foreach ($codeServices as $service) {
+                    $codeMap[$service::class] = $service;
+                }
+                if (isset($fhirSearchParameters['category'])) {
+                    // we have both category and code so we need to intersect the two maps
+                    $services = array_intersect_key($servicesMap, $codeMap);
+                } else {
+                    $services = $codeMap;
+                }
+            }
+            if (empty($services)) {
+                $services = $this->getMappedServices();
+            }
+            $fhirSearchResult = $this->searchServices($services, $fhirSearchParameters, $puuidBind);
+        } catch (SearchFieldException $exception) {
+            $systemLogger = ServiceContainer::getLogger();
+            $systemLogger->error("FhirObservationService->getAll() exception thrown", ['message' => $exception->getMessage(),
+                'field' => $exception->getField(), 'trace' => $exception->getTraceAsString()]);
+            // put our exception information here
+            $fhirSearchResult->setValidationMessages([$exception->getField() => $exception->getMessage()]);
         }
+        return $fhirSearchResult;
     }
 
     /**
-     * Performs a FHIR Observation Resource lookup by FHIR Resource ID
-     *
-     * @param $fhirResourceId //The OpenEMR record's FHIR Observation Resource ID.
-     * @param $puuidBind - Optional variable to only allow visibility of the patient with this puuid.
+     * Take our uuid surrogate key and populate the underlying data elements and grabs the mapped key for it.
+     * @param $fhirResourceId The uuid search field with the 1..* values to search on
+     * @param $search Hashmap of search operators
      */
-    public function getOne($fhirResourceId, $puuidBind = null)
+    private function populateSurrogateSearchFieldsForUUID($fhirResourceId, &$search): ?ProcessingResult
     {
-        $processingResult = $this->observationService->getOne($fhirResourceId, $puuidBind);
-        if (!$processingResult->hasErrors()) {
-            if (count($processingResult->getData()) > 0) {
-                $openEmrRecord = $processingResult->getData()[0];
-                $fhirRecord = $this->parseOpenEMRRecord($openEmrRecord);
-                $processingResult->setData([]);
-                $processingResult->addData($fhirRecord);
+        $processingResult = new ProcessingResult();
+
+        // we first grab the uuid from our registry and find out if its a mapping observation resource
+        // (such as vital signs)
+        $registryRecord = UuidRegistry::getRegistryRecordForUuid($fhirResourceId);
+
+        if (empty($registryRecord)) {
+            // not found need to return 404 which is an empty response
+            $this->getSystemLogger()->debug("FhirObservationService->populateSurrogateSearchFieldsForUUID() - uuid not found in registry", ['_id' => $fhirResourceId]);
+            return $processingResult;
+        }
+
+        // if its not mapped we will leave the _id alone and let the subsequent sub service pull the right resource
+        // TODO: @adunsulag we could optimize this to go directly to the service that has the uuid but for now we'll just let it go through the normal search process
+        if ($registryRecord['mapped'] != '1') {
+            return null;
+        }
+
+        // we are going to get our
+        $mapping = UuidMapping::getMappingForUUID($fhirResourceId);
+
+        if (empty($mapping)) {
+            $this->getSystemLogger()->debug("FhirObservationService->populateSurrogateSearchFieldsForUUID() - uuid mapping not found in registry", ['_id' => $fhirResourceId]);
+            $processingResult->setValidationMessages(['_id' => 'Resource not found for that id']);
+            return $processingResult;
+        }
+
+        // grab our category
+        if ($mapping['resource'] !== 'Observation') {
+            // we have a problem here
+            $processingResult->setValidationMessages(["_id" => "Resource not found for that id"]);
+            $this->getSystemLogger()->error("Requested observation resource for uuid that exists for a different resource", ['_id' => $fhirResourceId, 'mappingResource' => $mapping['resource']]);
+            return $processingResult;
+        }
+
+        // grab category and code
+        $query_vars = [];
+        parse_str((string) $mapping['resource_path'], $query_vars);
+        if (empty($query_vars['category'])) {
+            $processingResult->setValidationMessages(["_id" => "Resource not found for that id"]);
+            $this->getSystemLogger()->error("Requested observation with no resource_path category to parse the mapping", ['uuid' => $fhirResourceId, 'resource_path' => $mapping['resource_path']]);
+            return $processingResult;
+        }
+        // if the search params already have code or category we need to check and make sure they match
+        $category = new TokenSearchField('category', explode(",", $query_vars['category']));
+        if (isset($search['category'])) {
+            $searchCategory = TokenSearchField::fromEscapedFHIRString('category', $search['category']);
+            if (!$searchCategory->containsSearchToken($category)) {
+                // category does not match so return an empty result set
+                $this->getSystemLogger()->error("Search categories did not not match the mapping, this could be a scope restriction, or a bad query"
+                    , ['uuid' => $fhirResourceId, 'mappingCategory' => $query_vars['category'], 'searchCategory' => $search['category']]);
+                return $processingResult;
             }
         }
-        return $processingResult;
+        $code = empty($search['code']) ? $query_vars['code'] : $search['code'] . "," . $query_vars['code'];
+        $search['code'] = $code;
+        $search['category'] = $query_vars['category'];
+
+        // we only want a single search value for now... not supporting combined uuids
+        $search['_id'] = UuidRegistry::uuidToString($mapping['target_uuid']);
+        return null;
+    }
+
+    public function getProfileURIs(): array
+    {
+        $profileSets = [];
+        foreach ($this->getMappedServices() as $service) {
+            if ($service instanceof IResourceUSCIGProfileService) {
+                $profileSets[] = $service->getProfileURIs();
+            }
+        }
+
+        // TODO: @adunsulag As we implement more profiles and sub-resource mappings we'll push them down to the sub-services
+        $latestVersions = [
+            'us-core-care-experience-preference'
+            ,'us-core-medicationdispense'
+            ,'us-core-observation-clinical-result'
+            ,'us-core-observation-occupation'
+            ,'us-core-observation-pregnancyintent'
+            ,'us-core-observation-pregnancystatus'
+            ,'us-core-observation-sexual-orientation'
+            ,'us-core-treatment-intervention-preference'
+        ];
+        $v8Versions = [
+            'us-core-observation-adi-documentation'
+        ];
+        foreach ($latestVersions as $resource) {
+            $profileSets[] = $this->getProfileForVersions('http://hl7.org/fhir/us/core/StructureDefinition/' . $resource, ['', '7.0.0', '8.0.0']);
+        }
+        foreach ($v8Versions as $resource) {
+            $profileSets[] = $this->getProfileForVersions('http://hl7.org/fhir/us/core/StructureDefinition/' . $resource, ['8.0.0']);
+        }
+
+        $profiles = array_merge(...$profileSets);
+        return $profiles;
     }
 
     /**
-     * Searches for OpenEMR records using OpenEMR search parameters
+     * Why each mapped sub-service cannot accept a write.
      *
-     * @param  array openEMRSearchParameters OpenEMR search fields
-     * @param $puuidBind - Optional variable to only allow visibility of the patient with this puuid.
-     * @return ProcessingResult
+     * Observation is a dispatcher over stores with very different shapes. Several of them
+     * are views over demographic and history columns rather than tables of observations, so
+     * there is nothing to write back through. A client is told which one it hit instead of
+     * having the resource accepted and dropped -- the failure mode the read path would
+     * otherwise hide, since the next GET reconstructs the resource from the untouched
+     * underlying field.
+     *
+     * A service absent from this map accepts writes.
+     *
+     * @var array<class-string, string>
      */
-    public function searchForOpenEMRRecords($openEMRSearchParameters, $puuidBind = null)
+    private const WRITE_REJECTION_REASONS = [
+        FhirObservationSocialHistoryService::class =>
+            'social history observations are a view over the patient history record; write them through that record',
+        FhirObservationHistorySdohService::class =>
+            'SDOH observations are a view over the patient history record; write them through that record',
+        FhirObservationPatientService::class =>
+            'patient-derived observations are a view over patient demographics; write them through Patient',
+        FhirObservationEmployerService::class =>
+            'employer-derived observations are a view over employer demographics; write them through Patient',
+        FhirObservationLaboratoryService::class =>
+            'laboratory results are written through their procedure order; Observation write for laboratory is not implemented yet',
+        FhirObservationObservationFormService::class =>
+            'observation form results are written through their form; Observation write for this category is not implemented yet',
+        FhirObservationAdvanceDirectiveService::class =>
+            'advance directive observations are written through their document; Observation write is not implemented for them',
+        FhirObservationQuestionnaireItemService::class =>
+            'questionnaire answers are written through QuestionnaireResponse',
+        FhirObservationCareExperiencePreferenceService::class =>
+            'care experience preferences are not writable through Observation yet',
+        FhirObservationTreatmentInterventionPreferenceService::class =>
+            'treatment intervention preferences are not writable through Observation yet',
+    ];
+
+    /**
+     * Inserts an Observation by routing it to the service that owns its code.
+     */
+    public function insert(FHIRDomainResource $fhirResource): ProcessingResult
     {
-        return $this->observationService->getAll($openEMRSearchParameters, false, $puuidBind);
+        $service = $this->getWriteServiceForResource($fhirResource);
+        if ($service instanceof ProcessingResult) {
+            return $service;
+        }
+        return $service->insert($fhirResource);
     }
 
-    public function parseFhirResource($fhirResource = array())
+    /**
+     * Updates an Observation by routing it to the service that owns its code.
+     *
+     * The id is checked by the sub-service rather than here: which store an id belongs to
+     * is a property of that store's mapping, and the sub-service is the only place that
+     * knows it.
+     *
+     * @param mixed $fhirResourceId
+     */
+    public function update($fhirResourceId, FHIRDomainResource $fhirResource): ProcessingResult
     {
-        // TODO: If Required in Future
+        if (!is_string($fhirResourceId)) {
+            $result = new ProcessingResult();
+            $result->setValidationMessages(['uuid' => 'Invalid Observation id']);
+            return $result;
+        }
+        $service = $this->getWriteServiceForResource($fhirResource);
+        if ($service instanceof ProcessingResult) {
+            return $service;
+        }
+        return $service->update($fhirResourceId, $fhirResource);
     }
 
-    public function insertOpenEMRRecord($openEmrRecord)
+    /**
+     * Picks the sub-service that should handle a write, or the rejection to return instead.
+     *
+     * @return FhirServiceBase|ProcessingResult
+     */
+    private function getWriteServiceForResource(FHIRDomainResource $fhirResource): FhirServiceBase|ProcessingResult
     {
-        // TODO: If Required in Future
-    }
+        if (!($fhirResource instanceof FHIRObservation)) {
+            throw new \InvalidArgumentException(
+                'Expected FHIRObservation resource, got ' . $fhirResource::class
+            );
+        }
 
-    public function updateOpenEMRRecord($fhirResourceId, $updatedOpenEMRRecord)
-    {
-        // TODO: If Required in Future
-    }
-    public function createProvenanceResource($dataRecord = array(), $encode = false)
-    {
-        // TODO: If Required in Future
+        $json = $fhirResource->jsonSerialize();
+        // Every coding is a candidate, not only the first: FHIR gives coding order no meaning,
+        // and a vital sign sent as [SNOMED, LOINC] is as valid as [LOINC, SNOMED]. Which coding
+        // the store actually uses -- and whether its system is one it accepts -- is the
+        // routed service's decision, made again in its own parseFhirResource().
+        $codes = FhirPayloadReader::codingCodes($json['code'] ?? null);
+        if ($codes === []) {
+            $result = new ProcessingResult();
+            $result->setValidationMessages(['code' => 'Observation.code is required (FHIR R4 1..1)']);
+            return $result;
+        }
+        $code = implode('", "', $codes);
+
+        // Category is half of the route. Codes alone overlap between stores -- 2708-6 is a
+        // vital sign here and a routine arterial blood gas result in a laboratory panel -- and
+        // the laboratory service claims every code, so routing on code alone would write a lab
+        // result into form_vitals and read it back as a vital sign.
+        $categories = [];
+        foreach (FhirPayloadReader::rows($json['category'] ?? null) as $concept) {
+            foreach (FhirPayloadReader::codings($concept) as $coding) {
+                $categoryCode = FhirPayloadReader::getString($coding, 'code');
+                if ($categoryCode !== null && $categoryCode !== '') {
+                    $categories[] = $categoryCode;
+                }
+            }
+        }
+        if ($categories === []) {
+            $result = new ProcessingResult();
+            $result->setValidationMessages([
+                'category' => 'Observation.category is required to route a write; it decides which store the code belongs to',
+            ]);
+            return $result;
+        }
+
+        // The same intersection getAll() uses on the read path: services that accept the
+        // category, narrowed to those that accept the code. A code therefore routes to the
+        // same store whichever direction it is travelling in.
+        $acceptsCategory = [];
+        $categoryServices = $this->getServiceListForCategory(new TokenSearchField('category', $categories));
+        foreach ($categoryServices as $service) {
+            if ($service instanceof FhirServiceBase) {
+                $acceptsCategory[$service::class] = true;
+            }
+        }
+        $matched = null;
+        // With more than one category, the first store in the read path's own order that
+        // accepts both a category and a code wins, so the choice is deterministic and matches
+        // how the same resource would be found on read. The chosen service then re-checks the
+        // category it requires, so a mixed list cannot carry a resource into a store whose
+        // category it does not actually claim.
+        $codeServices = $this->getServiceListForCode(new TokenSearchField('code', $codes));
+        foreach ($codeServices as $service) {
+            if ($service instanceof FhirServiceBase && isset($acceptsCategory[$service::class])) {
+                $matched = $service;
+                break;
+            }
+        }
+
+        if ($matched === null) {
+            $result = new ProcessingResult();
+            $result->setValidationMessages([
+                'code' => 'Observation.code "' . $code . '" is not a code OpenEMR stores under category "'
+                    . implode('", "', $categories) . '"',
+            ]);
+            return $result;
+        }
+
+        $reason = self::WRITE_REJECTION_REASONS[$matched::class] ?? null;
+        if ($reason !== null) {
+            $result = new ProcessingResult();
+            $result->setValidationMessages([
+                'code' => 'Observation.code "' . $code . '" cannot be written: ' . $reason,
+            ]);
+            return $result;
+        }
+
+        // The controller gives the session to this dispatcher only. The store needs it to
+        // record who made the write.
+        $session = $this->getSession();
+        if ($session !== null) {
+            $matched->setSession($session);
+        }
+
+        return $matched;
     }
 }

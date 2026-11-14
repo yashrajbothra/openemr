@@ -4,17 +4,23 @@
  *  Front Payment CC and Terminal Readers support.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Jerry Padgett <sjpadgett@gmail.com>
- * @copyright Copyright (c) 2020 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2021 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 $ignoreAuth = false;
 require_once(__DIR__ . "/../globals.php");
+$session = \OpenEMR\Common\Session\SessionWrapperFactory::getInstance()->getActiveSession();
+$pid = $session->get('pid', 0);
 
+use OpenEMR\BC\ServiceContainer;
 use OpenEMR\Billing\PaymentGateway;
-use OpenEMR\Common\Crypto\CryptoGen;
+use OpenEMR\Core\OEGlobalsBag;
+use Stripe\PaymentIntent;
+use Stripe\Stripe;
+use Stripe\Terminal\ConnectionToken;
 
 if ($_POST['mode'] == 'AuthorizeNet') {
     $form_pid = $_POST['form_pid'];
@@ -24,13 +30,14 @@ if ($_POST['mode'] == 'AuthorizeNet') {
     $transaction['opaqueDataDescriptor'] = $_POST['dataDescriptor'];
     $transaction['opaqueDataValue'] = $_POST['dataValue'];
     try {
+        /** @var \Omnipay\AuthorizeNetApi\Message\Response|string $response */
         $response = $pay->submitPaymentToken($transaction);
         if (is_string($response)) {
             echo $response;
             exit();
         }
         $r = $response->getParsedData();
-        $cc = array();
+        $cc = [];
         $cc["cardHolderName"] = $_POST["cardHolderName"];
         $cc['status'] = $response->isSuccessful() ? "ok" : "failed";
         $cc['authCode'] = $r->transactionResponse->authCode;
@@ -39,8 +46,9 @@ if ($_POST['mode'] == 'AuthorizeNet') {
         $cc['cc_type'] = $r->transactionResponse->accountType;
         $cc['zip'] = $_POST["zip"];
         $ccaudit = json_encode($cc);
-    } catch (\Exception $ex) {
-        return $ex->getMessage();
+    } catch (\Throwable $ex) {
+        echo $ex->getMessage();
+        exit();
     }
 
     if (!$response->isSuccessful()) {
@@ -48,34 +56,48 @@ if ($_POST['mode'] == 'AuthorizeNet') {
         exit();
     }
 
-    echo $ccaudit;
+    echo text($ccaudit);
     exit();
 }
 
 if ($_POST['mode'] == 'Stripe') {
-    $form_pid = $_POST['form_pid'];
+    $pd = sqlQuery("SELECT " .
+        "p.fname, p.mname, p.lname, p.pubpid, p.pid, i.copay " .
+        "FROM patient_data AS p " .
+        "LEFT OUTER JOIN insurance_data AS i ON " .
+        "i.pid = p.pid AND i.type = 'primary' " .
+        "WHERE p.pid = ? ORDER BY i.date DESC LIMIT 1", [$pid]);
     $pay = new PaymentGateway("Stripe");
     $transaction['amount'] = $_POST['payment'];
     $transaction['currency'] = "USD";
     $transaction['token'] = $_POST['stripeToken'];
+    $transaction['description'] = $pd['lname'] . ' ' . $pd['fname'] . ' ' . $pd['mname'];
+    $transaction['metadata'] = [
+        'Patient' => $pd['lname'] . ' ' . $pd['fname'] . ' ' . $pd['mname'],
+        'MRN' => $pd['pubpid'],
+        'Invoice Items (date encounter)' => $_POST['encs'],
+        'Invoice Total' => $transaction['amount']
+    ];
     try {
+        /** @var \Omnipay\Stripe\Message\Response|string $response */
         $response = $pay->submitPaymentToken($transaction);
         if (is_string($response)) {
             echo $response;
             exit();
         }
         $r = $response->getSource();
-        $cc = array();
+        $cc = [];
         $cc["cardHolderName"] = $_POST["cardHolderName"];
         $cc['status'] = $response->isSuccessful() ? "ok" : "failed";
         $cc['authCode'] = $r['fingerprint'];
         $cc['transId'] = $response->getTransactionReference();
         $cc['cardNumber'] = "******** " . $r['last4'];
         $cc['cc_type'] = $r['brand'];
-        $cc['zip'] = $r->address_zip;
+        $cc['zip'] = $r['address_zip'] ?? null;
         $ccaudit = json_encode($cc);
-    } catch (\Exception $ex) {
+    } catch (\Throwable $ex) {
         echo $ex->getMessage();
+        exit();
     }
 
     if (!$response->isSuccessful()) {
@@ -85,4 +107,99 @@ if ($_POST['mode'] == 'Stripe') {
 
     echo $ccaudit;
     exit();
+}
+
+if ($_GET['mode'] == 'terminal_token') {
+    $cryptoGen = ServiceContainer::getCrypto();
+    $apiKey = $cryptoGen->decryptFromDatabase(OEGlobalsBag::getInstance()->getString('gateway_api_key'));
+    Stripe::setApiKey($apiKey);
+
+    header('Content-Type: application/json');
+
+    try {
+        $connectionToken = ConnectionToken::create();
+        echo json_encode(['secret' => $connectionToken->secret], JSON_THROW_ON_ERROR);
+    } catch (\Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_THROW_ON_ERROR);
+    }
+}
+if ($_GET['mode'] == 'cancel_intent') {
+    $cryptoGen = ServiceContainer::getCrypto();
+    $apiKey = $cryptoGen->decryptFromDatabase(OEGlobalsBag::getInstance()->getString('gateway_api_key'));
+    Stripe::setApiKey($apiKey);
+
+    header('Content-Type: application/json');
+
+    try {
+        $json_str = file_get_contents('php://input');
+        $json_obj = json_decode($json_str);
+
+        $intent = PaymentIntent::retrieve($json_obj->id);
+        $rtn = $intent->cancel();
+
+        echo json_encode(['status' => (string)$rtn->status]);
+    } catch (\Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+if ($_GET['mode'] == 'terminal_capture') {
+    $cryptoGen = ServiceContainer::getCrypto();
+    $apiKey = $cryptoGen->decryptFromDatabase(OEGlobalsBag::getInstance()->getString('gateway_api_key'));
+    Stripe::setApiKey($apiKey);
+
+    header('Content-Type: application/json');
+
+    try {
+        // retrieve JSON from POST body
+        $json_str = file_get_contents('php://input');
+        $json_obj = json_decode($json_str);
+
+        $intent = PaymentIntent::retrieve($json_obj->id);
+        $intent = $intent->capture();
+
+        echo json_encode($intent);
+    } catch (\Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_THROW_ON_ERROR);
+    }
+}
+
+if ($_GET['mode'] == 'terminal_create') {
+    $cryptoGen = ServiceContainer::getCrypto();
+    $apiKey = $cryptoGen->decryptFromDatabase(OEGlobalsBag::getInstance()->getString('gateway_api_key'));
+    Stripe::setApiKey($apiKey);
+
+    header('Content-Type: application/json');
+
+    try {
+        $json_str = file_get_contents('php://input');
+        $json_obj = json_decode($json_str);
+        $pd = sqlQuery("SELECT " .
+            "p.fname, p.mname, p.lname, p.pubpid,p.pid, p.email, i.copay " .
+            "FROM patient_data AS p " .
+            "LEFT OUTER JOIN insurance_data AS i ON " .
+            "i.pid = p.pid AND i.type = 'primary' " .
+            "WHERE p.pid = ? ORDER BY i.date DESC LIMIT 1", [$pid]);
+
+        $intent = PaymentIntent::create([
+            'amount' => $json_obj->amount,
+            'currency' => 'usd',
+            'payment_method_types' => ['card_present'],
+            'capture_method' => 'manual',
+            'description' => $pd['lname'] . ' ' . $pd['fname'] . ' ' . $pd['mname'],
+            'metadata' => [
+                'Patient' => $pd['lname'] . ' ' . $pd['fname'] . ' ' . $pd['mname'],
+                'MRN' => $pd['pubpid'],
+                'Invoice Items (date encounter)' => $json_obj->encs,
+                'Invoice Total' => number_format(($json_obj->amount / 100), 2, '.', '')
+                ]
+        ]);
+        echo json_encode(['client_secret' => $intent->client_secret], JSON_THROW_ON_ERROR);
+    } catch (\Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_THROW_ON_ERROR);
+    }
 }

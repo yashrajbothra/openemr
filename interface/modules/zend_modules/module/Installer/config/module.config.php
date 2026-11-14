@@ -11,86 +11,54 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use Installer\Model\InstModuleTable;
 use Interop\Container\ContainerInterface;
-use Laminas\ServiceManager\Factory\InvokableFactory;
 use Laminas\Router\Http\Segment;
-use Laminas\ServiceManager\AbstractPluginManager;
-use Laminas\Db\ResultSet\ResultSet;
-use Installer\Model\InstModule;
-use Laminas\Db\Adapter\Adapter;
 
-return array(
-    'controllers' => array(
+return [
+    'controllers' => [
         'factories' => [
             Installer\Controller\InstallerController::class => function (ContainerInterface $container, $requestedName) {
-                $dbAdapter = $container->get(Adapter::class);
-                $resultSetPrototype = new ResultSet();
-                $resultSetPrototype->setArrayObjectPrototype(new InstModule());
-                $tableGateway = new Installer\Model\InstModuleTableGateway('InstModule', $dbAdapter, null, $resultSetPrototype);
-
-                $InstModuleTable = new Installer\Model\InstModuleTable($tableGateway, $container);
-                return new Installer\Controller\InstallerController($InstModuleTable);
+                $instModuleTable = new Installer\Model\InstModuleTable($container);
+                return new Installer\Controller\InstallerController($instModuleTable);
             },
         ]
-    ),
-
-    'router' => array(
-        'routes' => array(
-            'Installer' => array(
+    ],
+    'service_manager' => [
+        'factories' => [
+            InstModuleTable::class => fn(ContainerInterface $container, $requestedName): InstModuleTable => new InstModuleTable($container),
+        ]
+    ],
+    'router' => [
+        'routes' => [
+            'Installer' => [
                 'type'    => Segment::class,
-                'options' => array(
+                'options' => [
                     'route'    => '/Installer[/:action][/:id]',
-                    'constraints' => array(
+                    'constraints' => [
                         'action' => '[a-zA-Z][a-zA-Z0-9_-]*',
                         'id'     => '[0-9]+',
-                    ),
-                    'defaults' => array(
+                    ],
+                    'defaults' => [
                         'controller' => Installer\Controller\InstallerController::class,
                         'action'     => 'index',
-                    ),
-                ),
-            ),
+                    ],
+                ],
+            ],
 
-                ),
-            ),
-    'console' => array(
-        'router' => array(
-            'routes' => array(
-
-                'zfc-module' => array(
-                    'options' => array(
-                        'route' => 'zfc-module --site= --modaction= --modname= ',
-                        'defaults' => array(
-                            'controller' => Installer\Controller\InstallerController::class,
-                            'action' => 'command-install-module',
-                        ),
-                    )
-                ),
-
-                'register' => array(
-                    'options' => array(
-                        'route'    => 'register --mtype= --modname=',
-                        'defaults' => array(
-                            'controller' => Installer\Controller\InstallerController::class,
-                            'action'     => 'register',
-                        ),
-                    ),
-                ),
-
-            )
-        )
-    ),
-    'view_manager' => array(
-        'template_map' => array(
+        ],
+    ],
+    'view_manager' => [
+        'template_map' => [
              'site/layout' => __DIR__ . '/../view/layout/layout.phtml',
-        ),
-        'template_path_stack' => array(
+        ],
+        'template_path_stack' => [
             'installer' => __DIR__ . '/../view',
-        ),
+        ],
         'layout' => 'site/layout',
-    ),
-    'moduleconfig' => array(
+    ],
+    'moduleconfig' => [
 
-    ),
+    ],
 
-);
+];

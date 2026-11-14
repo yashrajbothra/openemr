@@ -1,20 +1,24 @@
 <?php
 
 /**
- * interface/eRxGlobals.php Functions for retrieving NewCrop global configurations.
+ * interface/eRxGlobals.php Functions for retrieving Ensora eRx global configurations.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Sam Likins <sam.likins@wsi-services.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2015 Sam Likins <sam.likins@wsi-services.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-use OpenEMR\Common\Crypto\CryptoGen;
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Encryption\Plaintext;
+use OpenEMR\Rx\Ensora\ErxGlobalsInterface;
+use OpenEMR\Services\VersionService;
 
-class eRxGlobals
+class eRxGlobals implements ErxGlobalsInterface
 {
-
     private $configuration;
 
     /**
@@ -49,29 +53,23 @@ class eRxGlobals
         if (array_key_exists($key, $this->configuration)) {
             return $this->configuration[$key];
         }
+
+        return null;
     }
 
     /**
-     * Return the version of OpenEMR
-     * @return string OpenEMR version
+     * Return the OpenEMR site directory, or empty when unset
      */
-    public function getOpenEMRVersion()
+    public function getOpenEMRSiteDirectory(): string
     {
-        return $this->getGlobalValue('openemr_version');
+        $value = $this->getGlobalValue('OE_SITE_DIR');
+
+        return is_string($value) ? $value : '';
     }
 
     /**
-     * Return the OpenEMR site directory
-     * @return string OpenEMR site directory
-     */
-    public function getOpenEMRSiteDirectory()
-    {
-        return $this->getGlobalValue('OE_SITE_DIR');
-    }
-
-    /**
-     * Return enable state for NewCrop eRx service
-     * @return boolean NewCrop eRx service enabled state
+     * Return enable state for Ensora eRx service
+     * @return bool Ensora eRx service enabled state
      */
     public function getEnabled()
     {
@@ -79,26 +77,27 @@ class eRxGlobals
     }
 
     /**
-     * Return the NewCrop eRx requests URL
-     * @return string URL for NewCrop eRx requests
+     * Return the Ensora eRx requests URL, or empty when unset
      */
-    public function getPath()
+    public function getPath(): string
     {
-        return $this->getGlobalValue('erx_newcrop_path');
+        $value = $this->getGlobalValue('erx_newcrop_path');
+
+        return is_string($value) ? $value : '';
     }
 
     /**
-     * Return the NewCrop eRx service URLs
-     * @return array URLs for NewCrop eRx services: index [ 0 = Update, 1 = Patient ]
+     * Return the Ensora eRx service URLs
+     * @return array URLs for Ensora eRx services: index [ 0 = Update, 1 = Patient ]
      */
     public function getSoapPaths()
     {
-        return explode(';', $this->getGlobalValue('erx_newcrop_path_soap'));
+        return explode(';', (string) $this->getGlobalValue('erx_newcrop_path_soap'));
     }
 
     /**
-     * Return the NewCrop eRx allergies time-to-live
-     * @return integer Time-to-live in seconds for NewCrop eRx allergies
+     * Return the Ensora eRx allergies time-to-live
+     * @return int Time-to-live in seconds for Ensora eRx allergies
      */
     public function getTTLSoapAllergies()
     {
@@ -106,8 +105,8 @@ class eRxGlobals
     }
 
     /**
-     * Return the NewCrop eRx medications time-to-live
-     * @return integer Time-to-live in seconds for NewCrop eRx medications
+     * Return the Ensora eRx medications time-to-live
+     * @return int Time-to-live in seconds for Ensora eRx medications
      */
     public function getTTLSoapMedications()
     {
@@ -115,54 +114,56 @@ class eRxGlobals
     }
 
     /**
-     * Return the NewCrop eRx partner name for credentials
-     * @return string Partner name for credentials
+     * Return the Ensora eRx partner name for credentials, or empty when unset
      */
-    public function getPartnerName()
+    public function getPartnerName(): string
     {
-        return $this->getGlobalValue('erx_account_partner_name');
+        $value = $this->getGlobalValue('erx_account_partner_name');
+
+        return is_string($value) ? $value : '';
     }
 
     /**
-     * Return the NewCrop eRx account name for credentials
-     * @return string Account name for credentials
+     * Return the Ensora eRx account name for credentials, or empty when unset
      */
-    public function getAccountName()
+    public function getAccountName(): string
     {
-        return $this->getGlobalValue('erx_account_name');
+        $value = $this->getGlobalValue('erx_account_name');
+
+        return is_string($value) ? $value : '';
     }
 
     /**
-     * Return the NewCrop eRx password for credentials
-     * @return string Password for credentials
+     * Return the decrypted Ensora eRx password for credentials, or empty when unset
      */
-    public function getAccountPassword()
+    public function getAccountPassword(): Plaintext
     {
-        $cryptoGen = new CryptoGen();
-        return $cryptoGen->decryptStandard($this->getGlobalValue('erx_account_password'));
+        $value = $this->getGlobalValue('erx_account_password');
+
+        return new Plaintext(ServiceContainer::getCrypto()->decryptFromDatabase(is_string($value) ? $value : null));
     }
 
     /**
-     * Return the NewCrop eRx account Id for credentials
-     * @return string Account Id for credentials
+     * Return the Ensora eRx account Id for credentials, or empty when unset
      */
-    public function getAccountId()
+    public function getAccountId(): string
     {
-        return $this->getGlobalValue('erx_account_id');
+        $value = $this->getGlobalValue('erx_account_id');
+
+        return is_string($value) ? $value : '';
     }
 
     /**
-     * Return enable state for NewCrop eRx only upload prescriptions
-     * @return boolean NewCrop eRx only upload prescriptions enabled state
+     * Return enable state for Ensora eRx only upload prescriptions
      */
-    public function getUploadActive()
+    public function getUploadActive(): bool
     {
-        return $this->getGlobalValue('erx_upload_active');
+        return in_array($this->getGlobalValue('erx_upload_active'), [true, 1, '1'], true);
     }
 
     /**
-     * Return enable state for NewCrop eRx import status message
-     * @return boolean NewCrop eRx import status message enabled state
+     * Return enable state for Ensora eRx import status message
+     * @return bool Ensora eRx import status message enabled state
      */
     public function getImportStatusMessage()
     {
@@ -170,8 +171,8 @@ class eRxGlobals
     }
 
     /**
-     * Return enable state for NewCrop eRx display medications uploaded
-     * @return boolean NewCrop eRx display medications uploaded enabled state
+     * Return enable state for Ensora eRx display medications uploaded
+     * @return bool Ensora eRx display medications uploaded enabled state
      */
     public function getDisplayMedication()
     {
@@ -179,8 +180,8 @@ class eRxGlobals
     }
 
     /**
-     * Return enable state for NewCrop eRx display allergies uploaded
-     * @return boolean NewCrop eRx display allergies uploaded enabled state
+     * Return enable state for Ensora eRx display allergies uploaded
+     * @return bool Ensora eRx display allergies uploaded enabled state
      */
     public function getDisplayAllergy()
     {
@@ -188,33 +189,44 @@ class eRxGlobals
     }
 
     /**
-     * Return NewCrop eRx default patient country code
-     * @return string NewCrop eRx default patient country code
+     * Return Ensora eRx default patient country code, or empty when unset
      */
-    public function getDefaultPatientCountry()
+    public function getDefaultPatientCountry(): string
     {
-        return $this->getGlobalValue('erx_default_patient_country');
+        $value = $this->getGlobalValue('erx_default_patient_country');
+
+        return is_string($value) ? $value : '';
     }
 
     /**
-     * Return array containing NewCrop eRx credentials
-     * @return array NewCrop eRx credentials: index [ 0 = Partner Name, 1 = Account Name, 2 = Password ]
+     * Return array containing Ensora eRx credentials
+     * @return array Ensora eRx credentials: index [ 0 = Partner Name, 1 = Account Name, 2 = Password ]
      */
-    public function getCredentials()
+    public function getCredentials(): array
     {
-        return array(
+        return [
             $this->getPartnerName(),
             $this->getAccountName(),
-            $this->getAccountPassword(),
-        );
+            $this->getAccountPassword()->bytes,
+        ];
     }
 
     /**
-     * Return Debug NewCrop eRx settings
-     * @return integer Debug settings: flags [ 1 = XML, 2 = RESULT ]
+     * Return the OpenEMR version the eRx request reports
      */
-    public function getDebugSetting()
+    public function getProductVersion(): string
     {
-        return $this->getGlobalValue('erx_debug_setting');
+        return (new VersionService())->getSoftwareVersion()->full;
+    }
+
+    /**
+     * Return Debug Ensora eRx settings
+     * @return int Debug settings: flags [ 1 = XML, 2 = RESULT ]
+     */
+    public function getDebugSetting(): int
+    {
+        $value = $this->getGlobalValue('erx_debug_setting');
+
+        return is_numeric($value) ? (int) $value : 0;
     }
 }

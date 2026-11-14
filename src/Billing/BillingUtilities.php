@@ -7,16 +7,19 @@
  * @author Rod Roark <rod@sunsetsystems.com>
  * @author Stephen Waite <stephen.waite@cmsvt.com>
  * @copyright Copyright (c) 2011-2021 Rod Roark <rod@sunsetsystems.com>
- * @copyright Copyright (c) 2019 Stephen Waite <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2019-2022 Stephen Waite <stephen.waite@cmsvt.com>
  * @link https://www.open-emr.org
  * @license https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Billing;
 
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+
 class BillingUtilities
 {
-    public const CLAIM_STATUS_CODES_CLP02 = array(
+    public const CLAIM_STATUS_CODES_CLP02 = [
         '1'  => 'Processed as Primary',
         '2'  => 'Processed as Secondary',
         '3'  => 'Processed as Tertiary',
@@ -34,9 +37,9 @@ class BillingUtilities
         '23' => 'Not Our Claim, Forwarded to Additional Payer(s)',
         '25' => 'Predetermination Pricing Only - No Payment',
         '27' => 'Reviewed',
-    );
+    ];
 
-    public const CLAIM_ADJUSTMENT_REASON_CODES = array(
+    public const CLAIM_ADJUSTMENT_REASON_CODES = [
         '1' => 'Deductible Amount',
         '2' => 'Coinsurance Amount',
         '3' => 'Co-payment Amount',
@@ -275,6 +278,10 @@ class BillingUtilities
         '299' => 'The billing provider is not eligible to receive payment for the service billed.',
         '300' => 'Claim received by the Medical Plan, but benefits not available under this plan. Claim has been forwarded to the patient\'s Behavioral Health Plan for further consideration.',
         '301' => 'Claim received by the Medical Plan, but benefits not available under this plan. Submit these services to the patient\'s Behavioral Health Plan for further consideration.',
+        '302' => 'Precertification/notification/authorization/pre-treatment time limit has expired.',
+        '303' => 'Prior payer\'s (or payers\') patient responsibility (deductible, coinsurance, co-payment) not covered for Qualified Medicare and Medicaid Beneficiaries. (Use only with Group Code CO)',
+        '304' => 'Claim received by the medical plan, but benefits not available under this plan. Submit these services to the patient\'s hearing plan for further consideration.',
+        '305' => 'Claim received by the medical plan, but benefits not available under this plan. Claim has been forwarded to the patient\'s hearing plan for further consideration.',
         'A0' => 'Patient refund amount.',
         'A1' => 'Claim/Service denied. At least one Remark Code must be provided (may be comprised of either the NCPDP Reject Reason Code, or Remittance Advice Remark Code that is not an ALERT.)',
         'A5' => 'Medicare Claim PPS Capital Cost Outlier Amount.',
@@ -324,9 +331,9 @@ class BillingUtilities
         'P27' => 'Payment denied based on the Liability Coverage Benefits jurisdictional regulations and/or payment policies. Usage: If adjustment is at the Claim Level, the payer must send and the provider should refer to the 835 Insurance Policy Number Segment (Loop 2100 Other Claim Related Information REF qualifier \'IG\') if the jurisdictional regulation applies. If adjustment is at the Line Level, the payer must send and the provider should refer to the 835 Healthcare Policy Identification Segment (loop 2110 Service Payment information REF) if the regulations apply. To be used for Property and Casualty Auto only.',
         'P28' => 'Payment adjusted based on the Liability Coverage Benefits jurisdictional regulations and/or payment policies. Usage: If adjustment is at the Claim Level, the payer must send and the provider should refer to the 835 Insurance Policy Number Segment (Loop 2100 Other Claim Related Information REF qualifier \'IG\') if the jurisdictional regulation applies. If adjustment is at the Line Level, the payer must send and the provider should refer to the 835 Healthcare Policy Identification Segment (loop 2110 Service Payment information REF) if the regulations apply. To be used for Property and Casualty Auto only.',
         'P29' => 'Liability Benefits jurisdictional fee schedule adjustment. Usage: If adjustment is at the Claim Level, the payer must send and the provider should refer to the 835 Class of Contract Code Identification Segment (Loop 2100 Other Claim Related Information REF). If adjustment is at the Line Level, the payer must send and the provider should refer to the 835 Healthcare Policy Identification Segment (loop 2110 Service Payment information REF) if the regulations apply. To be used for Property and Casualty Auto only.'
-    );
+    ];
 
-    public const REMITTANCE_ADVICE_REMARK_CODES = array(
+    public const REMITTANCE_ADVICE_REMARK_CODES = [
         'M1' => 'X-ray not taken within the past 12 months or near enough to the start of treatment.',
         'M2' => 'Not paid separately when the patient is an inpatient.',
         'M3' => 'Equipment is the same or similar to equipment already being used.',
@@ -1362,14 +1369,61 @@ class BillingUtilities
         'N835' => 'Unrelated Service/procedure/treatment is reduced. The balance of this charge is the patient\'s responsibility.',
         'N836' => 'Provider W9 or Payee Registration not on file.',
         'N837' => 'Alert: Missing modifier was added.',
-        'N838' => 'Alert: Service/procedure postponed due to a federal, state, or local mandate/disaster declaration. Any amounts applied to deductible or member liability will be applied to the prior plan year from which the procedure was cancelled.'
-    );
+        'N838' => 'Alert: Service/procedure postponed due to a federal, state, or local mandate/disaster declaration. Any amounts applied to deductible or member liability will be applied to the prior plan year from which the procedure was cancelled.',
+        'N839' => 'The procedure code was added/changed because the level of service exceeds the compensable condition(s).',
+        'N840' => 'Worker\'s compensation claim filed with a different state.',
+        'N841' => 'Alert: North Dakota Administrative Rule 92-01-02-50.3.',
+        'N842' => 'Alert: Patient cannot be billed for charges.',
+        'N843' => 'Missing/incomplete/invalid Core-Based Statistical Area (CBSA) code.',
+        'N844' => 'This claim, or a portion of this claim, was processed in accordance with the Nebraska Legislative LB997 July 24, 2020 - Out of Network Emergency Medical Care Act.',
+        'N845' => 'Alert: Nebraska Legislative LB997 July 24, 2020 - Out of Network Emergency Medical Care Act.',
+        'N846' => 'National Drug Code (NDC) supplied does not correspond to the HCPCs/CPT billed.',
+        'N847' => 'National Drug Code (NDC) billed is obsolete.',
+        'N848' => 'National Drug Code (NDC) billed cannot be associated with a product.',
+        'N849' => 'Missing Tooth Clause: Tooth missing prior to the member effective date.',
+        'N850' => 'Missing/incomplete/invalid narrative explaining/describing this service/treatment.',
+        'N851' => 'Payment reduced because services were furnished by a therapy assistant.',
+        'N852' => 'The pay-to and rendering provider tax identification numbers (TINs) do not match',
+        'N853' => 'The number of modalities performed per session exceeds our acceptable maximum.',
+        'N854' => 'Alert: If you have primary other health insurance (OHI) coverage that has denied services, you must exhaust all appeal levels with your primary OHI before we can consider your claim for reimbursement.',
+        'N855' => 'This coverage is subject to the exclusive jurisdiction of ERISA (1974), U.S.C. SEC 1001.',
+        'N856' => 'This coverage is not subject to the exclusive jurisdiction of ERISA (1974), U.S.C. SEC 1001.',
+        'N857' => 'This claim has been adjusted/reversed. Refund any collected copayment to the member.',
+        'N858' => 'Alert: State regulations relating to an Out of Network Medical Emergency Care Act were applied to the processing of this claim. Payment amounts are eligible for dispute following the state\'s documented appeal/ grievance/ arbitration process.',
+        'N859' => 'Alert: The Federal No Surprise Billing Act was applied to the processing of this claim. Payment amounts are eligible for dispute pursuant to any Federal documented appeal/ grievance/ dispute resolution process(es).',
+        'N860' => 'Alert: The Federal No Surprise Billing Act Qualified Payment Amount (QPA) was used to calculate the member cost share(s).',
+        'N861' => 'Alert: Mismatch between the submitted Patient Liability/Share of Cost and the amount on record for this recipient.',
+        'N862' => 'Alert: Member cost share is in compliance with the No Surprises Act, and is calculated using the lesser of the QPA or billed charge.',
+        'N863' => 'Alert: This claim is subject to the No Surprises Act (NSA). The amount paid is the final out-of-network rate and was calculated based on an All Payer Model Agreement, in accordance with the NSA.',
+        'N864' => 'Alert: This claim is subject to the No Surprises Act provisions that apply to emergency services.',
+        'N865' => 'Alert: This claim is subject to the No Surprises Act provisions that apply to nonemergency services furnished by nonparticipating providers during a patient visit to a participating facility.',
+        'N866' => 'Alert: This claim is subject to the No Surprises Act provisions that apply to services furnished by nonparticipating providers of air ambulance services.',
+        'N867' => 'Alert: Cost sharing was calculated based on a specified state law, in accordance with the No Surprises Act.',
+        'N868' => 'Alert: Cost sharing was calculated based on an All-Payer Model Agreement, in accordance with the No Surprises Act.',
+        'N869' => 'Alert: Cost sharing was calculated based on the qualifying payment amount, in accordance with the No Surprises Act.',
+        'N870' => 'Alert: In accordance with the No Surprises Act, cost sharing was based on the billed amount because the billed amount was lower than the qualifying payment amount.',
+        'N871' => 'Alert: This initial payment was calculated based on a specified state law, in accordance with the No Surprises Act.',
+        'N872' => 'Alert: This final payment was calculated based on a specified state law, in accordance with the No Surprises Act.',
+        'N873' => 'Alert: This final payment was calculated based on an All-Payer Model Agreement, in accordance with the No Surprises Act.',
+        'N874' => 'Alert: This final payment was determined through open negotiation, in accordance with the No Surprises Act.',
+        'N875' => 'Alert: This final payment equals the amount selected as the out-of-network rate by a Federal Independent Dispute Resolution Entity, in accordance with the No Surprises Act.',
+        'N876' => 'Alert: This item or service is covered under the plan. This is a notice of denial of payment provided in accordance with the No Surprises Act. The provider or facility may initiate open negotiation if they desire to negotiate a higher out-of-network rate than the amount paid by the patient in cost sharing.',
+        'N877' => 'Alert: This initial payment is provided in accordance with the No Surprises Act. The provider or facility may initiate open negotiation if they desire to negotiate a higher out-of-network rate.',
+        'N878' => 'Alert: The provider or facility specified that notice was provided and consent to balance bill obtained, but notice and consent was not provided and obtained in a manner consistent with applicable Federal law. Thus, cost sharing and the total amount paid have been calculated based on the requirements under the No Surprises Act, and balance billing is prohibited.',
+        'N879' => 'Alert: The notice and consent to balance bill, and to be charged out-of-network cost sharing, that was obtained from the patient with regard to the billed services, is not permitted for these services. Thus, cost sharing and the total amount paid have been calculated based on the requirements under the No Surprises Act, and balance billing is prohibited.',
+        'N880' => 'Original claim closed due to changes in submitted data. Adjustment claim will be processed under a new claim number.',
+        'N881' => 'Client Obligation, patient responsibility for Home & Community Based Services (HCBS)',
+        'N882' => 'Alert: The out-of-network payment and cost sharing amounts were based on the plan\'s allowance because the provider or facility obtained the patient\'s consent to waive the balance billing protections under the No Surprises Act.',
+        'N883' => 'Alert: Processed according to state law',
+        'N884' => 'Alert: The No Surprises Act may apply to this claim. Please contact payer for instructions on how to submit information regarding whether or not the item or service was furnished during a patient visit to a participating facility.',
+        'N885' => 'Alert: This claim was not processed in accordance with the No Surprises Act cost-sharing or out-of-network payment requirements. The payer disagrees with your determination that those requirements apply. You may contact the payer to find out why it disagrees. You may appeal this adverse determination on behalf of the patient through the payer’s internal appeals and external review processes.',
+    ];
 
-    public static function getBillingByEncounter($pid, $encounter, $cols = "code_type, code, code_text")
+    public static function getBillingByEncounter($pid, $encounter, $cols = "code_type, code, code_text"): array
     {
-        $res = sqlStatement("select " . escape_sql_column_name(process_cols_escape($cols), array('billing')) . " from billing where encounter = ? and pid=? and activity=1 order by code_type, date ASC", array($encounter, $pid));
+        $res = sqlStatement("select " . escape_sql_column_name(process_cols_escape($cols), ['billing']) . " from billing where encounter = ? and pid=? and activity=1 order by code_type, date ASC", [$encounter, $pid]);
 
-        $all = array();
+        $all = [];
         for ($iter = 0; $row = sqlFetchArray($res); $iter++) {
             $all[$iter] = $row;
         }
@@ -1383,7 +1437,7 @@ class BillingUtilities
         $code,
         $code_text,
         $pid,
-        string $authorized = null,
+        ?string $authorized,
         $provider,
         $modifier = "",
         $units = "",
@@ -1393,8 +1447,10 @@ class BillingUtilities
         $billed = 0,
         $notecodes = '',
         $pricelevel = '',
-        $revenue_code = ""
+        $revenue_code = "",
+        $payer_id = ""
     ) {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         if (!$authorized) {
             $authorized = "0";
         }
@@ -1402,7 +1458,7 @@ class BillingUtilities
         // Sanity check.
         $tmp = sqlQuery(
             "SELECT count(*) AS count from form_encounter WHERE pid = ? AND encounter = ?",
-            array($pid, $encounter_id)
+            [$pid, $encounter_id]
         );
         if (empty($tmp['count'])) {
             die(xlt('Internal error: the referenced encounter no longer exists.'));
@@ -1410,27 +1466,27 @@ class BillingUtilities
 
         $sql = "INSERT INTO billing (date, encounter, code_type, code, code_text, " .
             "pid, authorized, user, groupname, activity, billed, provider_id, " .
-            "modifier, units, fee, ndc_info, justify, notecodes, pricelevel, revenue_code) VALUES (" .
-            "NOW(), ?, ?, ?, ?, ?, ?, ?, ?,  1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "modifier, units, fee, ndc_info, justify, notecodes, pricelevel, revenue_code, payer_id) VALUES (" .
+            "NOW(), ?, ?, ?, ?, ?, ?, ?, ?,  1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-        return sqlInsert($sql, array($encounter_id, $code_type, $code, $code_text, $pid, $authorized,
-            $_SESSION['authUserID'], $_SESSION['authProvider'], $billed, $provider, $modifier, $units, $fee,
-            $ndc_info, $justify, $notecodes, $pricelevel, $revenue_code));
+        return sqlInsert($sql, [$encounter_id, $code_type, $code, $code_text, $pid, $authorized,
+            $session->get('authUserID'), $session->get('authProvider'), $billed, $provider, $modifier, $units, $fee,
+            $ndc_info, $justify, $notecodes, $pricelevel, $revenue_code, $payer_id]);
     }
 
     public static function authorizeBilling($id, $authorized = "1")
     {
-        sqlQuery("update billing set authorized = ? where id = ?", array($authorized, $id));
+        sqlQuery("update billing set authorized = ? where id = ?", [$authorized, $id]);
     }
 
     public static function deleteBilling($id)
     {
-        sqlStatement("update billing set activity = 0 where id = ?", array($id));
+        sqlStatement("update billing set activity = 0 where id = ?", [$id]);
     }
 
     public static function clearBilling($id)
     {
-        sqlStatement("update billing set justify = '' where id = ?", array($id));
+        sqlStatement("update billing set justify = '' where id = ?", [$id]);
     }
 
     // This function supports the Billing page (billing_process.php),
@@ -1476,9 +1532,9 @@ class BillingUtilities
         $partner_id = -1,
         $crossover = 0,
         $submitted_claim = ''
-    ) {
+    ): int {
 
-        $sqlBindArray = array();
+        $sqlBindArray = [];
         if (!$newversion) {
             $sql = "SELECT * FROM claims WHERE patient_id = ? AND " .
                 "encounter_id = ? AND status > 0 AND status < 4 ";
@@ -1520,9 +1576,9 @@ class BillingUtilities
         }
 
         $claimset = "";
-        $sqlBindClaimset = array();
+        $sqlBindClaimset = [];
         $billset = "";
-        $sqlBindBillset = array();
+        $sqlBindBillset = [];
         if (empty($payer_id) || $payer_id < 0) {
             $payer_id = 0;
         }
@@ -1589,8 +1645,9 @@ class BillingUtilities
             $billset = substr($billset, 2);
             $sqlBindArray = $sqlBindBillset;
             array_push($sqlBindArray, $encounter_id, $patient_id);
-            sqlStatement("UPDATE billing SET $billset WHERE " .
-                "encounter = ? AND pid= ? AND activity = 1", $sqlBindArray);
+            $sql = "UPDATE billing SET " . $billset . " WHERE " .
+                "encounter = ? AND pid= ? AND activity = 1";
+            sqlStatement($sql, $sqlBindArray);
         }
 
         $claimset .= ", submitted_claim = ?";
@@ -1617,38 +1674,46 @@ class BillingUtilities
              * "target = '$target', " .
              * "x12_partner_id = '$partner_id'";
              ****/
-            sqlBeginTrans();
-            $version = sqlQuery("SELECT IFNULL(MAX(version),0) + 1 AS increment FROM claims WHERE patient_id = ? AND encounter_id = ?", array($patient_id, $encounter_id));
+            QueryUtils::inTransaction(function () use ($patient_id, $encounter_id, $crossover, $claimset, $sqlBindClaimset, $status): void {
+                $version = sqlQuery(
+                    'SELECT IFNULL(MAX(version), 0) + 1 AS increment FROM claims WHERE patient_id = ? AND encounter_id = ?',
+                    [$patient_id, $encounter_id]
+                );
 
-            $sqlBindArray = array();
-            array_push($sqlBindArray, $patient_id, $encounter_id);
-            if ($crossover <> 1) {
-                $sql = "INSERT INTO claims SET " .
-                    "patient_id = ?, " .
-                    "encounter_id = ?, " .
-                    "bill_time = NOW() $claimset ," .
-                    "version = ?";
-                $sqlBindArray = array_merge($sqlBindArray, $sqlBindClaimset);
-                array_push($sqlBindArray, $version['increment']);
-            } else {//Claim automatic forward case.startTra
-                $sql = "INSERT INTO claims SET " .
-                    "patient_id = ?, " .
-                    "encounter_id = ?, " .
-                    "bill_time = NOW(), status=? ," .
-                    "version = ?";
-                array_push($sqlBindArray, $status, $version['increment']);
-            }
+                $sqlBindArray = [];
+                array_push($sqlBindArray, $patient_id, $encounter_id);
+                if ($crossover <> 1) {
+                    // heredoc (not nowdoc) because $claimset is a dynamic SQL fragment
+                    $sql = <<<SQL
+                    INSERT INTO claims SET
+                        patient_id = ?,
+                        encounter_id = ?,
+                        bill_time = NOW() $claimset ,
+                        version = ?
+                    SQL;
+                    $sqlBindArray = array_merge($sqlBindArray, $sqlBindClaimset);
+                    array_push($sqlBindArray, $version['increment']);
+                } else {//Claim automatic forward case.startTra
+                    $sql = <<<'SQL'
+                    INSERT INTO claims SET
+                        patient_id = ?,
+                        encounter_id = ?,
+                        bill_time = NOW(), status = ? ,
+                        version = ?
+                    SQL;
+                    array_push($sqlBindArray, $status, $version['increment']);
+                }
 
-            sqlStatement($sql, $sqlBindArray);
-            sqlCommitTrans();
+                sqlStatement($sql, $sqlBindArray);
+            });
         } elseif ($claimset) { // Otherwise update the existing claim row.
             $sqlBindArray = $sqlBindClaimset;
             array_push($sqlBindArray, $patient_id, $encounter_id, $row['version']);
             $claimset = substr($claimset, 2);
-            sqlStatement("UPDATE claims SET $claimset WHERE " .
+            $sql = "UPDATE claims SET " . $claimset . " WHERE " .
                 "patient_id = ? AND encounter_id = ? AND " .
-                // "payer_id = '" . $row['payer_id'] . "' AND " .
-                "version = ?", $sqlBindArray);
+                "version = ?";
+            sqlStatement($sql, $sqlBindArray);
         }
 
         // Whenever a claim is marked billed, update A/R accordingly.
@@ -1656,7 +1721,7 @@ class BillingUtilities
             if ($payer_type > 0) {
                 sqlStatement("UPDATE form_encounter SET " .
                     "last_level_billed = ? WHERE " .
-                    "pid = ? AND encounter = ?", array($payer_type, $patient_id, $encounter_id));
+                    "pid = ? AND encounter = ?", [$payer_type, $patient_id, $encounter_id]);
             }
         }
 
@@ -1666,7 +1731,7 @@ class BillingUtilities
     // Determine if the encounter is billed.  It is considered billed if it
     // has at least one chargeable item, and all of them are billed.
     //
-    public static function isEncounterBilled($pid, $encounter)
+    public static function isEncounterBilled($pid, $encounter): bool
     {
         $billed = -1; // no chargeable services yet
 
@@ -1682,7 +1747,7 @@ class BillingUtilities
             "SELECT billed FROM drug_sales WHERE " .
             "pid = ? AND " .
             "encounter = ?",
-            array($pid, $encounter, $pid, $encounter)
+            [$pid, $encounter, $pid, $encounter]
         );
 
         while ($brow = sqlFetchArray($bres)) {
@@ -1705,8 +1770,8 @@ class BillingUtilities
     {
         $tmp = sqlQuery("SELECT provider, copay FROM insurance_data " .
             "WHERE pid = ? AND type = 'primary' " .
-            "AND (date <= ? OR date IS NULL) ORDER BY date DESC LIMIT 1", array($patient_id, $encdate));
-        if ($tmp['provider']) {
+            "AND (date <= ? OR date IS NULL) AND (date_end >= ? OR date_end IS NULL) ORDER BY date DESC LIMIT 1", [$patient_id, $encdate, $encdate]);
+        if (!empty($tmp['provider'])) {
             return sprintf('%01.2f', floatval($tmp['copay']));
         }
 
@@ -1719,7 +1784,7 @@ class BillingUtilities
         $resMoneyGot = sqlStatement(
             "SELECT sum(pay_amount) as PatientPay FROM ar_activity where " .
             "deleted IS NULL AND pid = ? AND encounter = ? AND payer_type = 0 AND account_code = 'PCP'",
-            array($patient_id, $encounter)
+            [$patient_id, $encounter]
         );
         //new fees screen copay gives account_code='PCP'
         $rowMoneyGot = sqlFetchArray($resMoneyGot);
@@ -1731,12 +1796,13 @@ class BillingUtilities
     //
     public static function getInvoiceRefNumber()
     {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $trow = sqlQuery(
             "SELECT lo.notes " .
             "FROM users AS u, list_options AS lo " .
             "WHERE u.username = ? AND " .
             "lo.list_id = 'irnpool' AND lo.option_id = u.irnpool AND lo.activity = 1 LIMIT 1",
-            array($_SESSION['authUser'])
+            [$session->get('authUser')]
         );
         return empty($trow['notes']) ? '' : $trow['notes'];
     }
@@ -1747,9 +1813,10 @@ class BillingUtilities
     //
     public static function updateInvoiceRefNumber()
     {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $irnumber = self::getInvoiceRefNumber();
         // Here "?" specifies a minimal match, to get the most digits possible:
-        if (preg_match('/^(.*?)(\d+)(\D*)$/', $irnumber, $matches)) {
+        if (preg_match('/^(.*?)(\d+)(\D*)$/', (string) $irnumber, $matches)) {
             $newdigs = sprintf('%0' . strlen($matches[2]) . 'd', $matches[2] + 1);
             $newnumber = $matches[1] . $newdigs . $matches[3];
             sqlStatement(
@@ -1757,7 +1824,7 @@ class BillingUtilities
                 "SET lo.notes = ? WHERE " .
                 "u.username = ? AND " .
                 "lo.list_id = 'irnpool' AND lo.option_id = u.irnpool",
-                array($newnumber, $_SESSION['authUser'])
+                [$newnumber, $session->get('authUser')]
             );
         }
 
@@ -1769,6 +1836,7 @@ class BillingUtilities
     //
     public static function doVoid($patient_id, $encounter_id, $purge = false, $time = '', $reason = '', $notes = '')
     {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $what_voided = $purge ? 'checkout' : 'receipt';
         $date_original = '';
         $adjustments = 0;
@@ -1783,7 +1851,7 @@ class BillingUtilities
                 "(SELECT bill_date FROM drug_sales WHERE " .
                 "pid = ? AND encounter = ? AND bill_date IS NOT NULL) " .
                 "ORDER BY bill_date DESC LIMIT 1",
-                array($patient_id, $encounter_id, $patient_id, $encounter_id)
+                [$patient_id, $encounter_id, $patient_id, $encounter_id]
             );
             if (!empty($corow['bill_date'])) {
                 $date_original = $corow['bill_date'];
@@ -1793,7 +1861,7 @@ class BillingUtilities
                 "SELECT SUM(pay_amount) AS payments, " .
                 "SUM(adj_amount) AS adjustments FROM ar_activity WHERE " .
                 "deleted IS NULL AND pid = ? AND encounter = ?",
-                array($patient_id, $encounter_id)
+                [$patient_id, $encounter_id]
             );
             $adjustments = empty($row['adjustments']) ? 0 : $row['adjustments'];
             $payments = empty($row['payments']) ? 0 : $row['payments'];
@@ -1807,7 +1875,7 @@ class BillingUtilities
                 "SELECT SUM(pay_amount) AS payments, " .
                 "SUM(adj_amount) AS adjustments FROM ar_activity WHERE " .
                 "deleted IS NULL AND pid = ? AND encounter = ? AND post_time = ?",
-                array($patient_id, $encounter_id, $date_original)
+                [$patient_id, $encounter_id, $date_original]
             );
             $adjustments = empty($row['adjustments']) ? 0 : $row['adjustments'];
             $payments = empty($row['payments']) ? 0 : $row['payments'];
@@ -1817,7 +1885,7 @@ class BillingUtilities
         $encrow = sqlQuery(
             "SELECT invoice_refno FROM form_encounter WHERE " .
             "pid = ? AND encounter = ? LIMIT 1",
-            array($patient_id, $encounter_id)
+            [$patient_id, $encounter_id]
         );
         $old_invoice_refno = $encrow['invoice_refno'];
         //
@@ -1835,17 +1903,17 @@ class BillingUtilities
                 "other_info = ?, " .
                 "reason = ?, " .
                 "notes = ?";
-            $sqlarr = array(
+            $sqlarr = [
                 $patient_id,
                 $encounter_id,
                 $what_voided,
-                $_SESSION['authUserID'],
+                $session->get('authUserID'),
                 $adjustments,
                 $payments,
                 $old_invoice_refno,
                 $reason,
                 $notes
-            );
+            ];
             if ($date_original) {
                 $query .= ", date_original = ?";
                 $sqlarr[] = $date_original;
@@ -1861,47 +1929,42 @@ class BillingUtilities
                 sqlStatement(
                     "UPDATE ar_activity SET deleted = NOW() WHERE " .
                     "deleted IS NULL AND pid = ? AND encounter = ? AND post_time = ?",
-                    array($patient_id, $encounter_id, $date_original)
+                    [$patient_id, $encounter_id, $date_original]
                 );
                 sqlStatement(
                     "UPDATE billing SET billed = 0, bill_date = NULL WHERE " .
                     "pid = ? AND encounter = ? AND activity = 1 AND " .
                     "bill_date IS NOT NULL AND bill_date = ?",
-                    array($patient_id, $encounter_id, $date_original)
+                    [$patient_id, $encounter_id, $date_original]
                 );
                 sqlStatement(
                     "update drug_sales SET billed = 0, bill_date = NULL WHERE " .
                     "pid = ? AND encounter = ? AND " .
                     "bill_date IS NOT NULL AND bill_date = ?",
-                    array($patient_id, $encounter_id, $date_original)
+                    [$patient_id, $encounter_id, $date_original]
                 );
             } else {
                 if ($time == 'all') {
                     sqlStatement(
                         "UPDATE ar_activity SET deleted = NOW() WHERE " .
                         "deleted IS NULL AND pid = ? AND encounter = ?",
-                        array($patient_id, $encounter_id)
+                        [$patient_id, $encounter_id]
                     );
                 }
 
                 sqlStatement(
                     "UPDATE billing SET billed = 0, bill_date = NULL WHERE " .
                     "pid = ? AND encounter = ? AND activity = 1",
-                    array($patient_id, $encounter_id)
+                    [$patient_id, $encounter_id]
                 );
                 sqlStatement(
                     "update drug_sales SET billed = 0, bill_date = NULL WHERE " .
                     "pid = ? AND encounter = ?",
-                    array($patient_id, $encounter_id)
+                    [$patient_id, $encounter_id]
                 );
             }
 
-            sqlStatement(
-                "UPDATE form_encounter SET last_level_billed = 0, " .
-                "last_level_closed = 0, stmt_count = 0, last_stmt_date = NULL " .
-                "WHERE pid = ? AND encounter = ?",
-                array($patient_id, $encounter_id)
-            );
+            self::reOpenEncounterForBilling($patient_id, $encounter_id);
         } elseif ($usingirnpools) {
             // Non-purge means just assign a new invoice reference number.
             $new_invoice_refno = self::updateInvoiceRefNumber();
@@ -1909,8 +1972,25 @@ class BillingUtilities
                 "UPDATE form_encounter " .
                 "SET invoice_refno = ? " .
                 "WHERE pid = ? AND encounter = ?",
-                array($new_invoice_refno, $patient_id, $encounter_id)
+                [$new_invoice_refno, $patient_id, $encounter_id]
             );
         }
+    }
+
+    // Common function for re-opening an encounter
+    public static function reOpenEncounterForBilling($patient_id, $encounter_id)
+    {
+        sqlStatement(
+            "UPDATE billing SET billed = 0, bill_date = NULL WHERE " .
+            "pid = ? AND encounter = ? AND activity = 1",
+            [$patient_id, $encounter_id]
+        );
+
+        sqlStatement(
+            "UPDATE form_encounter SET last_level_billed = 0, " .
+            "last_level_closed = 0, stmt_count = 0, last_stmt_date = NULL " .
+            "WHERE pid = ? AND encounter = ?",
+            [$patient_id, $encounter_id]
+        );
     }
 }

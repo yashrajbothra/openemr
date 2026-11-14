@@ -4,24 +4,44 @@
  * language.php script
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 require_once("../globals.php");
-require_once("$srcdir/registry.inc");
 require_once("language.inc.php");
 
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
 
+// Generates a Javascript section to activate the specified tab.
+function activate_lang_tab($linkid): string
+{
+    $s = "<script>\n";
+    foreach (
+        [
+        'language-link',
+        'definition-link',
+        'constant-link',
+        'manage-link',
+        'csv-link',
+        ] as $id
+    ) {
+        $s .= "\$('#$id')." . ($id == $linkid ? 'addClass' : 'removeClass') . "('active');\n";
+    }
+    $s .= "</script>\n";
+    return $s;
+}
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 //START OUT OUR PAGE....
 ?>
 <html>
 <head>
-<?php Header::setupHeader(); ?>
+<?php Header::setupHeader(['knockout']); ?>
 </head>
 
 <body class="body_top">
@@ -35,22 +55,25 @@ use OpenEMR\Core\Header;
         </div><!--end of header div-->
         <div class="container-fluid mb-3">
             <form name='translation' id='translation' method='get' action='language.php' onsubmit="return top.restoreSession()">
-                <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                 <input type='hidden' name='m' value='<?php echo attr($_GET['m'] ?? ''); ?>' />
                 <input type='hidden' name='edit' value='<?php echo attr($_GET['edit'] ?? ''); ?>' />
                 <!-- <span class="title"><?php echo xlt('Multi Language Tool'); ?></span> -->
                 <ui class="nav nav-pills">
                     <li class="nav-item" id="li-definition">
-                        <a href="?m=definition&csrf_token_form=<?php echo attr_url(CsrfUtils::collectCsrfToken()); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="definition-link"><?php echo xlt('Edit Definitions'); ?></a>
+                        <a href="?m=definition&csrf_token_form=<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="definition-link"><?php echo xlt('Edit Definitions'); ?></a>
                     </li>
                     <li class="nav-item" id="li-language">
-                        <a href="?m=language&csrf_token_form=<?php echo attr_url(CsrfUtils::collectCsrfToken()); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="language-link"><?php echo xlt('Add Language'); ?></a>
+                        <a href="?m=language&csrf_token_form=<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="language-link"><?php echo xlt('Add Language'); ?></a>
                     </li>
                     <li class="nav-item" id="li-constant">
-                        <a href="?m=constant&csrf_token_form=<?php echo attr_url(CsrfUtils::collectCsrfToken()); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="constant-link"><?php echo xlt('Add Constant'); ?></a>
+                        <a href="?m=constant&csrf_token_form=<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="constant-link"><?php echo xlt('Add Constant'); ?></a>
                     </li>
                     <li class="nav-item" id="li-manage">
-                        <a href="?m=manage&csrf_token_form=<?php echo attr_url(CsrfUtils::collectCsrfToken()); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="manage-link"><?php echo xlt('Manage Translations'); ?></a>
+                        <a href="?m=manage&csrf_token_form=<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="manage-link"><?php echo xlt('Manage Translations'); ?></a>
+                    </li>
+                    <li class="nav-item" id="li-csv">
+                        <a href="?m=csv&csrf_token_form=<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" onclick="top.restoreSession()" class="nav-link font-weight-bold" id="csv-link"><?php echo xlt('Load from CSV'); ?></a>
                     </li>
                 </ui>
             </form>
@@ -61,9 +84,7 @@ use OpenEMR\Core\Header;
                     <div class="col-sm-12 col-md-12 col-lg-12">
                         <?php
                         if (!empty($_GET['m'])) {
-                            if (!CsrfUtils::verifyCsrfToken($_GET["csrf_token_form"])) {
-                                CsrfUtils::csrfNotVerified();
-                            }
+                            CsrfUtils::checkCsrfInput(INPUT_GET, dieOnFail: true);
 
                             // Set a variable, so below scripts can
                             // not be run on their own
@@ -81,6 +102,12 @@ use OpenEMR\Core\Header;
                                     break;
                                 case 'manage':
                                     require_once('lang_manage.php');
+                                    break;
+                                case 'csv':
+                                    require_once('csv/load_csv_file.php');
+                                    break;
+                                case 'csvval':
+                                    require_once('csv/validate_csv.php');
                                     break;
                             endswitch;
                         } else {

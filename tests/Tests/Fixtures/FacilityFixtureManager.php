@@ -3,7 +3,6 @@
 namespace OpenEMR\Tests\Fixtures;
 
 use OpenEMR\Tests\Fixtures\BaseFixtureManager;
-use Ramsey\Uuid\Uuid;
 
 /**
  * Provides OpenEMR Fixtures/Sample Records to test cases as Objects or Database Records.
@@ -15,55 +14,20 @@ use Ramsey\Uuid\Uuid;
  * - The "facility" related methods provide clear working examples.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Yash Bothra <yashrajbothra786gmail.com>
  * @copyright Copyright (c) 2020 Yash Bothra <yashrajbothra786gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 class FacilityFixtureManager extends BaseFixtureManager
 {
-    private $facilityFixtures;
+    /** @var array<string, mixed>[] */
     private $fhirFacilityFixtures;
 
     public function __construct()
     {
-        $this->facilityFixtures = $this->loadJsonFile("facility.json");
+        parent::__construct("facility.php", "facility");
         $this->fhirFacilityFixtures = $this->loadJsonFile("FHIR/facility.json");
-    }
-
-    /**
-     * Installs fixtures into the OpenEMR DB.
-     *
-     * @param $tableName The target OpenEMR DB table name.
-     * @param $fixtures Array of fixture objects to install.
-     * @return the number of fixtures installed.
-     */
-    private function installFixtures($tableName, $fixtures)
-    {
-        $insertCount = 0;
-        $sqlInsert = "INSERT INTO " . escape_table_name($tableName) . " SET ";
-
-        foreach ($fixtures as $index => $fixture) {
-            $sqlColumnValues = "";
-            $sqlBinds = array();
-
-            foreach ($fixture as $field => $fieldValue) {
-                $sqlColumnValues .= $field . " = ?, ";
-                array_push($sqlBinds, $fieldValue);
-            }
-
-            // add uuid
-            $sqlColumnValues .= '`uuid` = ?';
-            $uuidFacility = $this->getUuid("facility");
-            array_push($sqlBinds, $uuidFacility);
-
-            $sqlColumnValues = rtrim($sqlColumnValues, " ,");
-            $isInserted = sqlInsert($sqlInsert . $sqlColumnValues, $sqlBinds);
-            if ($isInserted) {
-                $insertCount += 1;
-            }
-        }
-        return $insertCount;
     }
 
     /**
@@ -75,7 +39,7 @@ class FacilityFixtureManager extends BaseFixtureManager
     }
 
     /**
-     * @return single/random fhir facility fixture
+     * @return array<string, mixed> a single random fhir facility fixture
      */
     public function getSingleFhirFacilityFixture()
     {
@@ -87,24 +51,16 @@ class FacilityFixtureManager extends BaseFixtureManager
      */
     public function getFacilityFixtures()
     {
-        return $this->facilityFixtures;
+        return $this->getFixturesFromFile();
     }
 
-    /**
-     * @return random single entry from an array.
-     */
-    private function getSingleEntry($array)
-    {
-        $randomIndex = array_rand($array, 1);
-        return $array[$randomIndex];
-    }
 
     /**
-     * @return a random facility fixture.
+     * @return array<string, mixed>
      */
     public function getSingleFacilityFixture()
     {
-        return $this->getSingleEntry($this->facilityFixtures);
+        return $this->getSingleEntry($this->getFixturesFromFile());
     }
 
     /**
@@ -112,23 +68,13 @@ class FacilityFixtureManager extends BaseFixtureManager
      */
     public function installFacilityFixtures()
     {
-        return $this->installFixtures("facility", $this->getFacilityFixtures());
-    }
-
-    /**
-     * Installs a single Facility Fixtures into the OpenEMR DB.
-     * @param $facilityFixture - The fixture to install.
-     * @return count of records inserted.
-     */
-    public function installSingleFacilityFixture($facilityFixture)
-    {
-        return $this->installFixtures("facility", array($facilityFixture));
+        return $this->installFixtures();
     }
 
     /**
      * Removes Facility Fixtures from the OpenEMR DB.
      */
-    public function removeFacilityFixtures()
+    public function removeInstalledFixtures()
     {
         $bindVariable = self::FIXTURE_PREFIX . "%";
 

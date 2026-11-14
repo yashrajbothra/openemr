@@ -4,62 +4,134 @@
  * main.php
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Kevin Yeh <kevin.y@integralemr.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Ranganath Pathak <pathak@scrs1.org>
  * @author    Jerry Padgett <sjpadgett@gmail.com>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
+ * @author    Simon Quigley <squigley@altispeed.com>
  * @copyright Copyright (c) 2016 Kevin Yeh <kevin.y@integralemr.com>
  * @copyright Copyright (c) 2016-2019 Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2019 Ranganath Pathak <pathak@scrs1.org>
+ * @copyright Copyright (c) 2024 Care Management Solutions, Inc. <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 $sessionAllowWrite = true;
 require_once(__DIR__ . '/../../globals.php');
-require_once $GLOBALS['srcdir'] . '/ESign/Api.php';
+require_once \OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . '/ESign/Api.php';
 
-use Esign\Api;
+use ESign\Api;
+use OpenEMR\BC\ServiceContainer;
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Http\CurrentRequest;
+use OpenEMR\Common\Session\MainScreenToken;
+use OpenEMR\Common\Session\MainScreenTokenDecision;
+use OpenEMR\Common\Session\SessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEEnvBag;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\Main\Tabs\RenderEvent;
+use OpenEMR\Menu\MainMenuData;
+use OpenEMR\Services\LogoService;
+use OpenEMR\Services\ProductRegistrationService;
+use OpenEMR\Services\VersionService;
+use OpenEMR\Tabs\DefaultTabsFilter;
+use OpenEMR\Telemetry\TelemetryService;
+
+const ENV_DISABLE_TELEMETRY = 'OPENEMR_DISABLE_TELEMETRY';
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+
+$logoService = new LogoService();
+$menuLogo = $logoService->getLogo('core/menu/primary/');
+$versionService = new VersionService();
+$softwareVersion = text((string) $versionService->getSoftwareVersion());
+// Registration status and options.
+$productRegistration = new ProductRegistrationService();
+$product_row = $productRegistration->getProductDialogStatus();
+$allowRegisterDialog = $product_row['allowRegisterDialog'] ?? false;
+$allowTelemetry = $product_row['allowTelemetry'] ?? null; // for dialog
+$allowEmail = $product_row['allowEmail'] ?? null; // for dialog
+
+// Check if telemetry is disabled via environment variable
+$disableTelemetry = OEEnvBag::getInstance()->getBoolean(ENV_DISABLE_TELEMETRY);
+// Check if background service piggybacking is disabled via environment variable
+$noBackgroundTasks = OEEnvBag::getInstance()->getBoolean('OPENEMR__NO_BACKGROUND_TASKS');
+if ($disableTelemetry) {
+    $allowRegisterDialog = false;
+    $allowTelemetry = false;
+}
+
+// If running unit tests, then disable the registration dialog
+if ($session->get('testing_mode', false)) {
+    $allowRegisterDialog = false;
+}
+// If the user is not a super admin, then disable the registration dialog
+if (!AclMain::aclCheckCore('admin', 'super')) {
+    $allowRegisterDialog = false;
+}
 
 // Ensure token_main matches so this script can not be run by itself
-//  If do not match, then destroy the session and go back to login screen
-if (
-    (empty($_SESSION['token_main_php'])) ||
-    (empty($_GET['token_main'])) ||
-    ($_GET['token_main'] != $_SESSION['token_main_php'])
-) {
-    // Below functions are from auth.inc, which is included in globals.php
+//  If tokens do not match, then destroy the session and go back to log in screen
+$token_main_php = $session->get('token_main_php');
+try {
+    $presentedToken = CurrentRequest::get()->query->getString('token_main');
+} catch (\Symfony\Component\HttpFoundation\Exception\BadRequestException) {
+    $presentedToken = '';
+}
+$expectedToken = is_string($token_main_php) ? $token_main_php : null;
+$acceptedAt = $session->get('token_main_php_at');
+if (is_string($acceptedAt) && ctype_digit($acceptedAt)) {
+    $acceptedAt = (int) $acceptedAt;
+}
+if (!is_int($acceptedAt)) {
+    $acceptedAt = null;
+}
+$decision = MainScreenToken::decide(
+    $expectedToken,
+    $presentedToken,
+    $acceptedAt,
+    time(),
+    OEGlobalsBag::getInstance()->get('prevent_browser_refresh') > 1
+);
+if ($decision === MainScreenTokenDecision::Reject) {
+// Below functions are from auth.inc, which is included in globals.php
     authCloseSession();
     authLoginScreen(false);
 }
-// this will not allow copy/paste of the link to this main.php page or a refresh of this main.php page
-//  (default behavior, however, this behavior can be turned off in the prevent_browser_refresh global)
-if ($GLOBALS['prevent_browser_refresh'] > 1) {
-    unset($_SESSION['token_main_php']);
+if ($decision === MainScreenTokenDecision::AcceptAndStamp) {
+    SessionUtil::setSession('token_main_php_at', time());
 }
 
 $esignApi = new Api();
+$twig = ServiceContainer::getTwig();
+
 ?>
 <!DOCTYPE html>
 <html>
+
 <head>
-    <title><?php echo text($openemr_name); ?></title>
+    <title><?php echo text(OEGlobalsBag::getInstance()->getString('openemr_name')); ?></title>
 
     <script>
         // This is to prevent users from losing data by refreshing or backing out of OpenEMR.
         //  (default behavior, however, this behavior can be turned off in the prevent_browser_refresh global)
-        <?php if ($GLOBALS['prevent_browser_refresh'] > 0) { ?>
+        <?php if (OEGlobalsBag::getInstance()->get('prevent_browser_refresh') > 0) { ?>
         window.addEventListener('beforeunload', (event) => {
             if (!timed_out) {
+                restoreSession();
                 event.returnValue = <?php echo xlj('Recommend not leaving or refreshing or you may lose data.'); ?>;
             }
         });
         <?php } ?>
 
-        <?php require($GLOBALS['srcdir'] . "/restoreSession.php"); ?>
+        <?php require(OEGlobalsBag::getInstance()->getSrcDir() . "/restoreSession.php"); ?>
 
         // Since this should be the parent window, this is to prevent calls to the
         // window that opened this window. For example when a new window is opened
@@ -68,19 +140,309 @@ $esignApi = new Api();
         window.name = "main";
 
         // This flag indicates if another window or frame is trying to reload the login
-        // page to this top-level window.  It is set by javascript returned by auth.inc
+        // page to this top-level window.  It is set by javascript returned by auth.inc.php
         // and is checked by handlers of beforeunload events.
         var timed_out = false;
         // some globals to access using top.variable
         // note that 'let' or 'const' does not allow global scope here.
         // only use var
-        var isPortalEnabled = "<?php echo $GLOBALS['portal_onsite_two_enable'] ?>";
+        var isPortalEnabled = "<?php echo OEGlobalsBag::getInstance()->getBoolean('portal_onsite_two_enable') ?>";
         // Set the csrf_token_js token that is used in the below js/tabs_view_model.js script
-        var csrf_token_js = <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>;
-        var userDebug = <?php echo js_escape($GLOBALS['user_debug']); ?>;
-        var webroot_url = <?php echo js_escape($web_root); ?>;
-        var jsLanguageDirection = <?php echo js_escape($_SESSION['language_direction']); ?>;
+        var csrf_token_js = <?php echo js_escape(CsrfUtils::collectCsrfToken($session)); ?>;
+        // Separate CSRF token for calls to the REST/LocalApi stack (sent as the APICSRFTOKEN header).
+        var api_csrf_token_js = <?php echo js_escape(CsrfUtils::collectCsrfToken($session, 'api')); ?>;
+        <?php
+        $sessionSiteId = $session->get('site_id');
+        $sessionSiteIdString = is_string($sessionSiteId) ? $sessionSiteId : '';
+        ?>
+        var site_id_js = <?php echo js_escape($sessionSiteIdString); ?>;
+        var userDebug = <?php echo js_escape((string)OEGlobalsBag::getInstance()->getBoolean('user_debug')); ?>;
+        var webroot_url = <?php echo js_escape(OEGlobalsBag::getInstance()->getWebRoot()); ?>;
+        var jsLanguageDirection = <?php echo js_escape($session->get('language_direction')); ?> ||
+        'ltr';
         var jsGlobals = {};
+        // used in tabs_view_model.js.
+        jsGlobals.enable_group_therapy = <?php echo js_escape((int) OEGlobalsBag::getInstance()->getBoolean('enable_group_therapy')); ?>;
+        jsGlobals.languageDirection = jsLanguageDirection;
+        jsGlobals.date_display_format = <?php echo js_escape(OEGlobalsBag::getInstance()->get('date_display_format')); ?>;
+        jsGlobals.time_display_format = <?php echo js_escape(OEGlobalsBag::getInstance()->get('time_display_format')); ?>;
+        jsGlobals.timezone = <?php echo js_escape(OEGlobalsBag::getInstance()->get('gbl_time_zone') ?? ''); ?>;
+        jsGlobals.assetVersion = <?php echo js_escape(OEGlobalsBag::getInstance()->get('v_js_includes')); ?>;
+        var WindowTitleAddPatient = <?php echo(OEGlobalsBag::getInstance()->getBoolean('window_title_add_patient_name') ? 'true' : 'false'); ?>;
+        var WindowTitleBase = <?php echo js_escape(OEGlobalsBag::getInstance()->getString('openemr_name')); ?>;
+        const isSms = "<?php echo !empty(OEGlobalsBag::getInstance()->get('oefax_enable_sms') ?? null); ?>";
+        const isFax = "<?php echo !empty(OEGlobalsBag::getInstance()->get('oefax_enable_fax')) ?? null?>";
+        const isServicesOther = (isSms || isFax);
+        var telemetryEnabled = <?php echo js_escape((new TelemetryService())->isTelemetryEnabled()); ?>;
+        var noBackgroundTasks = <?php echo $noBackgroundTasks ? 'true' : 'false'; ?>;
+        const sessionTimeoutWarningSeconds = 60;
+        var sessionTimeoutWarningDeadline = null;
+        var sessionTimeoutWarningTimer = null;
+        var sessionTimeoutWarningStartTimer = null;
+        var sessionTimeoutCheckPending = false;
+        var sessionTimeoutConfirmRetried = false;
+
+        function formatSessionTimeoutRemaining(seconds) {
+            const safeSeconds = Math.max(0, parseInt(seconds, 10) || 0);
+            const minutes = Math.floor(safeSeconds / 60);
+            const remainder = safeSeconds % 60;
+            return `${minutes}:${String(remainder).padStart(2, '0')}`;
+        }
+
+        function getSessionTimeoutWarning() {
+            let warning = document.getElementById('sessionTimeoutWarning');
+            if (warning) {
+                return warning;
+            }
+
+            warning = document.createElement('div');
+            warning.id = 'sessionTimeoutWarning';
+            warning.className = 'alert alert-warning shadow';
+            warning.setAttribute('role', 'alert');
+            warning.style.position = 'fixed';
+            warning.style.top = '1rem';
+            warning.style.left = '50%';
+            warning.style.transform = 'translateX(-50%)';
+            warning.style.zIndex = '2000';
+            warning.style.display = 'none';
+            warning.style.maxWidth = 'calc(100% - 2rem)';
+
+            const message = document.createElement('span');
+            message.textContent = <?php echo xlj('Your session will expire due to inactivity in'); ?> + ' ';
+            warning.appendChild(message);
+
+            const countdown = document.createElement('strong');
+            countdown.id = 'sessionTimeoutCountdown';
+            countdown.setAttribute('aria-live', 'off');
+            countdown.textContent = '1:00';
+            warning.appendChild(countdown);
+
+            const period = document.createTextNode('. ');
+            warning.appendChild(period);
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.id = 'sessionTimeoutStayLoggedIn';
+            button.className = 'btn btn-sm btn-primary ml-2';
+            button.textContent = <?php echo xlj('Stay Logged In'); ?>;
+            button.addEventListener('click', stayLoggedInFromSessionWarning);
+            warning.appendChild(button);
+
+            document.body.appendChild(warning);
+            return warning;
+        }
+
+        function clearSessionTimeoutWarningTimers() {
+            if (sessionTimeoutWarningTimer !== null) {
+                window.clearInterval(sessionTimeoutWarningTimer);
+                sessionTimeoutWarningTimer = null;
+            }
+            if (sessionTimeoutWarningStartTimer !== null) {
+                window.clearTimeout(sessionTimeoutWarningStartTimer);
+                sessionTimeoutWarningStartTimer = null;
+            }
+        }
+
+        function hideSessionTimeoutWarning() {
+            const warning = document.getElementById('sessionTimeoutWarning');
+            if (warning) {
+                warning.style.display = 'none';
+            }
+            sessionTimeoutWarningDeadline = null;
+            sessionTimeoutCheckPending = false;
+            sessionTimeoutConfirmRetried = false;
+            clearSessionTimeoutWarningTimers();
+        }
+
+        function requestSessionTimeoutStatus(skipTimeoutReset) {
+            restoreSession();
+            const request = new FormData();
+            if (skipTimeoutReset) {
+                request.append('skip_timeout_reset', '1');
+            }
+            request.append('csrf_token_form', csrf_token_js);
+            return fetch(webroot_url + '/library/ajax/dated_reminders_counter.php', {
+                method: 'POST',
+                credentials: 'same-origin',
+                body: request
+            }).then((response) => {
+                if (!response.ok) {
+                    throw new Error('Session status request failed');
+                }
+                return response.json();
+            });
+        }
+
+        function confirmSessionTimeout() {
+            if (sessionTimeoutCheckPending) {
+                return;
+            }
+            sessionTimeoutCheckPending = true;
+            requestSessionTimeoutStatus(true).then((data) => {
+                sessionTimeoutCheckPending = false;
+                if (data.timeoutMessage && data.timeoutMessage === 'timeout') {
+                    timeoutLogout();
+                    return;
+                }
+
+                if (!Object.prototype.hasOwnProperty.call(data, 'sessionSecondsRemaining')) {
+                    window.setTimeout(confirmSessionTimeout, 5000);
+                    return;
+                }
+
+                const secondsRemaining = parseInt(data.sessionSecondsRemaining, 10);
+                if (isNaN(secondsRemaining)) {
+                    window.setTimeout(confirmSessionTimeout, 5000);
+                    return;
+                }
+                if (secondsRemaining <= 0) {
+                    timeoutLogout();
+                    return;
+                }
+
+                sessionTimeoutConfirmRetried = false;
+                updateSessionTimeoutWarning(secondsRemaining);
+            }).catch(() => {
+                sessionTimeoutCheckPending = false;
+                if (!sessionTimeoutConfirmRetried) {
+                    sessionTimeoutConfirmRetried = true;
+                    window.setTimeout(confirmSessionTimeout, 1000);
+                    return;
+                }
+                timeoutLogout();
+            });
+        }
+
+        function updateSessionTimeoutCountdown() {
+            if (sessionTimeoutWarningDeadline === null) {
+                return;
+            }
+
+            const millisecondsRemaining = sessionTimeoutWarningDeadline - Date.now();
+            const secondsRemaining = Math.max(0, Math.ceil(millisecondsRemaining / 1000));
+            const countdown = document.getElementById('sessionTimeoutCountdown');
+            if (countdown) {
+                countdown.textContent = formatSessionTimeoutRemaining(secondsRemaining);
+            }
+
+            if (secondsRemaining <= 0) {
+                if (sessionTimeoutWarningTimer !== null) {
+                    window.clearInterval(sessionTimeoutWarningTimer);
+                    sessionTimeoutWarningTimer = null;
+                }
+                confirmSessionTimeout();
+            }
+        }
+
+        function showSessionTimeoutWarning() {
+            const warning = getSessionTimeoutWarning();
+            warning.style.display = 'block';
+            updateSessionTimeoutCountdown();
+            if (sessionTimeoutWarningTimer === null && sessionTimeoutWarningDeadline !== null) {
+                sessionTimeoutWarningTimer = window.setInterval(updateSessionTimeoutCountdown, 1000);
+            }
+        }
+
+        function updateSessionTimeoutWarning(secondsRemaining) {
+            const parsedRemaining = parseInt(secondsRemaining, 10);
+            if (isNaN(parsedRemaining)) {
+                return;
+            }
+
+            const remaining = Math.max(0, parsedRemaining);
+            clearSessionTimeoutWarningTimers();
+            sessionTimeoutWarningDeadline = Date.now() + (remaining * 1000);
+            sessionTimeoutCheckPending = false;
+            sessionTimeoutConfirmRetried = false;
+
+            if (remaining <= sessionTimeoutWarningSeconds) {
+                showSessionTimeoutWarning();
+                return;
+            }
+
+            const warning = document.getElementById('sessionTimeoutWarning');
+            if (warning) {
+                warning.style.display = 'none';
+            }
+
+            // The normal reminder poll runs every 60 seconds. Schedule locally from
+            // the server-authoritative deadline so the warning starts at one minute,
+            // then confirm passively in case another tab renewed the same session.
+            const delay = Math.max(0, (remaining - sessionTimeoutWarningSeconds) * 1000);
+            sessionTimeoutWarningStartTimer = window.setTimeout(function() {
+                sessionTimeoutWarningStartTimer = null;
+                requestSessionTimeoutStatus(true).then((data) => {
+                    if (data.timeoutMessage && data.timeoutMessage === 'timeout') {
+                        timeoutLogout();
+                        return;
+                    }
+                    if (Object.prototype.hasOwnProperty.call(data, 'sessionSecondsRemaining')) {
+                        updateSessionTimeoutWarning(data.sessionSecondsRemaining);
+                    } else {
+                        showSessionTimeoutWarning();
+                    }
+                }).catch(() => {
+                    showSessionTimeoutWarning();
+                });
+            }, delay);
+        }
+
+        function stayLoggedInFromSessionWarning() {
+            const button = document.getElementById('sessionTimeoutStayLoggedIn');
+            if (button) {
+                button.disabled = true;
+            }
+
+            requestSessionTimeoutStatus(false).then((data) => {
+                if (data.timeoutMessage && data.timeoutMessage === 'timeout') {
+                    timeoutLogout();
+                    return;
+                }
+
+                if (Object.prototype.hasOwnProperty.call(data, 'sessionSecondsRemaining')) {
+                    updateSessionTimeoutWarning(data.sessionSecondsRemaining);
+                }
+            }).catch((error) => {
+                console.log('Unable to renew session', error);
+            }).finally(() => {
+                if (button) {
+                    button.disabled = false;
+                }
+            });
+        }
+
+        /**
+         * Async function to get session value from the server
+         * Usage Example
+         * let authUser;
+         * let sessionPid = await top.getSessionValue('pid');
+         * // If using then() method a promise is returned instead of the value.
+         * await top.getSessionValue('authUser').then(function (auth) {
+         *    authUser = auth;
+         *    console.log('authUser', authUser);
+         * });
+         * console.log('session pid', sessionPid);
+         * console.log('auth User', authUser);
+         */
+        async function getSessionValue(key) {
+            restoreSession();
+            let csrf_token_js = <?php echo js_escape(CsrfUtils::collectCsrfToken($session)); ?>;
+            const config = {
+                url: `${webroot_url}/library/ajax/set_pt.php?csrf_token_form=${csrf_token_js}`,
+                method: 'POST',
+                data: {
+                    mode: 'session_key',
+                    key: key
+                }
+            };
+            try {
+                const response = await $.ajax(config);
+                restoreSession();
+                return response;
+            } catch (error) {
+                throw error;
+            }
+        }
 
         function goRepeaterServices() {
             // Ensure send the skip_timeout_reset parameter to not count this as a manual entry in the
@@ -89,22 +451,50 @@ $esignApi = new Api();
             // Send the skip_timeout_reset parameter to not count this as a manual entry in the
             // timing out mechanism in OpenEMR. Notify App for various portal and reminder alerts.
             // Combined portal and reminders ajax to fetch sjp 06-07-2020.
+            // Incorporated timeout mechanism in 2021
             restoreSession();
             let request = new FormData;
             request.append("skip_timeout_reset", "1");
             request.append("isPortal", isPortalEnabled);
+            request.append("isServicesOther", isServicesOther);
+            request.append("isSms", isSms);
+            request.append("isFax", isFax);
             request.append("csrf_token_form", csrf_token_js);
             fetch(webroot_url + "/library/ajax/dated_reminders_counter.php", {
                 method: 'POST',
                 credentials: 'same-origin',
                 body: request
             }).then((response) => {
+                if (response.status === 400) {
+                    // globals.php answers 400 when the session holds no site ID,
+                    // meaning the session itself is gone (logged out elsewhere, or
+                    // expired and garbage collected). Nothing this window sends can
+                    // succeed any more, so go to the login screen as the timeout
+                    // check below does; logging in loads a fresh main.php, which
+                    // starts polling again. Do not treat 403 the same way: a stale
+                    // CSRF token is also what an old window sends after someone has
+                    // logged in again elsewhere, and logging out would end that new
+                    // session.
+                    timeoutLogout();
+                    return;
+                }
                 if (response.status !== 200) {
                     console.log('Reminders start failed. Status Code: ' + response.status);
                     return;
                 }
                 return response.json();
             }).then((data) => {
+                if (data === undefined) {
+                    return;
+                }
+                if (data.timeoutMessage && (data.timeoutMessage == 'timeout')) {
+                    // timeout has happened, so logout
+                    timeoutLogout();
+                    return;
+                }
+                if (Object.prototype.hasOwnProperty.call(data, 'sessionSecondsRemaining')) {
+                    updateSessionTimeoutWarning(data.sessionSecondsRemaining);
+                }
                 if (isPortalEnabled) {
                     let mail = data.mailCnt;
                     let chats = data.chatCnt;
@@ -123,29 +513,50 @@ $esignApi = new Api();
                         app_view_model.application_data.user().portalPayments(payments);
                     }
                 }
+                if (isServicesOther) {
+                    let sms = data.smsCnt;
+                    let fax = data.faxCnt;
+                    let total = data.serviceTotal;
+                    let enable = ((1 * sms) + (1 * fax));
+                    // Will turn off button display if no notification!
+                    app_view_model.application_data.user().servicesOther(enable);
+                    if (enable > 0) {
+                        app_view_model.application_data.user().serviceAlerts(total);
+                        app_view_model.application_data.user().smsAlerts(sms);
+                        app_view_model.application_data.user().faxAlerts(fax);
+                    }
+                }
                 // Always send reminder count text to model
                 app_view_model.application_data.user().messages(data.reminderText);
-            }).catch(function(error) {
+            }).catch(function (error) {
                 console.log('Request failed', error);
             });
 
             // run background-services
-            restoreSession();
-            request = new FormData;
-            request.append("skip_timeout_reset", "1");
-            request.append("ajax", "1");
-            request.append("csrf_token_form", csrf_token_js);
-            fetch(webroot_url + "/library/ajax/execute_background_services.php", {
-                method: 'POST',
-                credentials: 'same-origin',
-                body: request
-            }).then((response) => {
-                if (response.status !== 200) {
-                    console.log('Background Service start failed. Status Code: ' + response.status);
-                }
-            }).catch(function(error) {
-                console.log('HTML Background Service start Request failed: ', error);
-            });
+            // delay 10 seconds to prevent both utility trigger at close to same time.
+            // Both call globals so that is my concern.
+            if (!noBackgroundTasks) {
+                setTimeout(function () {
+                    restoreSession();
+                    // Call the REST "run all due" endpoint via LocalApi (APICSRFTOKEN header).
+                    // A LocalApi request loads globals.php with auth, so auth.inc.php would
+                    // reset the session expiration timer; send skip_timeout_reset so this
+                    // background poll does not keep an idle session alive.
+                    fetch(webroot_url + "/apis/" + site_id_js + "/api/background_service/$run?skip_timeout_reset=1", {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: {
+                            'APICSRFTOKEN': api_csrf_token_js
+                        }
+                    }).then((response) => {
+                        if (response.status !== 200) {
+                            console.log('Background Service start failed. Status Code: ' + response.status);
+                        }
+                    }).catch(function (error) {
+                        console.log('HTML Background Service start Request failed: ', error);
+                    });
+                }, 10000);
+            }
 
             // auto run this function every 60 seconds
             var repeater = setTimeout("goRepeaterServices()", 60000);
@@ -153,7 +564,7 @@ $esignApi = new Api();
 
         function isEncounterLocked(encounterId) {
             <?php if ($esignApi->lockEncounters()) { ?>
-            // If encounter locking is enabled, make a syncronous call (async=false) to check the
+            // If encounter locking is enabled, make a synchronous call (async=false) to check the
             // DB to see if the encounter is locked.
             // Call restore session, just in case
             // @TODO next clean up pass, turn into await promise then modify tabs_view_model.js L-309
@@ -162,7 +573,9 @@ $esignApi = new Api();
             $.ajax({
                 type: 'POST',
                 url: url,
-                data: {encounterId: encounterId},
+                data: {
+                    encounterId: encounterId
+                },
                 success: function (data) {
                     encounter_locked = data;
                 },
@@ -177,17 +590,24 @@ $esignApi = new Api();
         }
     </script>
 
-    <?php Header::setupHeader(['knockout', 'tabs-theme', 'i18next']); ?>
+    <?php Header::setupHeader(['knockout', 'tabs-theme', 'i18next', 'hotkeys', 'i18formatting']); ?>
     <script>
         // set up global translations for js
         function setupI18n(lang_id) {
             restoreSession();
-            return fetch(<?php echo js_escape($GLOBALS['webroot'])?> +"/library/ajax/i18n_generator.php?lang_id=" + encodeURIComponent(lang_id) + "&csrf_token_form=" + encodeURIComponent(csrf_token_js), {
+            return fetch(<?php echo js_escape(OEGlobalsBag::getInstance()->getWebRoot()) ?> +"/library/ajax/i18n_generator.php?lang_id=" + encodeURIComponent(lang_id) + "&csrf_token_form=" + encodeURIComponent(csrf_token_js), {
                 credentials: 'same-origin',
                 method: 'GET'
-            }).then(response => response.json())
+            }).then((response) => {
+                if (response.status !== 200) {
+                    console.log('I18n setup failed. Status Code: ' + response.status);
+                    return [];
+                }
+                return response.json();
+            })
         }
-        setupI18n(<?php echo js_escape($_SESSION['language_choice']); ?>).then(translationsJson => {
+
+        setupI18n(<?php echo js_escape($session->get('language_choice')); ?>).then(translationsJson => {
             i18next.init({
                 lng: 'selected',
                 debug: false,
@@ -202,125 +622,199 @@ $esignApi = new Api();
         }).catch(error => {
             console.log(error.message);
         });
+
+        /**
+         * Assign and persist documents to portal patients
+         * @var int patientId pid
+         */
+        function assignPatientDocuments(patientId) {
+            let url = top.webroot_url + '/portal/import_template_ui.php?from_demo_pid=' + encodeURIComponent(patientId);
+            dlgopen(url, 'pop-assignments', 'modal-lg', 850, '', '', {
+                allowDrag: true,
+                allowResize: true,
+                sizeHeight: 'full',
+            });
+        }
     </script>
 
-    <script src="js/custom_bindings.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/user_data_view_model.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/patient_data_view_model.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/therapy_group_data_view_model.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/tabs_view_model.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/application_view_model.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/frame_proxies.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="js/dialog_utils.js?v=<?php echo $v_js_includes; ?>"></script>
+    <script src="js/custom_bindings.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/user_data_view_model.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/patient_data_view_model.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/therapy_group_data_view_model.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/tabs_view_model.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/application_view_model.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/frame_proxies.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/dialog_utils.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
+    <script src="js/shortcuts.js?v=<?php echo OEGlobalsBag::getInstance()->getString('v_js_includes'); ?>"></script>
 
     <?php
-    // Below code block is to prepare certain elements for deciding what links to show on the menu
-    //
-    // prepare newcrop globals that are used in creating the menu
-    if ($GLOBALS['erx_enable']) {
-        $newcrop_user_role_sql = sqlQuery("SELECT `newcrop_user_role` FROM `users` WHERE `username` = ?", array($_SESSION['authUser']));
-        $GLOBALS['newcrop_user_role'] = $newcrop_user_role_sql['newcrop_user_role'];
-        if ($GLOBALS['newcrop_user_role'] === 'erxadmin') {
-            $GLOBALS['newcrop_user_role_erxadmin'] = 1;
-        }
-    }
-
-    // prepare track anything to be used in creating the menu
-    $track_anything_sql = sqlQuery("SELECT `state` FROM `registry` WHERE `directory` = 'track_anything'");
-    $GLOBALS['track_anything_state'] = ($track_anything_sql['state'] ?? 0);
-    // prepare Issues popup link global that is used in creating the menu
-    $GLOBALS['allow_issue_menu_link'] = ((AclMain::aclCheckCore('encounters', 'notes', '', 'write') || AclMain::aclCheckCore('encounters', 'notes_a', '', 'write')) &&
-        AclMain::aclCheckCore('patients', 'med', '', 'write'));
+    // we use twig templates here so modules can customize some of these files
+    // at some point we will twigify all of main.php so we can extend it.
+    echo $twig->render("interface/main/tabs/tabs_template.html.twig", []);
+    echo $twig->render("interface/main/tabs/menu_template.html.twig", []);
+    // TODO: patient_data_template.php is a more extensive refactor that could be done in a future feature request but to not jeopardize 7.0.3 release we will hold off.
     ?>
-
-    <?php require_once("templates/tabs_template.php"); ?>
-    <?php require_once("templates/menu_template.php"); ?>
     <?php require_once("templates/patient_data_template.php"); ?>
-    <?php require_once("templates/therapy_group_template.php"); ?>
-    <?php require_once("templates/user_data_template.php"); ?>
-    <?php require_once("menu/menu_json.php"); ?>
-    <?php $userQuery = sqlQuery("select * from users where username = ?", array($_SESSION['authUser'])); ?>
+    <?php
+    echo $twig->render("interface/main/tabs/therapy_group_template.html.twig", []);
+    echo $twig->render("interface/main/tabs/user_data_template.html.twig", [
+        'openemr_name' => OEGlobalsBag::getInstance()->getString('openemr_name')
+    ]);
+    // Collect the menu then build it (menu_json.php returns the same for top.refreshMainMenu())
+    $menu_restrictions = MainMenuData::forUser(OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher(), $session);
+    echo $twig->render("interface/main/tabs/menu_json.html.twig", ['menu_restrictions' => $menu_restrictions]);
+    ?>
+    <?php $userQuery = sqlQuery("select * from users where username = ?", [$session->get('authUser')]); ?>
 
     <script>
-        <?php if (!empty($_SESSION['frame1url']) && !empty($_SESSION['frame1target'])) { ?>
-        // Use session variables and tabStatus object to set up initial/default first tab
-        app_view_model.application_data.tabs.tabsList.push(new tabStatus(<?php echo xlj("Loading"); ?> +"...",<?php echo json_encode("../" . $_SESSION['frame1url']); ?>,<?php echo json_encode($_SESSION['frame1target']); ?>,<?php echo xlj("Loading"); ?> +" " + <?php echo json_encode($_SESSION['frame1label']); ?>, true, true, false));
-        <?php } ?>
+        <?php
+        $default_open_tabs = $session->get('default_open_tabs');
+        $valid_tabs = (new DefaultTabsFilter())->filter(
+            $default_open_tabs,
+            OEGlobalsBag::getInstance()->getKernel()->getProjectDir(),
+        );
+        // Persist the filtered/normalized list back to the session if any
+        // entries were dropped or the legacy `id`/`label` keys were
+        // rewritten to the modern `option_id`/`title` shape, so the next
+        // load doesn't have to redo the work.
+        if ($valid_tabs !== $default_open_tabs) {
+            $session->set('default_open_tabs', $valid_tabs);
+        }
+        // A patient opened in a new window (main_screen.php) shows first, on this load only:
+        // its set_pid would switch the window back to that patient on a later reload.
+        $open_patient_tab = $session->get('open_patient_tab');
+        if (is_array($open_patient_tab)) {
+            $session->remove('open_patient_tab');
+            $valid_tabs = array_merge(
+                (new DefaultTabsFilter())->filter(
+                    [$open_patient_tab],
+                    OEGlobalsBag::getInstance()->getKernel()->getProjectDir(),
+                ),
+                $valid_tabs
+            );
+        }
+        // For now, only the first tab is visible, this could be improved upon by further customizing the list options in a future feature request
+        $visible = "true";
+        foreach ($valid_tabs as $tab) {
+            $url = json_encode(OEGlobalsBag::getInstance()->getWebRoot() . "/" . $tab['notes']);
+            $target = json_encode($tab['option_id']);
+            $label = json_encode(xl("Loading") . " " . $tab['title']);
+            $loading = xlj("Loading");
+            echo "app_view_model.application_data.tabs.tabsList.push(new tabStatus($label, $url, $target, $loading, true, $visible, false));\n";
+            $visible = "false";
+        }
+        ?>
 
-        <?php if (!empty($_SESSION['frame2url']) && !empty($_SESSION['frame2target'])) { ?>
-        // Use session variables and tabStatus object to set up initial/default second tab, if none is set in globals, this tab will not be displayed initially
-        app_view_model.application_data.tabs.tabsList.push(new tabStatus(<?php echo xlj("Loading"); ?> +"...",<?php echo json_encode("../" . $_SESSION['frame2url']); ?>,<?php echo json_encode($_SESSION['frame2target']); ?>,<?php echo xlj("Loading"); ?> +" " + <?php echo json_encode($_SESSION['frame2label']); ?>, true, false, false));
-        <?php } ?>
-
-        app_view_model.application_data.user(new user_data_view_model(<?php echo json_encode($_SESSION["authUser"])
+        app_view_model.application_data.user(new user_data_view_model(<?php echo json_encode($session->get("authUser"))
             . ',' . json_encode($userQuery['fname'])
             . ',' . json_encode($userQuery['lname'])
-            . ',' . json_encode($_SESSION['authProvider']); ?>));
-
+            . ',' . json_encode($session->get('authProvider')); ?>));
     </script>
-<style>
-    html, body {
+    <style>
+      html,
+      body {
         width: max-content;
         min-height: 100% !important;
         height: 100% !important;
-    }
-</style>
+      }
+      #userdropdown.dropdown-menu {
+        white-space: nowrap;        /* prevents multi-line wrapping */
+        min-width: max-content;     /* expands to fit the widest item */
+      }
+    </style>
 </head>
+
 <body class="min-vw-100">
-    <!-- Below iframe is to support auto logout when timeout is reached -->
-    <iframe name="timeout" style="visibility:hidden; position:absolute; left:0; top:0; height:0; width:0; border:none;" src="timeout_iframe.php"></iframe>
+    <?php
+    // fire off an event here
+    $dispatcher = OEGlobalsBag::getInstance()->hasKernel()
+        ? OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher()
+        : null;
+    if ($dispatcher !== null) {
+        $dispatcher->dispatch(new RenderEvent(), RenderEvent::EVENT_BODY_RENDER_PRE);
+    }
+    ?>
     <!-- Below iframe is to support logout, which needs to be run in an inner iframe to work as intended -->
     <iframe name="logoutinnerframe" id="logoutinnerframe" style="visibility:hidden; position:absolute; left:0; top:0; height:0; width:0; border:none;" src="about:blank"></iframe>
     <?php // mdsupport - app settings
     $disp_mainBox = '';
-    if (isset($_SESSION['app1'])) {
+    $app1 = $session->get('app1');
+    if (!empty($app1)) {
         $rs = sqlquery(
             "SELECT title app_url FROM list_options WHERE activity=1 AND list_id=? AND option_id=?",
-            array('apps', $_SESSION['app1'])
+            ['apps', $app1]
         );
         if ($rs['app_url'] != "main/main_screen.php") {
             echo '<iframe name="app1" src="../../' . attr($rs['app_url']) . '"
-    			style="position: absolute; left: 0; top: 0; height: 100%; width: 100%; border: none;" />';
+            style="position: absolute; left: 0; top: 0; height: 100%; width: 100%; border: none;" />';
             $disp_mainBox = 'style="display: none;"';
         }
     }
     ?>
-    <div id="mainBox" <?php echo $disp_mainBox ?> >
+    <div id="mainBox" <?php echo $disp_mainBox ?>>
         <nav class="navbar navbar-expand-xl navbar-light bg-light py-0">
-            <a class="navbar-brand mt-2 mt-xl-0 mr-3 mr-xl-2" href="https://www.open-emr.org" title="OpenEMR <?php echo xla("Website"); ?>" rel="noopener" target="_blank">
-                <?php echo file_get_contents($GLOBALS['images_static_absolute'] . "/menu-logo.svg"); ?>
-            </a>
+            <?php if (OEGlobalsBag::getInstance()->getBoolean('display_main_menu_logo')) {
+                $bag = OEGlobalsBag::getInstance();
+                $logoLinkDefault = 'https://www.open-emr.org/';
+                $logoTitleDefault = xl('OpenEMR Website');
+                $logoLink = trim($bag->getString('main_menu_logo_link', $logoLinkDefault));
+                $logoTitle = trim($bag->getString('main_menu_logo_title', $logoTitleDefault));
+                $logoImg = '<img src="' . attr($menuLogo) . '" class="d-inline-block align-middle" height="16" alt="' . xla('Main Menu Logo') . '">';
+                if ($logoLink !== '') {
+                    echo '<a class="navbar-brand" href="' . attr($logoLink) . '" title="' . attr($logoTitle) . '" rel="noopener" target="_blank">' . $logoImg . '</a>' . "\n";
+                } else {
+                    echo '<span class="navbar-brand">' . $logoImg . '</span>' . "\n";
+                }
+            } ?>
             <button class="navbar-toggler mr-auto" type="button" data-toggle="collapse" data-target="#mainMenu" aria-controls="mainMenu" aria-expanded="false" aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
             </button>
             <div class="collapse navbar-collapse" id="mainMenu" data-bind="template: {name: 'menu-template', data: application_data}"></div>
+            <?php if (OEGlobalsBag::getInstance()->get('search_any_patient') != 'none') : ?>
+                <form name="frm_search_globals" class="form-inline">
+                    <div class="input-group">
+                        <input type="text" id="anySearchBox" class="form-control-sm <?php echo $any_search_class ?? '' ?> form-control" name="anySearchBox" placeholder="<?php echo xla("Search by any demographics") ?>" autocomplete="off">
+                        <div class="input-group-append">
+                            <button type="button" id="search_globals" class="btn btn-sm btn-secondary <?php echo $search_globals_class ?? '' ?>" title='<?php echo xla("Search for patient by entering whole or part of any demographics field information"); ?>' data-bind="event: {mousedown: viewPtFinder.bind( $data, '<?php echo xla("The search field cannot be empty. Please enter a search term") ?>', '<?php echo attr($search_any_type ?? ''); ?>')}">
+                                <i class="fa fa-search">&nbsp;</i></button>
+                        </div>
+                    </div>
+                </form>
+            <?php endif; ?>
+            <!--Below is the user data section that contains the user information and the attendant data-->
             <span id="userData" data-bind="template: {name: 'user-data-template', data: application_data}"></span>
+            <?php
+            // fire off a nav event
+            $dispatcher?->dispatch(new RenderEvent(), RenderEvent::EVENT_BODY_RENDER_NAV);
+            ?>
         </nav>
-            <div id="attendantData" class="body_title acck" data-bind="template: {name: app_view_model.attendant_template_type, data: application_data}">
-            </div>
-
-        <div class="body_title" id="tabs_div" data-bind="template: {name: 'tabs-controls', data: application_data}"></div>
-
+        <div id="attendantData" class="body_title acck" data-bind="template: {name: app_view_model.attendant_template_type, data: application_data}"></div>
+        <div class="body_title pt-1" id="tabs_div" data-bind="template: {name: 'tabs-controls', data: application_data}"></div>
         <div class="mainFrames d-flex flex-row" id="mainFrames_div">
             <div id="framesDisplay" data-bind="template: {name: 'tabs-frames', data: application_data}"></div>
         </div>
+        <?php echo $twig->render("product_registration/product_registration_modal.html.twig", [
+            'webroot' => OEGlobalsBag::getInstance()->getWebRoot(),
+            'allowEmail' => $allowEmail ?? false,
+            'allowTelemetry' => $allowTelemetry ?? false]); ?>
+    </div>
+    <div id="versionFooter" class="text-muted" style="position:fixed; bottom:4px; inset-inline-end:8px; font-size:11px; pointer-events:none; z-index:4;">
+        <?php echo $softwareVersion; ?>
     </div>
     <script>
         ko.applyBindings(app_view_model);
 
         $(function () {
             $('.dropdown-toggle').dropdown();
-            goRepeaterServices();
             $('#patient_caret').click(function () {
                 $('#attendantData').slideToggle();
                 $('#patient_caret').toggleClass('fa-caret-down').toggleClass('fa-caret-up');
             });
-            if($('body').css('direction') == "rtl") {
-              $('.dropdown-menu-right').each(function() {
-                $(this).removeClass('dropdown-menu-right');
-              });
+            if ($('body').css('direction') == "rtl") {
+                $('.dropdown-menu-right').each(function () {
+                    $(this).removeClass('dropdown-menu-right');
+                });
             }
-
         });
         $(function () {
             $('#logo_menu').focus();
@@ -332,6 +826,21 @@ $esignApi = new Api();
             }
         });
         document.addEventListener('touchstart', {}); //specifically added for iOS devices, especially in iframes
+        $(function () {
+            goRepeaterServices();
+        });
     </script>
+    <?php
+
+    // fire off an event here
+    $dispatcher?->dispatch(new RenderEvent(), RenderEvent::EVENT_BODY_RENDER_POST);
+
+    if ($allowRegisterDialog !== false) { // disable if running unit tests.
+        // Include the product registration js, telemetry and usage data reporting dialog
+        echo $twig->render("product_registration/product_reg.js.twig", ['webroot' => OEGlobalsBag::getInstance()->getWebRoot()]);
+    }
+
+    ?>
 </body>
+
 </html>

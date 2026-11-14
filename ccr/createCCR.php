@@ -4,7 +4,7 @@
  * CCR Script.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Garden State Health Systems <http://www.gshsys.com/>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2010 Garden State Health Systems <http://www.gshsys.com/>
@@ -12,45 +12,62 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use PHPMailer\PHPMailer\PHPMailer;
+
 // check if using the patient portal
 //(if so, then use the portal authorization)
+$notPatientPortal = false;
 if (isset($_GET['portal_auth'])) {
     $landingpage = "../portal/index.php";
 
     // Will start the (patient) portal OpenEMR session/cookie.
-    require_once(dirname(__FILE__) . "/../src/Common/Session/SessionUtil.php");
-    OpenEMR\Common\Session\SessionUtil::portalSessionStart();
+    //  Need access to classes, so run autoloader now instead of in globals.php.
+    require_once(__DIR__ . "/../vendor/autoload.php");
+    $session = SessionWrapperFactory::getInstance()->getActiveSession();
 
-    if (isset($_SESSION['pid']) && isset($_SESSION['patient_portal_onsite_two'])) {
-        $pid = $_SESSION['pid'];
+    if (!empty($session->get('pid')) && !empty($session->get('patient_portal_onsite_two'))) {
+        $pid = $session->get('pid');
         $ignoreAuth = true;
         global $ignoreAuth;
     } else {
-        OpenEMR\Common\Session\SessionUtil::portalSessionCookieDestroy();
+        SessionWrapperFactory::getInstance()->destroyPortalSession();
         header('Location: ' . $landingpage . '?w');
         exit;
     }
+} else {
+    // Check authorization.
+    $notPatientPortal = true;
 }
 
-require_once(dirname(__FILE__) . "/../interface/globals.php");
-require_once(dirname(__FILE__) . "/../library/sql-ccr.inc");
-require_once(dirname(__FILE__) . "/uuid.php");
-require_once(dirname(__FILE__) . "/transmitCCD.php");
-require_once(dirname(__FILE__) . "/../custom/code_types.inc.php");
+require_once(__DIR__ . "/../interface/globals.php");
+require_once(__DIR__ . "/../library/sql-ccr.inc.php");
+require_once(__DIR__ . "/transmitCCD.php");
+require_once(__DIR__ . "/../custom/code_types.inc.php");
 
-use PHPMailer\PHPMailer\PHPMailer;
 
-function createCCR($action, $raw = "no", $requested_by = "")
+if ($notPatientPortal) {
+    $thisauth = AclMain::aclCheckCore('patients', 'pat_rep');
+    if (!$thisauth) {
+        AccessDeniedHelper::denyWithTemplate("ACL check failed for patients/pat_rep: Create CCR", xl("Create CCR"));
+    }
+}
+
+function createCCR($action, $raw = "no", $requested_by = ""): void
 {
 
-    $authorID = getUuid();
-    $patientID = getUuid();
-    $sourceID = getUuid();
-    $oemrID = getUuid();
+    $authorID = ServiceContainer::getUuidFactory()->uuid4()->toString();
+    $patientID = ServiceContainer::getUuidFactory()->uuid4()->toString();
+    $sourceID = ServiceContainer::getUuidFactory()->uuid4()->toString();
+    $oemrID = ServiceContainer::getUuidFactory()->uuid4()->toString();
 
     $result = getActorData();
     while ($res = sqlFetchArray($result[2])) {
-        ${"labID{$res['id']}"} = getUuid();
+        ${"labID{$res['id']}"} = ServiceContainer::getUuidFactory()->uuid4()->toString();
     }
 
        $ccr = new DOMDocument('1.0', 'UTF-8');
@@ -124,7 +141,7 @@ function createCCR($action, $raw = "no", $requested_by = "")
     }
 }
 
-function gnrtCCR($ccr, $raw = "no", $requested_by = "")
+function gnrtCCR($ccr, $raw = "no", $requested_by = ""): void
 {
     global $pid;
 
@@ -147,7 +164,7 @@ function gnrtCCR($ccr, $raw = "no", $requested_by = "")
                     return;
         }
 
-        $tempDir = $GLOBALS['temporary_files_dir'];
+        $tempDir = OEGlobalsBag::getInstance()->getString('temporary_files_dir');
         $zipName = $tempDir . "/" . getReportFilename() . "-ccr.zip";
         if (file_exists($zipName)) {
                     unlink($zipName);
@@ -184,9 +201,10 @@ function gnrtCCR($ccr, $raw = "no", $requested_by = "")
                     displayError(xl("ERROR: Unable to Create Zip Archive."));
                     return;
         }
-    } elseif (substr($raw, 0, 4) == "send") {
-        $recipient = trim(stripslashes(substr($raw, 5)));
-        $result = transmitCCD($ccr, $recipient, $requested_by, "CCR");
+    } elseif (str_starts_with((string) $raw, "send")) {
+        $recipient = trim(stripslashes(substr((string) $raw, 5)));
+        $ccd_out = $ccr->saveXml();
+        $result = transmitCCD($pid, $ccd_out, $recipient, $requested_by, "CCR");
         echo htmlspecialchars($result, ENT_NOQUOTES);
         return;
     } else {
@@ -195,22 +213,22 @@ function gnrtCCR($ccr, $raw = "no", $requested_by = "")
     }
 }
 
-function viewCCD($ccr, $raw = "no", $requested_by = "")
+function viewCCD($ccr, $raw = "no", $requested_by = ""): void
 {
     global $pid;
 
     $ccr->preserveWhiteSpace = false;
     $ccr->formatOutput = true;
 
-    if (file_exists(dirname(__FILE__) . '/generatedXml')) {
-        $ccr->save(dirname(__FILE__) . '/generatedXml/ccrForCCD.xml');
+    if (file_exists(__DIR__ . '/generatedXml')) {
+        $ccr->save(__DIR__ . '/generatedXml/ccrForCCD.xml');
     }
 
     $xmlDom = new DOMDocument();
     $xmlDom->loadXML($ccr->saveXML());
 
     $ccr_ccd = new DOMDocument();
-    $ccr_ccd->load(dirname(__FILE__) . '/ccd/ccr_ccd.xsl');
+    $ccr_ccd->load(__DIR__ . '/ccd/ccr_ccd.xsl');
 
     $xslt = new XSLTProcessor();
     $xslt->importStylesheet($ccr_ccd);
@@ -221,8 +239,8 @@ function viewCCD($ccr, $raw = "no", $requested_by = "")
 
     $ccd->loadXML($xslt->transformToXML($xmlDom));
 
-    if (file_exists(dirname(__FILE__) . '/generatedXml')) {
-        $ccd->save(dirname(__FILE__) . '/generatedXml/ccdDebug.xml');
+    if (file_exists(__DIR__ . '/generatedXml')) {
+        $ccd->save(__DIR__ . '/generatedXml/ccdDebug.xml');
     }
 
     if ($raw == "yes") {
@@ -240,7 +258,7 @@ function viewCCD($ccr, $raw = "no", $requested_by = "")
             return;
         }
 
-        $tempDir = $GLOBALS['temporary_files_dir'];
+        $tempDir = OEGlobalsBag::getInstance()->getString('temporary_files_dir');
         $zipName = $tempDir . "/" . getReportFilename() . "-ccd.zip";
         if (file_exists($zipName)) {
             unlink($zipName);
@@ -284,15 +302,16 @@ function viewCCD($ccr, $raw = "no", $requested_by = "")
         }
     }
 
-    if (substr($raw, 0, 4) == "send") {
-        $recipient = trim(stripslashes(substr($raw, 5)));
-        $result = transmitCCD($ccd, $recipient, $requested_by);
+    if (str_starts_with((string) $raw, "send")) {
+        $recipient = trim(stripslashes(substr((string) $raw, 5)));
+        $ccd_out = $ccd->saveXml();
+        $result = transmitCCD($pid, $ccd_out, $recipient, $requested_by);
         echo htmlspecialchars($result, ENT_NOQUOTES);
         return;
     }
 
         $ss = new DOMDocument();
-        $ss->load(dirname(__FILE__) . "/stylesheet/cda.xsl");
+        $ss->load(__DIR__ . "/stylesheet/cda.xsl");
 
         $xslt->importStyleSheet($ss);
 
@@ -317,13 +336,13 @@ function sourceType($ccr, $uuid)
 }
 
 
-function displayError($message)
+function displayError($message): void
 {
-    echo '<script>alert("' . addslashes($message) . '");</script>';
+    echo '<script>alert(' . js_escape((string) $message) . ');</script>';
 }
 
 
-function createHybridXML($ccr)
+function createHybridXML($ccr): void
 {
 
     // save the raw xml
@@ -368,8 +387,8 @@ function createHybridXML($ccr)
 if ($_POST['ccrAction']) {
     $raw = $_POST['raw'];
   /* If transmit requested, fail fast if the recipient address fails basic validation */
-    if (substr($raw, 0, 4) == "send") {
-        $send_to = trim(stripslashes(substr($raw, 5)));
+    if (str_starts_with((string) $raw, "send")) {
+        $send_to = trim(stripslashes(substr((string) $raw, 5)));
         if (!PHPMailer::ValidateAddress($send_to)) {
             echo(htmlspecialchars(xl('Invalid recipient address. Please try again.'), ENT_QUOTES));
             return;

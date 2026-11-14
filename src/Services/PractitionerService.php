@@ -4,7 +4,7 @@
  * PractitionerService
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Matthew Vita <matthewvita48@gmail.com>
  * @author    Yash Bothra <yashrajbothra786gmail.com>
  * @copyright Copyright (c) 2018 Matthew Vita <matthewvita48@gmail.com>
@@ -13,16 +13,25 @@
 
 namespace OpenEMR\Services;
 
+use OpenEMR\BC\ServiceContainer;
 use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Services\Search\CompositeSearchField;
+use OpenEMR\Services\Search\ISearchField;
+use OpenEMR\Services\Search\SearchFieldException;
+use OpenEMR\Services\Search\SearchModifier;
+use OpenEMR\Services\Search\StringSearchField;
+use OpenEMR\Services\Search\TokenSearchField;
+use OpenEMR\Services\Search\TokenSearchValue;
 use OpenEMR\Validators\PractitionerValidator;
 use OpenEMR\Validators\ProcessingResult;
 
 class PractitionerService extends BaseService
 {
-
     private const PRACTITIONER_TABLE = "users";
+    /**
+     * @var PractitionerValidator
+     */
     private $practitionerValidator;
-    private $uuidRegistry;
 
     /**
      * Default constructor.
@@ -30,84 +39,121 @@ class PractitionerService extends BaseService
     public function __construct()
     {
         parent::__construct('users');
-        $this->uuidRegistry = new UuidRegistry(['table_name' => self::PRACTITIONER_TABLE]);
-        $this->uuidRegistry->createMissingUuids();
+        UuidRegistry::createMissingUuidsForTables([self::PRACTITIONER_TABLE]);
         $this->practitionerValidator = new PractitionerValidator();
+    }
+
+    public function getSelectJoinTables(): array
+    {
+        return
+            [
+                ['table' => 'list_options', 'alias' => 'abook', 'type' => 'LEFT JOIN', 'column' => 'abook_type', 'join_column' => 'option_id']
+                ,['table' => 'list_options', 'alias' => 'physician', 'type' => 'LEFT JOIN', 'column' => 'physician_type', 'join_column' => 'option_id']
+            ];
+    }
+
+    public function getSelectFields(string $tableAlias = '', string $columnPrefix = ""): array
+    {
+        // since we are joining a bunch of fields we need to make sure we normalize our regular field array by adding
+        // the table name for our own table values.
+        $fields = $this->getFields();
+        $normalizedFields = [];
+        // processing is cheap
+        foreach ($fields as $field) {
+            $normalizedFields[] = '`' . $this->getTable() . '`.`' . $field . '`';
+        }
+
+        return array_merge($normalizedFields, ['abook.title as abook_title', 'physician.title as physician_title', 'physician.codes as physician_code']);
+    }
+
+    public function getUuidFields(): array
+    {
+        return ['uuid'];
+    }
+
+    public function isValidPractitionerUuid($uuid): bool
+    {
+        $result = $this->getOne($uuid);
+        return !empty($result->getData());
+    }
+
+    public function search(array $search, $isAndCondition = true): ProcessingResult
+    {
+        // we only retrieve from our database when our practitioners are not null
+        if (!empty($search['npi'])) {
+            if (!$search['npi'] instanceof ISearchField) {
+                throw new SearchFieldException("npi", "field must be instance of " . ISearchField::class);
+            }
+            if ($search['npi']->getModifier() === SearchModifier::MISSING) {
+                // force our value to be false as the only thing that differentiates users as practitioners is our npi number
+                $search['npi'] = new TokenSearchField('npi', [new TokenSearchValue(false)]);
+            }
+        } else {
+            $search['npi'] = new TokenSearchField('npi', [new TokenSearchValue(false)]);
+            $search['npi']->setModifier(SearchModifier::MISSING);
+        }
+        // TODO: @adunsulag check with @brady.miller or @sjpadgett and find out if all practitioners will have usernames.
+        //  I noticed that in the test database that adding entries to the addressbook appears to create users... which
+        // seems bizarre and that those users don't have usernames.  I noticed that all of the users displayed in the OpenEMR
+        // user selector will exclude anything w/o a username so I add the same logic here.
+        if (!empty($search['username'])) {
+            if (!$search['username'] instanceof ISearchField) {
+                throw new SearchFieldException("username", "field must be instance of " . ISearchField::class);
+            }
+            if ($search['username']->getModifier() === SearchModifier::MISSING) {
+                // force our value to be false as we don't count users as practitioners if there is no username
+                $search['username'] = new TokenSearchField('username', [new TokenSearchValue(false)]);
+            }
+        } else {
+            $search['username'] = new TokenSearchField('username', [new TokenSearchValue(false)]);
+            $search['username']->setModifier(SearchModifier::MISSING);
+        }
+        // we are going to grab all users that have a username defined OR that have an included abook_type
+        // we only grab practitioners that have valid npis as defined up above so we don't need to recheck that here
+        $compoundIsAndCondition = false;
+        $compoundUsernameAndAbookType = new CompositeSearchField('compound_username_abook_type', [], $compoundIsAndCondition);
+        $compoundUsernameAndAbookType->addChild($search['username']);
+        $compoundUsernameAndAbookType->addChild(new TokenSearchField('abook_type', ['ord_lab', 'spe','external_provider']));
+        $search['compound_username_abook_type'] = $compoundUsernameAndAbookType;
+        unset($search['username']);
+        return parent::search($search, $isAndCondition);
     }
 
     /**
      * Returns a list of practitioners matching optional search criteria.
-     * Search criteria is conveyed by array where key = field/column name, value = field value.
+     * Search criteria is conveyed by array where key = field/column name, value = ISearchField|primitive value
+     *
+     * If a primitive value is provided it will do an exact match on that field.  If an ISearchField is provided it will
+     * use whatever modifiers, comparators, and composite search settings that are specified in the search field.
+     *
      * If no search criteria is provided, all records are returned.
      *
-     * @param  $search search array parameters
+     * @param array<string, ISearchField|string> $search search array parameters
      * @param  $isAndCondition specifies if AND condition is used for multiple criteria. Defaults to true.
      * @return ProcessingResult which contains validation messages, internal error messages, and the data
      * payload.
      */
-    public function getAll($search = array(), $isAndCondition = true)
+    public function getAll(array $search = [], $isAndCondition = true)
     {
-        $sqlBindArray = array();
-
-        $sql = "SELECT  id,
-                        uuid,
-                        users.title as title,
-                        fname,
-                        lname,
-                        mname,
-                        federaltaxid,
-                        federaldrugid,
-                        upin,
-                        facility_id,
-                        facility,
-                        npi,
-                        email,
-                        active,
-                        specialty,
-                        billname,
-                        url,
-                        assistant,
-                        organization,
-                        valedictory,
-                        street,
-                        streetb,
-                        city,
-                        state,
-                        zip,
-                        phone,
-                        fax,
-                        phonew1,
-                        phonecell,
-                        users.notes,
-                        state_license_number,
-                        abook.title as abook_title,
-                        physician.title as physician_title,
-                        physician.codes as physician_code
-                FROM  users
-                LEFT JOIN list_options as abook ON abook.option_id = users.abook_type
-                LEFT JOIN list_options as physician ON physician.option_id = users.physician_type
-                WHERE npi is not null";
-
         if (!empty($search)) {
-            $sql .= ' AND ';
-            $whereClauses = array();
+            $fields = $this->getFields();
+            $validKeys = array_combine($fields, $fields);
+
+            // We need to be backwards compatible with all other uses of the service so we are going to make this a
+            // exact match string param on everything, but only if they are not sending in any Search Field options
             foreach ($search as $fieldName => $fieldValue) {
-                array_push($whereClauses, $fieldName . ' = ?');
-                array_push($sqlBindArray, $fieldValue);
+                if (isset($validKeys[$fieldName]) && !($fieldValue instanceof ISearchField)) {
+                    $search[$fieldName] = new StringSearchField($fieldName, $fieldValue, SearchModifier::EXACT, $isAndCondition);
+                }
             }
-            $sqlCondition = ($isAndCondition == true) ? 'AND' : 'OR';
-            $sql .= implode(' ' . $sqlCondition . ' ', $whereClauses);
         }
+        return $this->search($search, $isAndCondition);
+    }
 
-        $statementResults = sqlStatement($sql, $sqlBindArray);
-
-        $processingResult = new ProcessingResult();
-        while ($row = sqlFetchArray($statementResults)) {
-            $row['uuid'] = UuidRegistry::uuidToString($row['uuid']);
-            $processingResult->addData($row);
-        }
-
-        return $processingResult;
+    public function getAllWithIds(array $ids)
+    {
+        $idField = new TokenSearchField('id', $ids);
+        return $this->search(['id' => $idField]);
     }
 
     /**
@@ -130,51 +176,16 @@ class PractitionerService extends BaseService
             return $processingResult;
         }
 
-        $sql = "SELECT  id,
-                        uuid,
-                        users.title as title,
-                        fname,
-                        lname,
-                        mname,
-                        federaltaxid,
-                        federaldrugid,
-                        upin,
-                        facility_id,
-                        facility,
-                        npi,
-                        email,
-                        active,
-                        specialty,
-                        billname,
-                        url,
-                        assistant,
-                        organization,
-                        valedictory,
-                        street,
-                        streetb,
-                        city,
-                        state,
-                        zip,
-                        phone,
-                        fax,
-                        phonew1,
-                        phonecell,
-                        users.notes,
-                        state_license_number,
-                        abook.title as abook_title,
-                        physician.title as physician_title,
-                        physician.codes as physician_code
-                FROM  users
-                LEFT JOIN list_options as abook ON abook.option_id = users.abook_type
-                LEFT JOIN list_options as physician ON physician.option_id = users.physician_type
-                WHERE uuid = ? AND npi is not null";
-
-        $uuidBinary = UuidRegistry::uuidToBytes($uuid);
-        $sqlResult = sqlQuery($sql, [$uuidBinary]);
-
-        $sqlResult['uuid'] = $uuid;
-        $processingResult->addData($sqlResult);
-        return $processingResult;
+        // there should not be a single duplicate id so we will grab that
+        $search = ['uuid' => new TokenSearchField('uuid', new TokenSearchValue($uuid, null, true))];
+        $results = $this->search($search);
+        $data = $results->getData();
+        if (count($data) > 1) {
+            // we will log this error and return just the single value
+            $results->setData([$data[0]]);
+            ServiceContainer::getLogger()->error("PractionerService->getOne() Duplicate records found for uuid", ['uuid' => $uuid]);
+        }
+        return $results;
     }
 
 
@@ -196,7 +207,7 @@ class PractitionerService extends BaseService
             return $processingResult;
         }
 
-        $data['uuid'] = (new UuidRegistry(['table_name' => 'users']))->createUuid();
+        $data['uuid'] = UuidRegistry::getRegistryForTable(self::PRACTITIONER_TABLE)->createUuid();
 
         $query = $this->buildInsertColumns($data);
         $sql = " INSERT INTO users SET ";
@@ -208,10 +219,10 @@ class PractitionerService extends BaseService
         );
 
         if ($results) {
-            $processingResult->addData(array(
+            $processingResult->addData([
                 'id' => $results,
                 'uuid' => UuidRegistry::uuidToString($data['uuid'])
-            ));
+            ]);
         } else {
             $processingResult->addInternalError("error processing SQL Insert");
         }
@@ -245,16 +256,19 @@ class PractitionerService extends BaseService
         }
 
         $query = $this->buildUpdateColumns($data);
+
         $sql = " UPDATE users SET ";
         $sql .= $query['set'];
         $sql .= " WHERE `uuid` = ?";
 
+
         $uuidBinary = UuidRegistry::uuidToBytes($uuid);
         array_push($query['bind'], $uuidBinary);
+
         $sqlResult = sqlStatement($sql, $query['bind']);
 
         if (!$sqlResult) {
-            $processingResult->addErrorMessage("error processing SQL Update");
+            $processingResult->addInternalError("error processing SQL Update");
         } else {
             $processingResult = $this->getOne($uuid);
         }

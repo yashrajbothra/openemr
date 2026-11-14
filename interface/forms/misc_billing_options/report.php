@@ -4,7 +4,7 @@
  * report.php displays the misc_billing_form in the encounter view
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Terry Hill <terry@lilysystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (C) 2007 Bo Huynh
@@ -14,21 +14,20 @@
  */
 
 
-require_once(dirname(__FILE__) . '/../../globals.php');
-require_once($GLOBALS["srcdir"] . "/api.inc");
-require_once("date_qualifier_options.php");
+use OpenEMR\BC\Utilities;
 
-function misc_billing_options_report($pid, $encounter, $cols, $id)
+require_once(__DIR__ . '/../../globals.php');
+function misc_billing_options_report($pid, $encounter, $cols, $id): void
 {
+    $MBO = new OpenEMR\Billing\MiscBillingOptions();
     $count = 0;
     $data = formFetch("form_misc_billing_options", $id);
     if ($data) {
         print "<table><tr>";
         foreach ($data as $key => $value) {
             if (
-                $key == "id" || $key == "pid" || $key == "user" || $key == "groupname" ||
-                $key == "authorized" || $key == "activity" || $key == "date" || $value == "" ||
-                $value == "0" || $value == "0000-00-00 00:00:00" || $value == "0000-00-00" ||
+                in_array($key, ["id", "pid", "user", "groupname", "authorized", "activity", "date"]) ||
+                Utilities::isDateEmpty($value) || $value == "0" ||
                 ($key == "box_14_date_qual" && ($data['onset_date'] == 0)) ||
                 ($key == "box_15_date_qual" && ($data['date_initial_treatment'] == 0))
             ) {
@@ -36,20 +35,20 @@ function misc_billing_options_report($pid, $encounter, $cols, $id)
             }
 
             if (($key === 'box_14_date_qual') || $key === 'box_15_date_qual') {
-                $value = qual_id_to_description($key, $value);
+                $value = $MBO->qual_id_to_description($key, $value);
             }
 
             if ($key === 'provider_qualifier_code') {
                 $pqe = $data['provider_qualifier_code'];
                 if (!empty($pqe)) {
                     switch ($pqe) {
-                        case ($pqe == "DN"):
+                        case "DN":
                             $value = "Referring";
                             break;
-                        case ($pqe == "DK"):
+                        case "DK":
                             $value = "Ordering";
                             break;
-                        case ($pqe == "DQ"):
+                        case "DQ":
                             $value = "Supervising";
                             break;
                     }
@@ -60,7 +59,7 @@ function misc_billing_options_report($pid, $encounter, $cols, $id)
 
             if ($key === 'provider_id') {
                 $trow = sqlQuery("SELECT id, lname, fname FROM users WHERE " .
-                         "id = ? ", array($value));
+                         "id = ? ", [$value]);
                 $value = $trow['fname'] . ' ' . $trow['lname'];
                 $key = 'Box 17 Provider';
             }
@@ -69,8 +68,15 @@ function misc_billing_options_report($pid, $encounter, $cols, $id)
                 $value = "Yes";
             }
 
+            if ($key == "replacement_claim" && $value == "2") {
+                $key = "void_claim";
+                $value = "Yes";
+            }
+
+
             $key = ucwords(str_replace("_", " ", $key));
-            print "<td><span class=bold>" . xlt($key) . ": </span><span class=text>" . text($value) . "</span></td>";
+            // @phpstan-ignore argument.type (legacy on-the-fly translation of dynamic value; migration tracked in #11498)
+            printf('<td><span class="bold">%s: </span><span class="text">%s</span></td>', xlt($key), text($value));
             $count++;
 
             if ($count == $cols) {

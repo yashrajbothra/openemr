@@ -207,7 +207,7 @@ class FHIRExplanationOfBenefitAccident extends FHIRBackboneElement implements \J
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -215,7 +215,7 @@ class FHIRExplanationOfBenefitAccident extends FHIRBackboneElement implements \J
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->date)) {
@@ -234,15 +234,13 @@ class FHIRExplanationOfBenefitAccident extends FHIRBackboneElement implements \J
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ExplanationOfBenefitAccident xmlns="http://hl7.org/fhir"></ExplanationOfBenefitAccident>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ExplanationOfBenefitAccident xmlns="http://hl7.org/fhir"></ExplanationOfBenefitAccident>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->date)) {
             $this->date->xmlSerialize(true, $sxe->addChild('date'));

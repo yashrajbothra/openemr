@@ -13,20 +13,25 @@
 
 namespace Carecoordination\Model;
 
-use OpenEMR\Common\Crypto\CryptoGen;
-use Laminas\Db\TableGateway\AbstractTableGateway;
-use Application\Model\ApplicationTable;
-use Laminas\Db\Adapter\Driver\Pdo\Result;
-use ZipArchive;
 use CouchDB;
-use DOMPDF;
+use DOMDocument;
+use Dompdf\Dompdf;
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\DirectMessaging\ErrorConstants;
+use OpenEMR\Common\Utils\XmlUtils;
+use OpenEMR\Core\OEGlobalsBag;
+use XSLTProcessor;
 
-class EncountermanagerTable extends AbstractTableGateway
+// TODO: we need to refactor all of this so it can go into a class for this functionality
+require_once(OEGlobalsBag::getInstance()->getProjectDir() . '/ccr/transmitCCD.php');
+
+class EncountermanagerTable
 {
     public function getEncounters($data, $getCount = null)
     {
-        $query_data = array();
-        $query  =   "SELECT pd.fname, pd.lname, pd.mname, date(fe.date) as date, fe.pid, fe.encounter,
+        $query_data = [];
+        $query = "SELECT pd.fname, pd.lname, pd.mname, date(fe.date) as date, fe.pid, fe.encounter, pd.date AS 'patient_creation_date',
                         u.fname as doc_fname, u.mname as doc_mname, u.lname as doc_lname, (select count(encounter) from form_encounter where pid=fe.pid) as enc_count,
                         (SELECT DATE(date) FROM form_encounter WHERE pid=fe.pid ORDER BY date DESC LIMIT 1) as last_visit_date,
 						(select count(*) from ccda where pid=fe.pid and transfer=1) as ccda_transfer_count,
@@ -35,23 +40,37 @@ class EncountermanagerTable extends AbstractTableGateway
                         JOIN patient_data AS pd ON pd.pid=fe.pid
                         LEFT JOIN users AS u ON u.id=fe.provider_id ";
         if ($data['status']) {
-            $query  .= " LEFT JOIN combination_form AS cf ON cf.encounter = fe.encounter ";
+            $query .= " LEFT JOIN combination_form AS cf ON cf.encounter = fe.encounter ";
         }
 
-                $query  .= " WHERE 1=1 ";
+        $query .= " WHERE 1=1 ";
 
         if ($data['status'] == "signed") {
-            $query  .= " AND cf.encounter IS NOT NULL AND cf.encounter !=''";
+            $query .= " AND cf.encounter IS NOT NULL AND cf.encounter !=''";
         }
 
         if ($data['status'] == "unsigned") {
-            $query  .= " AND (cf.encounter IS  NULL OR cf.encounter ='')";
+            $query .= " AND (cf.encounter IS  NULL OR cf.encounter ='')";
         }
-
         if ($data['from_date'] && $data['to_date']) {
-            $query .= " AND fe.date BETWEEN ? AND ? ";
+            if ($data['search_type_date'] == 'date_patient_creation') {
+                $query .= " AND pd.date BETWEEN ? AND ? ";
+            } else {
+                // default is encounter date
+                $query .= " AND fe.date BETWEEN ? AND ? ";
+            }
             $query_data[] = $data['from_date'];
             $query_data[] = $data['to_date'];
+        }
+        if (!empty($data['provider_id'])) {
+            $query .= " AND (`fe`.`provider_id` = ? OR `fe`.`supervisor_id` = ?) ";
+            $query_data[] = $data['provider_id'];
+            $query_data[] = $data['provider_id'];
+        }
+
+        if (!empty($data['billing_facility_id'])) {
+            $query .= " AND `fe`.`billing_facility` = ? ";
+            $query_data[] = $data['billing_facility_id'];
         }
 
         if ($data['pid']) {
@@ -68,47 +87,46 @@ class EncountermanagerTable extends AbstractTableGateway
             $query_data[] = $data['encounter'];
         }
 
-                $query .= " GROUP BY fe.pid ";
+        $query .= " GROUP BY fe.pid ";
 
-                $query .= " ORDER BY fe.pid, fe.date ";
-
-                $appTable   = new ApplicationTable();
+        $query .= " ORDER BY fe.pid, fe.date ";
 
         if ($getCount) {
-            $res        = $appTable->zQuery($query, $query_data);
-            $resCount   = $res->count();
-            return $resCount;
+            $res = QueryUtils::fetchRecords($query, $query_data);
+            return count($res);
         }
 
-                $query       .= " LIMIT " . \Application\Plugin\CommonPlugin::escapeLimit($data['limit_start']) . "," . \Application\Plugin\CommonPlugin::escapeLimit($data['results']);
-                $resDetails = $appTable->zQuery($query, $query_data);
-        return $resDetails;
+        $query .= " LIMIT ? OFFSET ?";
+        $resultLimit = is_array($data) ? ($data['results'] ?? null) : null;
+        $resultOffset = is_array($data) ? ($data['limit_start'] ?? null) : null;
+        $query_data[] = is_numeric($resultLimit) ? (int) $resultLimit : 0;
+        $query_data[] = is_numeric($resultOffset) ? (int) $resultOffset : 0;
+        return QueryUtils::fetchRecords($query, $query_data);
     }
 
     public function getStatus($data)
     {
+        $pid = '';
         foreach ($data as $row) {
-            if ($pid) {
+            if (!empty($pid)) {
                 $pid .= ',';
             }
 
-            $pid    .= $row['pid'];
+            $pid .= ($row['pid'] ?? '');
         }
 
-        if (!$pid) {
+        if (empty($pid)) {
             $pid = "''";
         }
 
-        $query      = "SELECT cc.*, DATE(fe.date) AS dos, CONCAT_WS(' ',u.fname, u.mname, u.lname) AS user_name FROM ccda AS cc
+        $query = "SELECT cc.*, DATE(fe.date) AS dos, CONCAT_WS(' ',u.fname, u.mname, u.lname) AS user_name FROM ccda AS cc
 				LEFT JOIN form_encounter AS fe ON fe. pid = cc.pid AND fe.encounter = cc.encounter
 				LEFT JOIN users AS u ON u.id = cc.user_id
 				WHERE cc.pid in (?) ORDER BY cc.pid, cc.time desc";
-        $appTable   = new ApplicationTable();
-        $result     = $appTable->zQuery($query, array($pid));
-        return $result;
+        return QueryUtils::fetchRecords($query, [$pid]);
     }
 
-    public function convert_to_yyyymmdd($date)
+    public function convert_to_yyyymmdd($date): string
     {
         $date = str_replace('/', '-', $date);
         $arr = explode('-', $date);
@@ -130,12 +148,13 @@ class EncountermanagerTable extends AbstractTableGateway
             return;
         }
 
-        $format = $format ? $format : 'm/d/y';
-        $temp = explode(' ', $date); //split using space and consider the first portion, incase of date with time
+        $format = $format ?: 'm/d/y';
+        $temp = explode(' ', (string) $date); //split using space and consider the first portion, in case of date with time
         $date = $temp[0];
         $date = str_replace('/', '-', $date);
         $arr = explode('-', $date);
 
+        $formatted_date = $date;
         if ($format == 'm/d/y') {
             $formatted_date = $arr[1] . "/" . $arr[2] . "/" . $arr[0];
         }
@@ -146,24 +165,27 @@ class EncountermanagerTable extends AbstractTableGateway
 
     public function getFile($id)
     {
-        $query      = "select couch_docid, couch_revid, ccda_data, encrypted from ccda where id=?";
-        $appTable   = new ApplicationTable();
-        $result     = $appTable->zQuery($query, array($id));
+        $query = "select couch_docid, couch_revid, ccda_data, encrypted from ccda where id=?";
+        $result = QueryUtils::fetchRecords($query, [$id]);
         foreach ($result as $row) {
             if ($row['couch_docid'] != '') {
-                $couch   = new CouchDB();
-                $resp    = $couch->retrieve_doc($row['couch_docid']);
+                $couch = new CouchDB();
+                $resp = $couch->retrieve_doc($row['couch_docid']);
+                $respData = is_object($resp) && property_exists($resp, 'data') ? $resp->data : null;
                 if ($row['encrypted']) {
-                    $cryptoGen = new CryptoGen();
-                    $content = $cryptoGen->decryptStandard($resp->data, null, 'database');
+                    $cryptoGen = ServiceContainer::getCrypto();
+                    $content = $cryptoGen->decryptFromFilesystem(is_string($respData) ? $respData : '');
                 } else {
-                    $content = base64_decode($resp->data);
+                    $content = base64_decode(is_string($respData) ? $respData : '');
                 }
             } elseif (!$row['couch_docid']) {
-                $fccda   = fopen($row['ccda_data'], "r");
+                if (!filesize($row['ccda_data'])) {
+                    continue;
+                }
+                $fccda = fopen($row['ccda_data'], "r");
                 if ($row['encrypted']) {
-                    $cryptoGen = new CryptoGen();
-                    $content = $cryptoGen->decryptStandard(fread($fccda, filesize($row['ccda_data'])), null, 'database');
+                    $cryptoGen = ServiceContainer::getCrypto();
+                    $content = $cryptoGen->decryptFromFilesystem(fread($fccda, filesize($row['ccda_data'])));
                 } else {
                     $content = fread($fccda, filesize($row['ccda_data']));
                 }
@@ -176,6 +198,41 @@ class EncountermanagerTable extends AbstractTableGateway
         }
     }
 
+    private function getCcdaAsPdf(string $ccda)
+    {
+        $dompdf = new Dompdf();
+        $dompdf->loadHtml($this->getCcdaAsHTML($ccda));
+        $dompdf->render();
+        return $dompdf->output();
+    }
+
+    private function getCcdaAsXml(string $ccda): string
+    {
+        $xml = XmlUtils::loadString($ccda);
+        $output = $xml->asXML();
+        if ($output === false) {
+            throw new \RuntimeException("Failed to serialize CCDA as XML");
+        }
+        return $output;
+    }
+
+    public function getCcdaAsHTML(string $ccda)
+    {
+        $xml = XmlUtils::loadString($ccda);
+        $xsl = new DOMDocument();
+        // cda.xsl is self contained with bootstrap and jquery.
+        // cda-web.xsl is used when referencing styles from internet.
+        $xsl->load(__DIR__ . '/../../../../../public/xsl/cda.xsl');
+        $proc = new XSLTProcessor();
+        if (!$proc->importStyleSheet($xsl)) { // attach the xsl rules
+            throw new \RuntimeException("CDA Stylesheet could not be found");
+        }
+        $outputFile = sys_get_temp_dir() . '/out_' . time() . '.html';
+        $proc->transformToURI($xml, $outputFile);
+
+        return file_get_contents($outputFile);
+    }
+
     /*
      * Connect to a phiMail Direct Messaging server and transmit
      * a CCDA document to the specified recipient. If the message is accepted by the
@@ -185,184 +242,110 @@ class EncountermanagerTable extends AbstractTableGateway
      * @param string requested_by user | patient
      * @return string result of operation
      */
-    public function transmitCCD($data = array())
+    public function transmitCcdToRecipients($data = []): string
     {
-        $appTable         = new ApplicationTable();
         $ccda_combination = $data['ccda_combination'];
-        $recipients       = $data['recipients'];
-        $xml_type         = $data['xml_type'];
-        $rec_arr          = explode(";", $recipients);
-        $d_Address        = '';
-        foreach ($rec_arr as $recipient) {
-            $config_err = "Direct messaging is currently unavailable." . " EC:";
-            if ($GLOBALS['phimail_enable'] == false) {
-                return("$config_err 1");
-            }
+        $recipients = $data['recipients'];
+        $xml_type = strtolower($data['xml_type'] ?? '');
+        $rec_arr = explode(";", (string) $recipients);
+        $d_Address = '';
+        // no point in continuing if we are not setup here
+        $config_err = xl(ErrorConstants::MESSAGING_DISABLED) . " " . ErrorConstants::ERROR_CODE_ABBREVIATION . ":";
+        if (!OEGlobalsBag::getInstance()->getBoolean('phimail_enable')) {
+            return ("$config_err " . ErrorConstants::ERROR_CODE_MESSAGING_DISABLED);
+        }
 
-            $fp = (new \Application\Plugin\Phimail())->phimail_connect($err);
-            if ($fp === false) {
-                return("$config_err $err");
-            }
+        $verifyMessageReceivedChecked = OEGlobalsBag::getInstance()->getBoolean('phimail_verifyrecipientreceived_enable');
 
-            $phimail_username = $GLOBALS['phimail_username'];
-            $cryptoGen = new CryptoGen();
-            $phimail_password = $cryptoGen->decryptStandard($GLOBALS['phimail_password']);
-            $ret = (new \Application\Plugin\Phimail())->phimail_write_expect_OK($fp, "AUTH $phimail_username $phimail_password\n");
-            if ($ret !== true) {
-                return("$config_err 4");
-            }
+        $elec_sent = [];
+        try {
+            foreach ($rec_arr as $recipient) {
+                $elec_sent = [];
+                $arr = explode('|', (string) $ccda_combination);
+                foreach ($arr as $value) {
+                    $query = "SELECT id,transaction_id,transaction_chosen FROM  ccda WHERE pid = ? ORDER BY id DESC LIMIT 1";
+                    $result = QueryUtils::fetchRecords($query, [$value]);
+                    $ccda_id = null;
+                    $trans_id = null;
+                    $trans_chosen = false;
+                    // weird foreach loop considering the limit 1 up above?
+                    foreach ($result as $val) {
+                        $ccda_id = $val['id'];
+                        // gets connected at the time the ccda is created
+                        $trans_id = $val['transaction_id'];
+                        $trans_chosen = in_array($val['transaction_chosen'] ?? null, [1, '1'], true);
+                    }
 
-            $ret = \Application\Plugin\Phimail::phimail_write_expect_OK($fp, "TO $recipient\n");
-            if ($ret !== true) {//return("Delivery is not allowed to the specified Direct Address.") ;
-                $d_Address .= ' ' . $recipient;
-                continue;
-            }
+                    $elec_sent[] = ['pid' => $value, 'map_id' => $trans_id];
 
-            $ret = fgets($fp, 1024); //ignore extra server data
-            if ($requested_by == "patient") {
-                $text_out = "Delivery of the attached clinical document was requested by the patient";
-            } else {
-                if (strpos($ccda_combination, '|') !== false) {
-                    $text_out = "Clinical documents are attached.";
-                } else {
-                    $text_out = "A clinical document is attached";
-                }
-            }
+                    $documents = \Document::getDocumentsForForeignReferenceId('ccda', $ccda_id);
+                    if (empty($documents[0])) {
+                        throw new \RuntimeException("Cannot send document as document was not generated for ccda with ccda id " . $ccda_id);
+                    }
+                    $document = $documents[0];
+                    $ccda = $document->get_data();
+                    // use the filename that exists in the document for what is sent
+                    $fileName = (string) $document->get_name();
+                    $ccdaString = (string) $ccda;
+                    if ($ccdaString === '' || $fileName === '') {
+                        throw new \RuntimeException("Cannot send document as document data was empty or filename was empty for document with id "
+                            . $document->get_id());
+                    }
 
-            $text_len = strlen($text_out);
-            (new \Application\Plugin\Phimail())->phimail_write($fp, "TEXT $text_len\n");
-            $ret = @fgets($fp, 256);
-            if ($ret != "BEGIN\n") {
-                (new \Application\Plugin\Phimail())->phimail_close($fp);
-              //return("$config_err 5");
-                $d_Address .= ' ' . $recipient;
-                continue;
-            }
+                    $ccda_file = match ($xml_type) {
+                        'html' => $this->getCcdaAsHTML($ccdaString),
+                        'pdf' => $this->getCcdaAsPdf($ccdaString),
+                        'xml' => $this->getCcdaAsXml($ccdaString),
+                        default => throw new \RuntimeException("Unsupported CCDA export type: " . $xml_type),
+                    };
+                    $replaceExt = "." . $xml_type;
+                    $extpos = strrpos($fileName, ".xml");
+                    if ($extpos !== false) {
+                        $fileName = substr_replace($fileName, $replaceExt, $extpos, strlen($replaceExt));
+                    }
 
-            $ret = (new \Application\Plugin\Phimail())->phimail_write_expect_OK($fp, $text_out);
-            if ($ret !== true) {
-              //return("$config_err 6");
-                $d_Address .= $recipient;
-                continue;
-            }
-
-            $elec_sent = array();
-            $arr = explode('|', $ccda_combination);
-            foreach ($arr as $value) {
-                $query  = "SELECT id FROM  ccda WHERE pid = ? ORDER BY id DESC LIMIT 1";
-                $result = $appTable->zQuery($query, array($value));
-                foreach ($result as $val) {
-                    $ccda_id = $val['id'];
-                }
-
-                $refs = $appTable->zQuery("select t.id as trans_id from ccda c inner join transactions t on (t.pid = c.pid and t.date = c.updated_date) where c.pid = ? and c.emr_transfer = 1 and t.title = 'LBTref'", array($value));
-                if ($refs->count() == 0) {
-                    $trans = $appTable->zQuery("select id from transactions where pid = ? and title = 'LBTref' order by id desc limit 1", array($value));
-                    $trans_cur = $trans->current();
-                    $trans_id  = $trans_cur['id'] ? $trans_cur['id'] : 0;
-                } else {
-                    foreach ($refs as $r) {
-                        $trans_id = $r['trans_id'];
+                    // there is no way currently to specify this came from the patient so we force to clinician.
+                    // Default xml type is CCD  (ie Continuity of Care Document)
+                    // The referral staff chose the C-CDA for, so a reply to it can be filed with that referral. The
+                    // most recent referral, linked when they chose none, is a guess, and a reply isn't filed by it.
+                    $referralId = $trans_chosen && is_numeric($trans_id) ? (int)$trans_id : null;
+                    $result = transmitCCD($value, $ccda_file, $recipient, 'clinician', "CCD", $xml_type, '', $fileName, $verifyMessageReceivedChecked, $referralId);
+                    if ($result !== "SUCCESS") {
+                        $d_Address .= ' ' . $recipient . "(" . $result . ")";
                     }
                 }
-
-                $elec_sent[] = array('pid' => $value,'map_id' => $trans_id);
-
-                $ccda = $this->getFile($ccda_id);
-
-                $xml = simplexml_load_string($ccda);
-                $xsl = new \DOMDocument();
-                $xsl->load(dirname(__FILE__) . '/../../../../../public/xsl/ccda.xsl');
-                $proc = new \XSLTProcessor();
-                $proc->importStyleSheet($xsl); // attach the xsl rules
-                $outputFile = sys_get_temp_dir() . '/out_' . time() . '.html';
-                $proc->transformToURI($xml, $outputFile);
-                $htmlContent = file_get_contents($outputFile);
-                if ($xml_type == 'html') {
-                    $ccda_file =  htmlspecialchars_decode($htmlContent);
-                } elseif ($xml_type == 'pdf') {
-                    $dompdf = new DOMPDF();
-                    $dompdf->load_html($htmlContent);
-                    $dompdf->render();
-                    //$dompdf->stream();
-                    $ccda_file = $dompdf->output();
-                } elseif ($xml_type == 'xml') {
-                    $ccda_file = $ccda;
-                }
-
-               //get patient name in Last_First format (used for CCDA filename)
-                $sql    = "SELECT pid, id, lname, fname, mname, providerID, DATE_FORMAT(DOB,'%m/%d/%Y') as DOB_TS FROM patient_data WHERE pid = ?";
-                $result = $appTable->zQuery($sql, array($value));
-                foreach ($result as $val) {
-                    $patientData[0] = $val;
-                }
-
-                if (empty($patientData[0]['lname'])) {
-                    $att_filename = "";
-                    $patientName2 = "";
-                } else {
-                    //spaces are the argument delimiter for the phiMail API calls and must be removed
-                    $extension = $xml_type == 'CCDA' ? 'xml' : strtolower($xml_type);
-                    $att_filename = " " . str_replace(" ", "_", $xml_type . "_" . $patientData[0]['lname']  . "_" . $patientData[0]['fname']) . "." . $extension;
-                    $patientName2 = $patientData[0]['fname'] . " " . $patientData[0]['lname'];
-                }
-
-                if (strtolower($xml_type) == 'xml') {
-                    $ccda     = simplexml_load_string($ccda_file);
-                    $ccda_out = $ccda->saveXml();
-                    $ccda_len = strlen($ccda_out);
-                    \Application\Plugin\Phimail::phimail_write($fp, "ADD " . ($xml_type == "CCR" ? $xml_type . ' ' : "CDA ") . $ccda_len . $att_filename . "\n");
-                } elseif (strtolower($xml_type) == 'html' || strtolower($xml_type) == 'pdf') {
-                    $ccda_out = $ccda_file;
-                    $message_length = strlen($ccda_out);
-                    $add_type = (strtolower($xml_type) == 'html') ? 'TEXT' : 'RAW';
-                    \Application\Plugin\Phimail::phimail_write($fp, "ADD " . $add_type . " " . $message_length . "" . $att_filename . "\n");
-                }
-
-                $ret = fgets($fp, 256);
-                if ($ret != "BEGIN\n") {
-                    \Application\Plugin\Phimail::phimail_close($fp);
-                    //return("$config_err 7");
-                    $d_Address .= ' ' . $recipient;
-                    continue;
-                }
-
-                $ret = \Application\Plugin\Phimail::phimail_write_expect_OK($fp, $ccda_out);
             }
-
-            if ($ret !== true) {
-//              return("$config_err 8");
-                $d_Address .= ' ' . $recipient;
-                continue;
-            }
-
-            \Application\Plugin\Phimail::phimail_write($fp, "SEND\n");
-            $ret = fgets($fp, 256);
-        //"INSERT INTO `amc_misc_data` (`amc_id`,`pid`,`map_category`,`map_id`,`date_created`) VALUES(?,?,?,?,NOW())"
-            \Application\Plugin\Phimail::phimail_close($fp);
+        } catch (\Throwable $exception) {
+            ServiceContainer::getLogger()->error("EncountermanagerTable: " . $exception->getMessage(), ['data' => $data, 'exception' => $exception]);
+            return ("Delivery failed to send");
         }
 
         if ($d_Address == '') {
             foreach ($elec_sent as $elec) {
-                $appTable->zQuery("INSERT into amc_misc_data(amc_id,pid,map_category,map_id,date_created,date_completed) values('send_sum_amc',?,'transactions',?,NOW(),NOW())", array($elec['pid'],$elec['map_id']));
-                $appTable->zQuery("INSERT into amc_misc_data(amc_id,pid,map_category,map_id,date_created,date_completed) values('send_sum_elec_amc',?,'transactions',?,NOW(),NOW())", array($elec['pid'],$elec['map_id']));
+                // check to make sure its a valid ccda
+                $collect = amcCollect('send_sum_valid_ccda', $elec['pid'], 'transactions', $elec['map_id']);
+                // if the ccda is invalid we are not going to mark this as complete at all.
+                if (!empty($collect)) {
+                    amcAdd('send_sum_amc', true, $elec['pid'], 'transactions', $elec['map_id']);
+                    amcAdd('send_sum_elec_amc', true, $elec['pid'], 'transactions', $elec['map_id']);
+                    // when we use EMR Direct it ensures deliverability to the recipient so we automatically mark the ccda summary of care as confirmed
+                    amcAdd('send_sum_elec_amc_confirmed', true, $elec['pid'], 'transactions', $elec['map_id']);
+                }
             }
 
-            return("Successfully Sent");
+            return ("Successfully Sent");
         } else {
-            return("Delivery is not allowed to:" . $d_Address);
+            return ("Delivery failed to send or was not allowed to:" . $d_Address);
         }
     }
-    public function getFileID($pid)
+
+    public function getFileID($pid, $limit = 1)
     {
-        $appTable = new ApplicationTable();
-        $query    = "SELECT cc.id, pd.fname, pd.lname, pd.pid FROM ccda AS cc
+        $query = "SELECT cc.id, pd.fname, pd.lname, pd.pid FROM ccda AS cc
 		    LEFT JOIN patient_data AS pd ON pd.pid=cc.pid
 		    WHERE cc.pid = ?
-		    ORDER BY cc.id DESC LIMIT 1";
-        $res      = $appTable->zQuery($query, array($pid));
-        $res_cur  = $res->current();
-        return $res_cur;
+		    ORDER BY cc.id DESC LIMIT ?";
+        return QueryUtils::fetchRecords($query, [$pid, is_numeric($limit) ? (int) $limit : 1]);
     }
 
     /*
@@ -373,13 +356,12 @@ class EncountermanagerTable extends AbstractTableGateway
     * @param    String      direct address
     *
     */
-    public function AddNewUSer($data = array())
+    public function AddNewUSer($data = [])
     {
-        $fname          = $data['fname'];
-        $lname          = $data['lname'];
+        $fname = $data['fname'];
+        $lname = $data['lname'];
         $direct_address = $data['direct_address'];
-        $appTable       = new ApplicationTable();
-        $query          = "INSERT INTO users SET username = ? ,password = ? ,authorized = ?,fname = ?,lname = ?,email = ?,active = ?,abook_type = ?";
-        $appTable->zQuery($query, array('','',0,$fname,$lname,$direct_address,1,'emr_direct'));
+        $query = "INSERT INTO users SET username = ? ,password = ? ,authorized = ?,fname = ?,lname = ?,email = ?,active = ?,abook_type = ?";
+        QueryUtils::sqlStatementThrowException($query, ['', '', 0, $fname, $lname, $direct_address, 1, 'emr_direct']);
     }
 }

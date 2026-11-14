@@ -11,10 +11,12 @@ use Ramsey\Uuid\Exception\InvalidUuidStringException;
  * Base class for OpenEMR object validation.
  * Validation processes are implemented using Particle (https://github.com/particle-php/Validator)
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Dixon Whitmire <dixonwh@gmail.com>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
  * @copyright Copyright (c) 2020 Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2020 Dixon Whitmire <dixonwh@gmail.com>
+ * @copyright Copyright (c) 2024 Care Management Solutions, Inc. <stephen.waite@cmsvt.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 abstract class BaseValidator
@@ -23,31 +25,37 @@ abstract class BaseValidator
     public const DATABASE_INSERT_CONTEXT = "db-insert";
     public const DATABASE_UPDATE_CONTEXT = "db-update";
 
-    protected $validator;
+    protected Validator $validator;
 
-    protected $supportedContexts;
+    /** @var list<string> */
+    protected array $supportedContexts;
 
     /**
      * Configures the validator instance with validation requirements and rules.
      * This default implementation sets the validator's supported context to include
      * database inserts and updates.
      */
-    protected function configureValidator()
+    protected function configureValidator(): void
     {
         array_push($this->supportedContexts, self::DATABASE_INSERT_CONTEXT, self::DATABASE_UPDATE_CONTEXT);
     }
 
     public function __construct()
     {
-        $this->validator = new Validator();
+        $this->validator = $this->getInnerValidator();
         $this->supportedContexts = [];
         $this->configureValidator();
+    }
+
+    protected function getInnerValidator(): Validator
+    {
+        return new Validator();
     }
 
     /**
      * @return true if the requested context is supported by the validator instance.
      */
-    private function isValidContext($context)
+    private function isValidContext($context): bool
     {
         return in_array($context, $this->supportedContexts);
     }
@@ -55,13 +63,9 @@ abstract class BaseValidator
     /**
      * Performs a data validation using the configured rules and requirements.
      *
-     * Validation results are conveyed by an array with the following keys:
-     * - isValid => true|false
-     * - messages => array(validationMessage, validationMessage, etc)
-     *
      * @param $dataFields -  The fields to validate.
      * @param $context - The validation context to utilize. This is simply a "handle" for the rules.
-     * @return $validationResult array
+     * @return ProcessingResult containing any validation messages from the configured rules.
      */
     public function validate($dataFields, $context)
     {
@@ -84,7 +88,7 @@ abstract class BaseValidator
      * @param $table The table in database
      * @param $lookupId The identifier to validateId
      * @param $isUuid true if the lookupId is UUID, otherwise false
-     * @return true if the lookupId is a valid existing id, otherwise Validation Message
+     * @return ProcessingResult|true True if valid, ProcessingResult with validation messages otherwise.
      */
     public static function validateId($field, $table, $lookupId, $isUuid = false)
     {
@@ -100,7 +104,7 @@ abstract class BaseValidator
         if ($isUuid) {
             try {
                 $lookupId = UuidRegistry::uuidToBytes($lookupId);
-            } catch (InvalidUuidStringException $e) {
+            } catch (InvalidUuidStringException) {
                 return $validationResult;
             }
         } elseif (!is_int(intval($lookupId))) {
@@ -109,7 +113,7 @@ abstract class BaseValidator
 
         $result = sqlQuery(
             "SELECT $field FROM $table WHERE $field = ?",
-            array($lookupId)
+            [$lookupId]
         );
         if (!empty($result[$field])) {
             return true;
@@ -124,15 +128,15 @@ abstract class BaseValidator
      * @param $code The code which needs to be verified
      * @param $table The table in database
      * @param $valueset Name of the particular Valueset
-     * @return boolean
+     * @return bool
      */
     public function validateCode($code, $table, $valueset)
     {
         $sql = "SELECT option_id FROM $table WHERE list_id = ? AND option_id = ?";
         $result = sqlQuery(
             $sql,
-            array($valueset, $code)
+            [$valueset, $code]
         );
-        return $result['option_id'] ? true : false;
+        return (bool) $result['option_id'];
     }
 }

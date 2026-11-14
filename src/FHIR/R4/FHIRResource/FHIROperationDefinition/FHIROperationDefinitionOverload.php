@@ -161,7 +161,7 @@ class FHIROperationDefinitionOverload extends FHIRBackboneElement implements \Js
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -169,7 +169,7 @@ class FHIROperationDefinitionOverload extends FHIRBackboneElement implements \Js
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (0 < count($this->parameterName)) {
@@ -185,15 +185,13 @@ class FHIROperationDefinitionOverload extends FHIRBackboneElement implements \Js
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<OperationDefinitionOverload xmlns="http://hl7.org/fhir"></OperationDefinitionOverload>');
-        }
+        $sxe ??= new \SimpleXMLElement('<OperationDefinitionOverload xmlns="http://hl7.org/fhir"></OperationDefinitionOverload>');
         parent::xmlSerialize(true, $sxe);
         if (0 < count($this->parameterName)) {
             foreach ($this->parameterName as $parameterName) {

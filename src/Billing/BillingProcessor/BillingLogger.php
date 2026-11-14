@@ -14,7 +14,7 @@
  * returned to billing_process.php to write any log messages to the screen.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Ken Chapple <ken@mi-squared.com>
  * @author    Daniel Pflieger <daniel@growlingflea.com>
@@ -32,7 +32,12 @@
 
 namespace OpenEMR\Billing\BillingProcessor;
 
-use OpenEMR\Common\Crypto\CryptoGen;
+use League\Flysystem\FilesystemOperator;
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Crypto\CryptoInterface;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Services\Storage\Location;
+use OpenEMR\Services\Storage\ManagerInterface;
 
 class BillingLogger
 {
@@ -61,17 +66,26 @@ class BillingLogger
      */
     protected $onLogCompleteCallback;
 
-    public function __construct()
-    {
-        $this->cryptoGen = new CryptoGen();
+    protected CryptoInterface $cryptoGen;
 
-        if ($GLOBALS['billing_log_option'] == 1) {
-            if (file_exists($GLOBALS['OE_SITE_DIR'] . "/documents/edi/process_bills.log")) {
-                $this->hlog = file_get_contents($GLOBALS['OE_SITE_DIR'] . "/documents/edi/process_bills.log");
+    private const LOG_PATH = 'edi/process_bills.log';
+
+    private readonly FilesystemOperator $filesystem;
+
+    public function __construct(
+        ?ManagerInterface $storageManager = null,
+        ?CryptoInterface $cryptoGen = null,
+    ) {
+        $cryptoGen ??= ServiceContainer::getCrypto();
+        $storageManager ??= ServiceContainer::getStorageManager();
+        $this->cryptoGen = $cryptoGen;
+        $this->filesystem = $storageManager->getStorage(Location::Documents);
+
+        if (OEGlobalsBag::getInstance()->get('billing_log_option') == 1) {
+            if ($this->filesystem->fileExists(self::LOG_PATH)) {
+                $this->hlog = $this->filesystem->read(self::LOG_PATH);
             }
-            if ($this->cryptoGen->cryptCheckStandard($this->hlog)) {
-                $this->hlog = $this->cryptoGen->decryptStandard($this->hlog, null, 'database');
-            }
+            $this->hlog = $this->cryptoGen->decryptFromFilesystem($this->hlog);
         } else { // ($GLOBALS['billing_log_option'] == 2)
             $this->hlog = '';
         }
@@ -89,14 +103,15 @@ class BillingLogger
      */
     public function onLogComplete()
     {
+        // If the hlog isn't empty, write the log to disk
+        if (!empty($this->hlog)) {
+            $this->hlog = $this->cryptoGen->encryptForFilesystem($this->hlog);
+            $this->filesystem->write(self::LOG_PATH, $this->hlog);
+        }
+
+        // If the generator set a callback function for when the log completes, call it here
         if (isset($this->onLogCompleteCallback)) {
-            call_user_func($this->onLogCompleteCallback);
-            if (!empty($this->hlog)) {
-                if ($GLOBALS['drive_encryption']) {
-                    $this->hlog = $this->cryptoGen->encryptStandard($this->hlog, null, 'database');
-                }
-                file_put_contents($GLOBALS['OE_SITE_DIR'] . "/documents/edi/process_bills.log", $this->hlog);
-            }
+            return ($this->onLogCompleteCallback)();
         }
 
         return false;

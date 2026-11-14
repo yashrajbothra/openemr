@@ -184,7 +184,7 @@ class FHIREpisodeOfCareDiagnosis extends FHIRBackboneElement implements \JsonSer
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -192,7 +192,7 @@ class FHIREpisodeOfCareDiagnosis extends FHIRBackboneElement implements \JsonSer
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->condition)) {
@@ -208,15 +208,13 @@ class FHIREpisodeOfCareDiagnosis extends FHIRBackboneElement implements \JsonSer
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<EpisodeOfCareDiagnosis xmlns="http://hl7.org/fhir"></EpisodeOfCareDiagnosis>');
-        }
+        $sxe ??= new \SimpleXMLElement('<EpisodeOfCareDiagnosis xmlns="http://hl7.org/fhir"></EpisodeOfCareDiagnosis>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->condition)) {
             $this->condition->xmlSerialize(true, $sxe->addChild('condition'));

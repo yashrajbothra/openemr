@@ -2,7 +2,7 @@
  * custom_bindings.js
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Kevin Yeh <kevin.y@integralemr.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2016 Kevin Yeh <kevin.y@integralemr.com>
@@ -78,6 +78,16 @@ ko.bindingHandlers.location={
                             tabData.title(titleText);
                         }
                     );
+                } else {
+                    // need to cancel the loading if we are on another domain
+                    // setting the title will hide the spinner and remove the Loading... text
+                    const currentUrl = tabData.url?.() ?? '';
+
+                    // eRx pages navigate to an external domain (NewCrop), so the iframe document is unreadable
+                    const erxMarkers = ['/interface/eRx.php', 'newcrop'];
+                    const isErxPage = currentUrl && erxMarkers.some(marker => currentUrl.includes(marker));
+
+                    tabData.title(xl(isErxPage ? 'Ensora eRx' : 'Unknown'));
                 }
             } ,true
         );

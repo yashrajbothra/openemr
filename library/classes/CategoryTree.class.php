@@ -7,20 +7,32 @@
 
 class CategoryTree extends Tree
 {
-
     /*
     *   This just sits on top of the parent constructor, only a shell so that the _table var gets set
     */
-    function __construct($root, $root_type = ROOT_TYPE_ID)
+    public function __construct($root, $root_type = ROOT_TYPE_ID)
     {
         $this->_table = "categories";
         parent::__construct($root, $root_type);
     }
 
-    function _get_categories_array($patient_id, $user = '')
+    public function should_translate_name(): bool
     {
-        $categories = array();
-        $sqlArray = array();
+        return true;
+    }
+
+    public function get_translated_name($name)
+    {
+        return xl_document_category($name);
+    }
+
+    /**
+     * @return non-empty-array[]
+     */
+    public function _get_categories_array($patient_id, $user = ''): array
+    {
+        $categories = [];
+        $sqlArray = [];
         $sql = "SELECT c.id, c.name, c.aco_spec, d.id AS document_id, d.name AS document_name, d.type, d.url, d.docdate"
             . " FROM categories AS c, documents AS d, categories_to_documents AS c2d"
             . " WHERE c.id = c2d.category_id"

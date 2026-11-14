@@ -1,0 +1,117 @@
+<?php
+
+namespace OpenEMR\Services\Qdm;
+
+use OpenEMR\Core\OEGlobalsBag;
+
+class MeasureService
+{
+    public function __construct()
+    {
+    }
+
+    /**
+     * Get measure sources with dynamic path building
+     * The 'openemr/oe-cqm-parsers' path is built at runtime using the global cqm_performance_period
+     */
+    public static function fetchMeasureSourceOptions(): array
+    {
+        $reporting_year = OEGlobalsBag::getInstance()->getString('cqm_performance_period') ?? '2023';
+        $reporting_year .= '_reporting_period';
+
+        return [
+            'openemr/oe-cqm-parsers' => "/vendor/openemr/oe-cqm-parsers/$reporting_year/json_measures",
+            'contrib' => '/contrib/ecqm/EP-EC-eCQM-2020-05'
+        ];
+    }
+
+    /**
+     * @return array<string, string> measure name => measure directory
+     */
+    public static function fetchMeasureOptions(): array
+    {
+        $measureSources = self::fetchMeasureSourceOptions();
+        $measureSourcePath = $measureSources['openemr/oe-cqm-parsers'];
+        $measurePath = OEGlobalsBag::getInstance()->getProjectDir() . $measureSourcePath;
+        $options = [];
+
+        foreach (glob("$measurePath/*", GLOB_ONLYDIR) as $measureDirectory) {
+            $options[basename($measureDirectory)] = $measureDirectory;
+        }
+
+        return $options;
+    }
+
+    public static function fetchMeasuresPath(): string
+    {
+        $measureSources = self::fetchMeasureSourceOptions();
+        $measureSourcePath = $measureSources['openemr/oe-cqm-parsers'];
+        return OEGlobalsBag::getInstance()->getProjectDir() . $measureSourcePath;
+    }
+
+    /**
+     * Given a full path to the measure directory, get the paths to the
+     * measure file, and the value sets file.
+     *
+     * @param  $measurePath
+     * @return string[]
+     */
+    public static function fetchMeasureFiles($measurePath): array
+    {
+        return [
+            'measure' => $measurePath . '/' . basename((string) $measurePath) . '.json',
+            'valueSets' => $measurePath . '/value_sets.json'
+        ];
+    }
+
+    public static function fetchAllMeasuresArray($measures = []): array
+    {
+        $measureObjects = [];
+        foreach ($measures as $measure) {
+            $measureObjects[] = self::fetchMeasureJson($measure);
+        }
+        return $measureObjects;
+    }
+
+    public static function fetchMeasureJson($measure, $assoc = true)
+    {
+        $measureFiles = MeasureService::fetchMeasureFiles($measure);
+        $json = file_get_contents($measureFiles['measure']);
+        if ($assoc) {
+            return json_decode($json, true);
+        }
+        return $json;
+    }
+
+    /**
+     * Get the current reporting year from global configuration
+     *
+     * @return string
+     */
+    public static function getCurrentReportingYear(): string
+    {
+        return OEGlobalsBag::getInstance()->getString('cqm_performance_period') ?? '2023';
+    }
+
+    /**
+     * Validate that the reporting year has measure files available
+     *
+     * @param string $year
+     * @return bool
+     */
+    public static function validateReportingYear($year = null): bool
+    {
+        $year ??= self::getCurrentReportingYear();
+
+        $tempGlobal = OEGlobalsBag::getInstance()->getString('cqm_performance_period');
+        OEGlobalsBag::getInstance()->set('cqm_performance_period', $year);
+
+        $measureSources = self::fetchMeasureSourceOptions();
+        $measurePath = OEGlobalsBag::getInstance()->getProjectDir() . $measureSources['openemr/oe-cqm-parsers'];
+
+        // Restore original global
+        OEGlobalsBag::getInstance()->set('cqm_performance_period', $tempGlobal);
+
+        return is_dir($measurePath) && count(glob("$measurePath/*", GLOB_ONLYDIR)) > 0;
+    }
+}

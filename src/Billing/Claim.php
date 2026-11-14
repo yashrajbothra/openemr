@@ -1,12 +1,15 @@
 <?php
 
-/* Claim Class
+/**
+ * Claim Class
  *
  * @package OpenEMR
  * @author Rod Roark <rod@sunsetsystems.com>
  * @author Stephen Waite <stephen.waite@cmsvt.com>
+ * @author Simon Quigley <squigley@altispeed.com>
  * @copyright Copyright (c) 2009-2020 Rod Roark <rod@sunsetsystems.com>
- * @copyright Copyright (c) 2017 Stephen Waite <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2017-2026 Stephen Waite <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2026 Simon Quigley <squigley@altispeed.com>
  * @link https://github.com/openemr/openemr/tree/master
  * @license https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
@@ -15,17 +18,22 @@ namespace OpenEMR\Billing;
 
 use InsuranceCompany;
 use OpenEMR\Billing\InvoiceSummary;
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\Utils\ValidationUtils;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Services\EncounterService;
 use OpenEMR\Services\FacilityService;
+use OpenEMR\Services\PatientService;
+use OpenEMR\Services\PhoneNumberService;
+use OpenEMR\Services\UserService;
 
 class Claim
 {
     public const X12_VERSION = '005010X222A1';
-    public const NOC_CODES = array('J3301'); // special handling for not otherwise classified HCPCS/CPT, not many so can add more here
+    public const NOC_CODES = ['J3301']; // not otherwise classified HCPCS/CPT
 
-    public $pid;               // patient id
-    public $encounter_id;      // encounter id
     public $procs;             // array of procedure rows from billing table
-    public $diags;             // array of icd9 codes from billing table
+    public $diags;             // array of icd codes from billing table
     public $diagtype = "ICD10"; // diagnosis code_type; safe to assume ICD10 now
     public $x12_partner;       // row from x12_partners table
     public $encounter;         // row from form_encounter table
@@ -34,40 +42,245 @@ class Claim
     public $provider;          // row from users table (rendering provider)
     public $referrer;          // row from users table (referring provider)
     public $supervisor;        // row from users table (supervising provider)
+    public $orderer;           // row from users table (ordering provider)
     public $insurance_numbers; // row from insurance_numbers table for current payer
     public $supervisor_numbers;// row from insurance_numbers table for current payer
     public $patient_data;      // row from patient_data table
-    public $billing_options;   // row from form_misc_billing_options table
+    /** @var array<mixed> row from form_misc_billing_options table */
+    public array $billing_options = [];
     public $invoice;           // result from get_invoice_summary()
-    public $payers;            // array of arrays, for all payers
+    public $payers = [];       // array of arrays, for all payers
     public $copay;             // total of copays from the ar_activity table
     public $facilityService;   // via matthew.vita orm work :)
-    public $pay_to_provider;   // to be implemented in facility ui
+    private $encounterService;
+    public $billing_prov_id;
+    public $line_item_adjs;    // adjustment array with key of [group code][reason code] needed for secondary claims
+    public $using_modifiers;
 
-    // This enforces the X12 Basic Character Set. Page A2.
+
+    /**
+     * @param $pid patient id
+     * @param $encounter_id encounter id
+     * @param $x12_partner_id
+     * @param ?string $payerId insurance company to build the claim for, in place of
+     *   the payer on the encounter's billing rows; lets Validate Only show the claim
+     *   for the payer selected in the billing manager without saving that choice
+     */
+    public function __construct(public $pid, public $encounter_id, $x12_partner_id, private readonly ?string $payerId = null)
+    {
+        $this->encounterService = new EncounterService();
+        $this->encounter = $this->encounterService->getOneByPidEid($this->pid, $this->encounter_id);
+        $this->getProcsAndDiags($this->pid, $this->encounter_id);
+        $this->copay = $this->getCopay($this->pid, $this->encounter_id);
+        $this->facilityService = new FacilityService();
+        $this->facility = $this->facilityService->getById($this->encounter['facility_id']);
+        $this->x12_partner = $this->getX12Partner($x12_partner_id);
+        $this->provider = (new UserService())->getUser($this->encounter['provider_id']);
+        $this->billing_facility = empty($this->encounter['billing_facility']) ?
+            $this->facilityService->getPrimaryBillingLocation() :
+            $this->facilityService->getById($this->encounter['billing_facility']);
+        $this->insurance_numbers = $this->getInsuranceNumbers(
+            $this->procs[0]['payer_id'],
+            $this->encounter['provider_id']
+        );
+        $this->patient_data = (new PatientService())->findByPid($this->pid);
+        $this->billing_options = $this->getMiscBillingOptions($this->pid, $this->encounter_id);
+        $this->referrer = (new UserService())->getUser($this->getReferrerId());
+        $this->billing_prov_id = (new UserService())->getUser($this->billing_options['provider_id'] ?? null);
+        $this->supervisor = (new UserService())->getUser($this->encounter['supervisor_id']);
+        $this->supervisor_numbers = $this->getInsuranceNumbers(
+            $this->procs[0]['payer_id'],
+            $this->encounter['supervisor_id']
+        );
+        $this->orderer = (new UserService())->getUser($this->getOrdererId());
+    }
+
+    public function getProcsAndDiags($pid, $encounter_id)
+    {
+        $this->procs = [];
+        $this->diags = [];
+        // Sort by procedure timestamp in order to get some consistency.
+        $sql = "SELECT b.id, b.date, b.code_type, b.code, b.pid, b.provider_id, " .
+        "b.user, b.groupname, b.authorized, b.encounter, b.code_text, b.billed, " .
+        "b.activity, b.payer_id, b.bill_process, b.bill_date, b.process_date, " .
+        "b.process_file, b.modifier, b.units, b.fee, b.justify, b.target, b.x12_partner_id, " .
+        "b.ndc_info, b.notecodes, b.revenue_code, ct.ct_diag " .
+        "FROM billing as b " .
+        "INNER JOIN code_types as ct ON b.code_type = ct.ct_key " .
+        "WHERE ct.ct_claim = '1' AND ct.ct_active = '1' AND b.pid = ? AND b.encounter = ? AND " .
+        "b.activity = '1' ORDER BY b.date, b.id";
+        $res = sqlStatement($sql, [$pid, $encounter_id]);
+        while ($row = sqlFetchArray($res)) {
+            // Save all diagnosis codes.
+            if ($row['ct_diag'] == '1') {
+                $this->diags[$row['code']] = $row['code'];
+                continue;
+            }
+
+            if (!$row['units']) {
+                $row['units'] = 1;
+            }
+
+            if ($this->payerId !== null) {
+                $row['payer_id'] = $this->payerId;
+            }
+
+            // Load prior payer data at the first opportunity in order to get
+            // the using_modifiers flag that is referenced below.
+            if (empty($this->procs)) {
+                $this->loadPayerInfo($row);
+            }
+
+            // The consolidate duplicate procedures, which was previously here, was removed
+            // from codebase on 12/9/15. Reason: Some insurance companies decline consolidated
+            // procedures, and this can be left up to the billing coder when they input the items.
+
+            // If there is a row-specific provider then get its details.
+            if (!empty($row['provider_id'])) {
+                // Get service provider data for this row.
+                $sql = "SELECT * FROM users WHERE id = ?";
+                $row['provider'] = sqlQuery($sql, [$row['provider_id']]);
+                // Get insurance numbers for this row's provider.
+                $sql = "SELECT * FROM insurance_numbers " .
+                "WHERE (insurance_company_id = ? OR insurance_company_id is NULL) AND provider_id = ? " .
+                "ORDER BY insurance_company_id DESC LIMIT 1";
+                $row['insurance_numbers'] = sqlQuery($sql, [$row['payer_id'], $row['provider_id']]);
+            }
+
+            $this->procs[] = $row;
+        }
+    }
+
+    public function getCopay($pid, $encounter_id)
+    {
+        $copay = 0;
+        $resMoneyGot = sqlStatement(
+            "SELECT pay_amount as PatientPay, session_id as id, " .
+            "date(post_time) as date FROM ar_activity WHERE pid = ? AND encounter = ? AND " .
+            "deleted IS NULL AND payer_type = 0 AND account_code = 'PCP'",
+            [$pid, $encounter_id]
+        );
+            //new fees screen copay gives account_code='PCP'
+        while ($rowMoneyGot = sqlFetchArray($resMoneyGot)) {
+                $PatientPay = $rowMoneyGot['PatientPay'] * -1;
+                $copay -= $PatientPay;
+        }
+        return $copay;
+    }
+
+    public function getX12Partner($x12_partner_id)
+    {
+        $sql = "SELECT * FROM x12_partners WHERE id = ?";
+        return sqlQuery($sql, [$x12_partner_id]);
+    }
+
+    public function getInsuranceNumbers($payer_id, $provider_id)
+    {
+        $sql = "SELECT * FROM insurance_numbers " .
+            "WHERE (insurance_company_id = ? OR insurance_company_id is NULL) AND provider_id = ? " .
+            "ORDER BY insurance_company_id DESC LIMIT 1";
+        return sqlQuery($sql, [$payer_id, $provider_id]);
+    }
+
+    /**
+     * @return array<mixed> empty when the encounter has no misc
+     *                      billing options form
+     */
+    public function getMiscBillingOptions($pid, $encounter_id): array
+    {
+        $sql = "SELECT fpa.* FROM forms JOIN form_misc_billing_options AS fpa " .
+            "ON fpa.id = forms.form_id " .
+            "WHERE forms.pid = ? AND forms.encounter = ? AND " .
+            "forms.deleted = 0 AND forms.formdir = 'misc_billing_options' " .
+            "ORDER BY forms.date";
+        $row = sqlQuery($sql, [$pid, $encounter_id]);
+
+        return is_array($row) ? $row : [];
+    }
+
+    public function getReferrerId()
+    {
+        if (
+            ($this->billing_options['provider_id'] ?? '')
+            && in_array($this->box17Qualifier(), ['', 'DN'], true)
+        ) {
+            $referrer_id = $this->billing_options['provider_id'];
+        } elseif ($this->encounterService->getReferringProviderID($this->pid, $this->encounter_id) ?? '') {
+            $referrer_id = $this->encounterService->getReferringProviderID($this->pid, $this->encounter_id);
+        } elseif (!OEGlobalsBag::getInstance()->getBoolean('MedicareReferrerIsRenderer') || ($this->insurance_numbers['provider_number_type'] ?? '') != '1C') {
+            $referrer_id = $this->patient_data['ref_providerID'];
+        } else {
+            $referrer_id = $this->encounter['provider_id'];
+        }
+        return $referrer_id;
+    }
+
+    public function getOrdererId(): string|int
+    {
+        $mboProviderId = $this->billing_options['provider_id'] ?? '';
+        if ($mboProviderId && $this->box17Qualifier() === 'DK') {
+            return is_int($mboProviderId) || is_string($mboProviderId) ? $mboProviderId : '';
+        }
+
+        $ordererId = $this->encounterService->getOrderingProviderID($this->pid, $this->encounter_id);
+
+        return is_int($ordererId) || is_string($ordererId) ? $ordererId : '';
+    }
+
+    /**
+     * This enforces the X12 Basic Character Set. Page A2.
+     *
+     * @param string $str
+     * @return string
+     */
     public function x12Clean($str)
     {
-        return preg_replace('/[^A-Z0-9!"\\&\'()+,\\-.\\/;?=@ ]/', '', strtoupper($str));
+        return preg_replace('/[^A-Z0-9!"\\&\'()+,\\-.\\/;?=@ ]/', '', strtoupper((string) $str));
     }
 
-    // X12 likes 9 digit zip codes also moving this from X125010837P to pursue PSR-0 and PSR-4
+    /**
+     * @param string $zip
+     * @return string
+     */
     public function x12Zip($zip)
     {
-        $zip = $this->x12Clean($zip);
-        // this will take out dashes and pad with trailing 9s if not 9 digits
-        return str_pad(
-            preg_replace('/[^0-9]/', '', $zip),
-            9,
-            9,
-            STR_PAD_RIGHT
-        );
+        // this will take out anything non-numeric
+        return preg_replace('/[^0-9]/', '', (string) $zip);
     }
 
-    // Make sure dates have no formatting and zero filled becomes blank
-    // Handles date time stamp formats as well
+    /**
+     * Digits for NM109. Edge whitespace is trimmed, then hyphens and spaces
+     * are removed. Any other character blanks the value.
+     */
+    public function x12NpiDigits(string $npi): string
+    {
+        return self::npiDigits($npi);
+    }
+
+    /**
+     * Digits for NM109. Edge whitespace is trimmed, then hyphens and spaces
+     * are removed. Any other character blanks the value.
+     */
+    public static function npiDigits(string $npi): string
+    {
+        $npi = trim($npi);
+        if (preg_match('/[^0-9 -]/', $npi) === 1) {
+            return '';
+        }
+
+        return str_replace(['-', ' '], '', $npi);
+    }
+
+    /**
+     * Make sure dates have no formatting and zero filled becomes blank
+     * Handles date time stamp formats as well
+     *
+     * @param string|null $date_field
+     * @return string
+     */
     public function cleanDate($date_field)
     {
-        $cleandate = str_replace('-', '', substr($date_field, 0, 10));
+        $cleandate = str_replace('-', '', substr(($date_field ?? ''), 0, 10));
 
         if (substr_count($cleandate, '0') == 8) {
             $cleandate = '';
@@ -79,19 +292,20 @@ class Claim
     public function loadPayerInfo(&$billrow)
     {
         global $sl_err;
-        $encounter_date = substr($this->encounter['date'], 0, 10);
+        $encounter_date = substr((string) $this->encounter['date'], 0, 10);
 
         // Create the $payers array.  This contains data for all insurances
         // with the current one always at index 0, and the others in payment
         // order starting at index 1.
         //
-        $this->payers = array();
-        $this->payers[0] = array();
-        $query = "SELECT * FROM insurance_data WHERE pid = ? AND (date <= ? OR date IS NULL) ORDER BY type ASC, date DESC";
-        $dres = sqlStatement($query, array($this->pid, $encounter_date));
+        $this->payers = [];
+        $this->payers[0] = [];
+        $query = "SELECT * FROM insurance_data WHERE pid = ? AND
+            (date <= ? OR date IS NULL) AND (date_end >= ? OR date_end IS NULL) ORDER BY type ASC, date DESC";
+        $dres = sqlStatement($query, [$this->pid, $encounter_date, $encounter_date]);
         $prevtype = '';
         while ($drow = sqlFetchArray($dres)) {
-            if (strcmp($prevtype, $drow['type']) == 0) {
+            if (strcmp((string) $prevtype, (string) $drow['type']) == 0) {
                 continue;
             }
 
@@ -103,16 +317,30 @@ class Claim
             }
 
             $ins = count($this->payers);
-            if ($drow['provider'] == $billrow['payer_id'] && empty($this->payers[0]['data'])) {
+            if (
+                (
+                    $drow['provider'] == $billrow['payer_id']
+                    || empty($billrow['payer_id'])
+                )
+                && empty($this->payers[0]['data'])
+            ) {
                 $ins = 0;
             }
 
-            $crow = sqlQuery("SELECT * FROM insurance_companies WHERE id = ?", array($drow['provider']));
+            $crow = sqlQuery("SELECT * FROM insurance_companies WHERE id = ?", [$drow['provider']]);
             $orow = new InsuranceCompany($drow['provider']);
-            $this->payers[$ins] = array();
+            $this->payers[$ins] = [];
             $this->payers[$ins]['data']    = $drow;
             $this->payers[$ins]['company'] = $crow;
             $this->payers[$ins]['object']  = $orow;
+        }
+
+        // if the claim was previously billed to another insurance
+        // that has now been removed from the patient's insurance data
+        // then we need to skip this for validation of the claim in the
+        // billing manager so that it grabs a valid insurance
+        if (empty($this->payers[0]['data'] ?? '')) {
+            array_shift($this->payers);
         }
 
         // This kludge hands most cases of a rare ambiguous situation, where
@@ -134,178 +362,44 @@ class Claim
 
         // Get payment and adjustment details if there are any previous payers.
         //
-        $this->invoice = array();
+        $this->invoice = [];
         if ($this->payerSequence() != 'P') {
             $this->invoice = InvoiceSummary::arGetInvoiceSummary($this->pid, $this->encounter_id, true);
             // Secondary claims might not have modifiers in SQL-Ledger data.
             // In that case, note that we should not try to match on them.
             $this->using_modifiers = false;
             foreach ($this->invoice as $key => $trash) {
-                if (strpos($key, ':')) {
+                if (strpos((string) $key, ':')) {
                     $this->using_modifiers = true;
                 }
             }
         }
     }
 
-  // Constructor. Loads relevant database information.
-  //
-    public function __construct($pid, $encounter_id)
+
+
+    /**
+     * Return an array of adjustments from the designated prior payer for the
+     * designated procedure key (might be procedure:modifier), or for the claim
+     * level.  For each adjustment give date, group code, reason code, amount.
+     * Note this will include "patient responsibility" adjustments which are
+     * not adjustments to OUR invoice, but they reduce the amount that the
+     * insurance company pays.
+     *
+     * @return list<
+     *   array{string, 'CO', non-empty-string, string}
+     *   |array{non-falsy-string, 'PR', '1'|'2', string, mixed}
+     * >
+     */
+    public function payerAdjustments($ins, $code = 'Claim'): array
     {
-        $this->pid = $pid;
-        $this->encounter_id = $encounter_id;
-        $this->procs = array();
-        $this->diags = array();
-        $this->copay = 0;
-
-        $this->facilityService = new FacilityService();
-        $this->pay_to_provider = ''; // will populate from facility someday :)
-
-
-        // We need the encounter date before we can identify the payers.
-        $sql = "SELECT * FROM form_encounter WHERE pid = ? AND encounter = ?";
-        $this->encounter = sqlQuery($sql, array($this->pid, $this->encounter_id));
-
-        // Sort by procedure timestamp in order to get some consistency.
-        $sql = "SELECT b.id, b.date, b.code_type, b.code, b.pid, b.provider_id, " .
-        "b.user, b.groupname, b.authorized, b.encounter, b.code_text, b.billed, " .
-        "b.activity, b.payer_id, b.bill_process, b.bill_date, b.process_date, " .
-        "b.process_file, b.modifier, b.units, b.fee, b.justify, b.target, b.x12_partner_id, " .
-        "b.ndc_info, b.notecodes, b.revenue_code, ct.ct_diag " .
-        "FROM billing as b " .
-        "INNER JOIN code_types as ct ON b.code_type = ct.ct_key " .
-        "WHERE ct.ct_claim = '1' AND ct.ct_active = '1' AND b.encounter = ? AND b.pid = ? AND " .
-        "b.activity = '1' ORDER BY b.date, b.id";
-        $res = sqlStatement($sql, array($this->encounter_id, $this->pid));
-        while ($row = sqlFetchArray($res)) {
-            // Save all diagnosis codes.
-            if ($row['ct_diag'] == '1') {
-                $this->diags[$row['code']] = $row['code'];
-                continue;
-            }
-
-            if (!$row['units']) {
-                $row['units'] = 1;
-            }
-
-            // Load prior payer data at the first opportunity in order to get
-            // the using_modifiers flag that is referenced below.
-            if (empty($this->procs)) {
-                $this->loadPayerInfo($row);
-            }
-
-            // The consolidate duplicate procedures, which was previously here, was removed
-            // from codebase on 12/9/15. Reason: Some insurance companies decline consolidated
-            // procedures, and this can be left up to the billing coder when they input the items.
-
-            // If there is a row-specific provider then get its details.
-            if (!empty($row['provider_id'])) {
-                // Get service provider data for this row.
-                $sql = "SELECT * FROM users WHERE id = ?";
-                $row['provider'] = sqlQuery($sql, array($row['provider_id']));
-                // Get insurance numbers for this row's provider.
-                $sql = "SELECT * FROM insurance_numbers " .
-                "WHERE (insurance_company_id = ? OR insurance_company_id is NULL) AND provider_id = ?" .
-                "ORDER BY insurance_company_id DESC LIMIT 1";
-                $row['insurance_numbers'] = sqlQuery($sql, array($row['payer_id'], $row['provider_id']));
-            }
-
-            $this->procs[] = $row;
-        }
-
-        $resMoneyGot = sqlStatement(
-            "SELECT pay_amount as PatientPay, session_id as id, " .
-            "date(post_time) as date FROM ar_activity WHERE pid = ? AND encounter = ? AND " .
-            "deleted IS NULL AND payer_type = 0 AND account_code = 'PCP'",
-            array($this->pid, $this->encounter_id)
-        );
-          //new fees screen copay gives account_code='PCP'
-        while ($rowMoneyGot = sqlFetchArray($resMoneyGot)) {
-              $PatientPay = $rowMoneyGot['PatientPay'] * -1;
-              $this->copay -= $PatientPay;
-        }
-
-        $sql = "SELECT * FROM x12_partners WHERE id = ?";
-        $this->x12_partner = sqlQuery($sql, array($this->procs[0]['x12_partner_id']));
-
-        $this->facility = $this->facilityService->getById($this->encounter['facility_id']);
-
-        /*****************************************************************
-        $provider_id = $this->procs[0]['provider_id'];
-        *****************************************************************/
-        $provider_id = $this->encounter['provider_id'];
-        $sql = "SELECT * FROM users WHERE id = ?";
-        $this->provider = sqlQuery($sql, array($provider_id));
-        // Selecting the billing facility assigned  to the encounter.  If none,
-        // try the first (and hopefully only) facility marked as a billing location.
-        if (empty($this->encounter['billing_facility'])) {
-              $this->billing_facility = $this->facilityService->getPrimaryBillingLocation();
-        } else {
-              $this->billing_facility = $this->facilityService->getById($this->encounter['billing_facility']);
-        }
-
-        $sql = "SELECT * FROM insurance_numbers " .
-        "WHERE (insurance_company_id = ? OR insurance_company_id is NULL) AND provider_id = ? " .
-        "ORDER BY insurance_company_id DESC LIMIT 1";
-        $this->insurance_numbers = sqlQuery($sql, array($this->procs[0]['payer_id'], $provider_id));
-
-        $sql = "SELECT * FROM patient_data WHERE pid = ? ORDER BY id LIMIT 1";
-        $this->patient_data = sqlQuery($sql, array($this->pid));
-
-        $sql = "SELECT fpa.* FROM forms JOIN form_misc_billing_options AS fpa " .
-        "ON fpa.id = forms.form_id " .
-        "WHERE forms.encounter = ? AND forms.pid = ? AND forms.deleted = 0 AND forms.formdir = 'misc_billing_options' " .
-        "ORDER BY forms.date";
-        $this->billing_options = sqlQuery($sql, array($this->encounter_id, $this->pid));
-
-        $referrer_id = (empty($GLOBALS['MedicareReferrerIsRenderer']) ||
-        $this->insurance_numbers['provider_number_type'] != '1C') ?
-          $this->patient_data['ref_providerID'] : $provider_id;
-        $sql = "SELECT * FROM users WHERE id = ?";
-        $this->referrer = sqlQuery($sql, array($referrer_id));
-        if (!$this->referrer) {
-            $this->referrer = array();
-        }
-
-        $supervisor_id = $this->encounter['supervisor_id'];
-        $sql = "SELECT * FROM users WHERE id = ?";
-        $this->supervisor = sqlQuery($sql, array($supervisor_id));
-        if (!$this->supervisor) {
-            $this->supervisor = array();
-        }
-
-        $billing_options_id = $this->billing_options['provider_id'] ?? null;
-        $sql = "SELECT * FROM users WHERE id = ?";
-        $this->billing_prov_id = sqlQuery($sql, array($billing_options_id));
-        if (!$this->billing_prov_id) {
-            $this->billing_prov_id = array();
-        }
-
-        $sql = "SELECT * FROM insurance_numbers WHERE " .
-          "(insurance_company_id = ? OR insurance_company_id is NULL) AND provider_id = ? " .
-          "ORDER BY insurance_company_id DESC LIMIT 1";
-        $this->supervisor_numbers = sqlQuery($sql, array($this->procs[0]['payer_id'], $supervisor_id));
-        if (!$this->supervisor_numbers) {
-            $this->supervisor_numbers = array();
-        }
-    }
-
-  // Return an array of adjustments from the designated prior payer for the
-  // designated procedure key (might be procedure:modifier), or for the claim
-  // level.  For each adjustment give date, group code, reason code, amount.
-  // Note this will include "patient responsibility" adjustments which are
-  // not adjustments to OUR invoice, but they reduce the amount that the
-  // insurance company pays.
-  //
-    public function payerAdjustments($ins, $code = 'Claim')
-    {
-        $aadj = array();
+        $aadj = [];
 
         // If we have no modifiers stored in SQL-Ledger for this claim,
         // then we cannot use a modifier passed in with the key.
-        $tmp = strpos($code, ':');
+        $tmp = strpos((string) $code, ':');
         if ($tmp && !$this->using_modifiers) {
-            $code = substr($code, 0, $tmp);
+            $code = substr((string) $code, 0, $tmp);
         }
 
         // For payments, source always starts with "Ins" or "Pt".
@@ -333,7 +427,7 @@ class Claim
             // Compute this procedure's patient responsibility amount as of this
             // prior payer, which is the original charge minus all insurance
             // payments and "hard" adjustments up to this payer.
-            $ptresp = $this->invoice[$code]['chg'] + $this->invoice[$code]['adj'];
+            $ptresp = $this->invoice[$code]['chg'] + $this->invoice[$code]['adj'] ?? '';
             foreach ($this->invoice[$code]['dtl'] as $key => $value) {
                 // plv (from ar_activity.payer_type) exists to
                 // indicate the payer level.
@@ -341,14 +435,14 @@ class Claim
                     if ($value['plv'] > 0 && $value['plv'] <= $insnumber) {
                         $ptresp -= $value['pmt'];
                     }
-                } elseif (isset($value['chg']) && trim(substr($key, 0, 10))) {
+                } elseif (isset($value['chg']) && trim(substr((string) $key, 0, 10))) {
                   // non-blank key indicates this is an adjustment and not a charge
                     if ($value['plv'] > 0 && $value['plv'] <= $insnumber) {
                         $ptresp += $value['chg']; // adjustments are negative charges
                     }
                 }
 
-                $msp = isset($value['msp']) ? $value['msp'] : null; // record the reason for adjustment
+                $msp = $value['msp'] ?? null; // record the reason for adjustment
             }
 
             if ($ptresp < 0) {
@@ -357,55 +451,55 @@ class Claim
 
             // Main loop, to extract adjustments for this payer and procedure.
             foreach ($this->invoice[$code]['dtl'] as $key => $value) {
-                $tmp = str_replace('-', '', trim(substr($key, 0, 10)));
+                $tmp = str_replace('-', '', trim(substr((string) $key, 0, 10)));
                 if ($tmp) {
                     $date = $tmp;
                 }
 
-                if ($tmp && $value['pmt'] == 0) { // not original charge and not a payment
+                if ($tmp && (($value['pmt'] ?? null) == 0)) { // not original charge and not a payment
                     $rsn = $value['rsn'];
                     $chg = 0 - $value['chg']; // adjustments are negative charges
 
                     $gcode = 'CO'; // default group code = contractual obligation
                     $rcode = '45'; // default reason code = max fee exceeded (code 42 is obsolete)
 
-                    if (preg_match("/Ins adjust $inslabel/i", $rsn, $tmp)) {
+                    if (preg_match("/Ins adjust/i", (string) $rsn, $tmp)) {
                         // From manual post. Take the defaults.
-                    } elseif (preg_match("/To copay $inslabel/i", $rsn, $tmp) && !$chg) {
+                    } elseif (preg_match("/To copay/i", (string) $rsn, $tmp) && !$chg) {
                         $coinsurance = $ptresp; // from manual post
                         continue;
-                    } elseif (preg_match("/To ded'ble $inslabel/i", $rsn, $tmp) && !$chg) {
+                    } elseif (preg_match("/To ded'ble/i", (string) $rsn, $tmp) && !$chg) {
                         $deductible = $ptresp; // from manual post
                         continue;
-                    } elseif (preg_match("/$inslabel copay: (\S+)/i", $rsn, $tmp) && !$chg) {
+                    } elseif (preg_match("/copay: (\S+)/i", (string) $rsn, $tmp) && !$chg) {
                         $coinsurance = $tmp[1]; // from 835 as of 6/2007
                         continue;
-                    } elseif (preg_match("/$inslabel coins: (\S+)/i", $rsn, $tmp) && !$chg) {
+                    } elseif (preg_match("/coins: (\S+)/i", (string) $rsn, $tmp) && !$chg) {
                         $coinsurance = $tmp[1]; // from 835 and manual post as of 6/2007
                         continue;
-                    } elseif (preg_match("/$inslabel dedbl: (\S+)/i", $rsn, $tmp) && !$chg) {
+                    } elseif (preg_match("/dedbl: (\S+)/i", (string) $rsn, $tmp) && !$chg) {
                         $deductible = $tmp[1]; // from 835 and manual post as of 6/2007
                         continue;
-                    } elseif (preg_match("/$inslabel ptresp: (\S+)/i", $rsn, $tmp) && !$chg) {
-                        continue; // from 835 as of 6/2007
-                    } elseif (preg_match("/$inslabel adjust code (\S+)/i", $rsn, $tmp)) {
+                    } elseif (preg_match(EraAdjustmentMemo::PATIENT_RESPONSIBILITY_PATTERN, (string) $rsn, $tmp) && !$chg) {
+                        continue; // from 835 as of 6/2007; with the reason code since 2026
+                    } elseif (preg_match("/adjust code (\S+)/i", (string) $rsn, $tmp)) {
                         $rcode = $tmp[1]; // from 835
-                    } elseif (preg_match("/$inslabel/i", $rsn, $tmp)) {
+                    } elseif (preg_match("/$inslabel/i", (string) $rsn, $tmp)) {
                         // Take the defaults.
-                    } elseif (preg_match('/Ins(\d)/i', $rsn, $tmp) && $tmp[1] != $insnumber) {
+                    } elseif (preg_match('/Ins(\d)/i', (string) $rsn, $tmp) && $tmp[1] != $insnumber) {
                         continue; // it's for some other payer
                     } elseif ($insnumber == '1') {
-                        if (preg_match("/Adjust code (\S+)/i", $rsn, $tmp)) {
+                        if (preg_match("/Adjust code (\S+)/i", (string) $rsn, $tmp)) {
                             $rcode = $tmp[1]; // from 835
                         } elseif ($chg) {
                             // Other adjustments default to Ins1.
                         } elseif (
-                            preg_match("/Co-pay: (\S+)/i", $rsn, $tmp) ||
-                            preg_match("/Coinsurance: (\S+)/i", $rsn, $tmp)
+                            preg_match("/Co-pay: (\S+)/i", (string) $rsn, $tmp) ||
+                            preg_match("/Coins: (\S+)/i", (string) $rsn, $tmp)
                         ) {
                             $coinsurance = 0 + $tmp[1]; // from 835 before 6/2007
                             continue;
-                        } elseif (preg_match("/To deductible: (\S+)/i", $rsn, $tmp)) {
+                        } elseif (preg_match("/To deductible: (\S+)/i", (string) $rsn, $tmp)) {
                             $deductible = 0 + $tmp[1]; // from 835 before 6/2007
                             continue;
                         } else {
@@ -419,7 +513,7 @@ class Claim
                         $rcode = '45'; // reason 42 is obsolete
                     }
 
-                    $aadj[] = array($date, $gcode, $rcode, sprintf('%.2f', $chg));
+                    $aadj[] = [$date, $gcode, $rcode, sprintf('%.2f', $chg)];
                 } // end if
             } // end foreach
 
@@ -435,10 +529,10 @@ class Claim
             // Find out if this payer paid anything at all on this claim.  This will
             // help us allocate any unknown patient responsibility amounts.
             $thispaidanything = 0;
-            foreach ($this->invoice as $codekey => $codeval) {
-                foreach ($codeval['dtl'] as $key => $value) {
+            foreach ($this->invoice as $codeval) {
+                foreach ($codeval['dtl'] as $value) {
                     // plv exists to indicate the payer level.
-                    if ($value['plv'] == $insnumber) {
+                    if (isset($value['plv']) && $value['plv'] == $insnumber) {
                         $thispaidanything += $value['pmt'];
                     }
                 }
@@ -456,11 +550,11 @@ class Claim
             $coinsurance = sprintf('%.2f', $coinsurance);
 
             if ($date && $deductible != 0) {
-                $aadj[] = array($date, 'PR', '1', $deductible, $msp);
+                $aadj[] = [$date, 'PR', '1', $deductible, $msp];
             }
 
             if ($date && $coinsurance != 0) {
-                $aadj[] = array($date, 'PR', '2', $coinsurance, $msp);
+                $aadj[] = [$date, 'PR', '2', $coinsurance, $msp];
             }
         } // end if
 
@@ -471,13 +565,13 @@ class Claim
   // prior payer. If $code is specified then only that procedure key is
   // selected, otherwise it's for the whole claim.
   //
-    public function payerTotals($ins, $code = '')
+    public function payerTotals($ins, $code = ''): array
     {
         // If we have no modifiers stored in SQL-Ledger for this claim,
         // then we cannot use a modifier passed in with the key.
-        $tmp = strpos($code, ':');
+        $tmp = strpos((string) $code, ':');
         if ($tmp && !$this->using_modifiers) {
-            $code = substr($code, 0, $tmp);
+            $code = substr((string) $code, 0, $tmp);
         }
 
         $inslabel = ($this->payerSequence($ins) == 'S') ? 'Ins2' : 'Ins1';
@@ -486,16 +580,16 @@ class Claim
         $adjtotal = 0;
         $date = '';
         foreach ($this->invoice as $codekey => $codeval) {
-            if ($code && strcmp($codekey, $code) != 0) {
+            if ($code && strcmp((string) $codekey, (string) $code) != 0) {
                 continue;
             }
 
             foreach ($codeval['dtl'] as $key => $value) {
                 // plv (from ar_activity.payer_type) exists to
                 // indicate the payer level.
-                if ($value['plv'] == $insnumber) {
+                if (isset($value['plv']) && $value['plv'] == $insnumber) {
                     if (!$date) {
-                        $date = str_replace('-', '', trim(substr($key, 0, 10)));
+                        $date = str_replace('-', '', trim(substr((string) $key, 0, 10)));
                     }
 
                     $paytotal += $value['pmt'];
@@ -504,7 +598,7 @@ class Claim
 
             $aarr = $this->payerAdjustments($ins, $codekey);
             foreach ($aarr as $a) {
-                if (strcmp($a[1], 'PR') != 0) {
+                if (strcmp((string) $a[1], 'PR') != 0) {
                     $adjtotal += $a[3];
                 }
 
@@ -514,7 +608,7 @@ class Claim
             }
         }
 
-        return array($date, sprintf('%.2f', $paytotal), sprintf('%.2f', $adjtotal));
+        return [$date, sprintf('%.2f', $paytotal), sprintf('%.2f', $adjtotal)];
     }
 
   // Return the amount already paid by the patient.
@@ -529,12 +623,11 @@ class Claim
 
         //
         $amount = 0;
-        foreach ($this->invoice as $codekey => $codeval) {
-            foreach ($codeval['dtl'] as $key => $value) {
-                // plv exists to indicate the payer level.
+        foreach ($this->invoice as $codeval) {
+            foreach ($codeval['dtl'] as $value) {
+                $value['pmt'] ??= 0;
 
                 if (empty($value['plv'])) { // 0 indicates patient
-                    $value['pmt'] = $value['pmt'] ?? null;
                     $amount += $value['pmt'];
                 }
             }
@@ -545,10 +638,10 @@ class Claim
 
   // Return invoice total, including adjustments but not payments.
   //
-    public function invoiceTotal()
+    public function invoiceTotal(): string
     {
         $amount = 0;
-        foreach ($this->invoice as $codekey => $codeval) {
+        foreach ($this->invoice as $codeval) {
             $amount += $codeval['chg'];
         }
 
@@ -556,26 +649,26 @@ class Claim
     }
 
   // Number of procedures in this claim.
-    public function procCount()
+    public function procCount(): int
     {
-        return count($this->procs);
+        return is_array($this->procs) ? count($this->procs) : 0;
     }
 
   // Number of payers for this claim. Ranges from 1 to 3.
-    public function payerCount()
+    public function payerCount(): int
     {
-        return count($this->payers);
+        return is_array($this->payers) ? count($this->payers) : 0;
     }
 
-    public function x12gsversionstring()
+    public function x12gsversionstring(): string
     {
         return Claim::X12_VERSION;
     }
 
-    public function x12gssenderid()
+    public function x12_sender_id()
     {
         $tmp = ($this->x12_partner['x12_sender_id'] ?? '');
-        while (strlen($tmp) < 15) {
+        while (strlen((string) $tmp) < 15) {
             $tmp .= " ";
         }
 
@@ -591,10 +684,7 @@ class Claim
       * In most cases, the ISA08 and GS03 are the same. However
       *
       * In some clearing houses ISA08 and GS03 are different
-      * Example: https://www.acs-gcro.com/downloads/DOL/DOL_CG_X12N_5010_837_v1_02.pdf - Page 18
-      * In this .pdf, the ISA08 is specified to be 100000 while the GS03 is specified to be 77044
-      *
-      * Therefore if the x12_gs03 segement is explicitly specified we use that value,
+      * Therefore if the x12_gs03 segment is explicitly specified we use that value,
       * otherwise we simply use the same receiver ID as specified for ISA03
         */
         if (!empty($this->x12_partner['x12_gs03'])) {
@@ -607,18 +697,18 @@ class Claim
 //***MS Add - since we are a TPA we need to include this
     public function x12_submitter_name()
     {
-        $tmp = $this->x12_partner['x12_submitter_name'];
-        while (strlen($tmp) < 15) {
-            $tmp .= " ";
+        if (!OEGlobalsBag::getInstance()->getBoolean('gen_x12_based_on_ins_co')) {
+            return false;
         }
 
+        $tmp = $this->x12Clean(trim($this->x12_partner['x12_submitter_name']  ?? ''));
         return $tmp;
     }
 
     public function x12gsreceiverid()
     {
         $tmp = ($this->x12_partner['x12_receiver_id'] ?? '');
-        while (strlen($tmp) < 15) {
+        while (strlen((string) $tmp) < 15) {
             $tmp .= " ";
         }
 
@@ -629,7 +719,6 @@ class Claim
     {
         return ($this->x12_partner['x12_isa05'] ?? '');
     }
-//adding in public functions for isa 01 - isa 04
 
     public function x12gsisa01()
     {
@@ -650,7 +739,6 @@ class Claim
         return ($this->x12_partner['x12_isa04'] ?? '');
     }
 
-/////////
     public function x12gsisa07()
     {
         return ($this->x12_partner['x12_isa07'] ?? '');
@@ -681,44 +769,188 @@ class Claim
         return $this->x12_partner['x12_per06'];
     }
 
+    /**
+     * @return string
+     */
     public function cliaCode()
     {
-        return $this->x12Clean(trim($this->facility['domain_identifier']));
+        return $this->x12Clean(trim((string) $this->facility['domain_identifier']));
     }
 
+    /**
+     * @return string
+     */
     public function billingFacilityName()
     {
-        return $this->x12Clean(trim($this->billing_facility['name']));
+        return $this->x12Clean(trim((string) $this->billing_facility['name']));
     }
 
+    /**
+     * @return string
+     */
     public function billingFacilityStreet()
     {
-        return $this->x12Clean(trim($this->billing_facility['street']));
+        return $this->x12Clean(trim((string) $this->billing_facility['street']));
     }
 
+    /**
+     * @return string
+     */
     public function billingFacilityCity()
     {
-        return $this->x12Clean(trim($this->billing_facility['city']));
+        return $this->x12Clean(trim((string) $this->billing_facility['city']));
     }
 
+    /**
+     * @return string
+     */
     public function billingFacilityState()
     {
-        return $this->x12Clean(trim($this->billing_facility['state']));
+        return $this->x12Clean(trim((string) $this->billing_facility['state']));
     }
 
+    /**
+     * @return string
+     */
     public function billingFacilityZip()
     {
-        return $this->x12Clean(trim($this->billing_facility['postal_code']));
+        return $this->x12Zip($this->billing_facility['postal_code']);
     }
 
+    /**
+     * Whether the 837P sends a pay-to address (loop 2010AB): the billing facility has a
+     * mailing address and it differs from the physical address sent for the billing
+     * provider (loop 2010AA). 2010AB is only for a payment address that differs from
+     * the billing provider's.
+     */
+    public function hasPayToAddress(): bool
+    {
+        return self::mailingAddressDiffers(is_array($this->billing_facility) ? $this->billing_facility : []);
+    }
+
+    /**
+     * The billing facility's mailing address, sent as the 837P pay-to address.
+     */
+    public function payToFacilityStreet(): string
+    {
+        return (string) $this->x12Clean($this->billingFacilityMailField('mail_street'));
+    }
+
+    public function payToFacilityStreet2(): string
+    {
+        return (string) $this->x12Clean($this->billingFacilityMailField('mail_street2'));
+    }
+
+    public function payToFacilityCity(): string
+    {
+        return (string) $this->x12Clean($this->billingFacilityMailField('mail_city'));
+    }
+
+    public function payToFacilityState(): string
+    {
+        return (string) $this->x12Clean($this->billingFacilityMailField('mail_state'));
+    }
+
+    public function payToFacilityZip(): string
+    {
+        return (string) $this->x12Zip($this->billingFacilityMailField('mail_zip'));
+    }
+
+    /**
+     * One text column from a facility row. Empty when the row or the column is missing.
+     */
+    private function facilityText(mixed $facility, string $column): string
+    {
+        if (!is_array($facility)) {
+            return '';
+        }
+        $value = $facility[$column] ?? null;
+        if (!is_string($value)) {
+            return '';
+        }
+
+        return trim($value);
+    }
+
+    private function billingFacilityMailField(string $field): string
+    {
+        return $this->facilityText($this->billing_facility, $field);
+    }
+
+    /**
+     * Whether a facility row has a mailing address that differs from its physical address.
+     *
+     * Streets compare without case, punctuation or extra spaces (mailing street and
+     * street2 together against the physical street). ZIP codes compare as digits, and a
+     * 5-digit ZIP matches a ZIP+4 that starts with it.
+     *
+     * @param array<mixed> $facility row from the facility table
+     */
+    private static function mailingAddressDiffers(array $facility): bool
+    {
+        $field = static fn (string $key): string => is_string($facility[$key] ?? null) ? trim($facility[$key]) : '';
+        $words = static fn (string $value): string => trim((string) preg_replace(
+            '/\s+/',
+            ' ',
+            (string) preg_replace('/[^A-Z0-9 ]/', ' ', strtoupper($value))
+        ));
+        $digits = static fn (string $value): string => (string) preg_replace('/\D/', '', $value);
+
+        if ($field('mail_street') === '') {
+            return false;
+        }
+        $mailZip = $digits($field('mail_zip'));
+        $physicalZip = $digits($field('postal_code'));
+        $sameZip = $mailZip === $physicalZip
+            || (strlen($mailZip) === 5 && str_starts_with($physicalZip, $mailZip))
+            || (strlen($physicalZip) === 5 && str_starts_with($mailZip, $physicalZip));
+
+        return !(
+            $words($field('mail_street') . ' ' . $field('mail_street2')) === $words($field('street'))
+            && $words($field('mail_city')) === $words($field('city'))
+            && $words($field('mail_state')) === $words($field('state'))
+            && $sameZip
+        );
+    }
+
+    /**
+     * Postal code stored for the billing facility, before digit reduction.
+     */
+    public function billingFacilityPostalCode(): string
+    {
+        return $this->facilityText($this->billing_facility, 'postal_code');
+    }
+
+    /**
+     * Country stored for the billing facility. Empty when the row has none.
+     */
+    public function billingFacilityCountry(): string
+    {
+        return $this->facilityText($this->billing_facility, 'country_code');
+    }
+
+    /**
+     * @return string
+     */
     public function billingFacilityETIN()
     {
         return $this->x12Clean(trim(str_replace('-', '', $this->billing_facility['federal_ein'])));
     }
 
+    /**
+     * @return string
+     */
     public function billingFacilityNPI()
     {
-        return $this->x12Clean(trim($this->billing_facility['facility_npi']));
+        return $this->x12Clean($this->x12NpiDigits((string) $this->billing_facility['facility_npi']));
+    }
+
+    /**
+     * @return string
+     */
+    public function billingFacilityTaxonomy()
+    {
+        return $this->x12Clean(trim($this->billing_facility['facility_taxonomy'] ?? ''));
     }
 
     public function federalIdType()
@@ -743,15 +975,30 @@ class Claim
 
     public function billingContactName()
     {
-        return $this->x12Clean(trim($this->billing_facility['attn']));
+        if (!$this->x12_submitter_name()) {
+            return $this->x12Clean(trim((string) $this->billing_facility['attn']));
+        } else {
+            $query = "SELECT fname, lname FROM users WHERE id = ?";
+            $ores = sqlQuery($query, [$this->x12_partner['x12_submitter_id'] ?? '']);
+            $contact_name = $this->x12Clean(trim($ores['fname'] ?? '')) . " " . $this->x12Clean(trim($ores['lname'] ?? ''));
+            return $contact_name;
+        }
     }
 
-    public function billingContactPhone()
+    public function billingContactPhone(): string
     {
+        if (!$this->x12_submitter_name()) {
+            $tmp_phone = $this->x12Clean(trim((string) $this->billing_facility['phone']));
+        } else {
+            $query = "SELECT phonew1 FROM users WHERE id = ?";
+            $ores = sqlQuery($query, [$this->x12_partner['x12_submitter_id'] ?? '']);
+            $tmp_phone = $this->x12Clean(trim($ores['phonew1'] ?? ''));
+        }
+
         if (
             preg_match(
                 "/([2-9]\d\d)\D*(\d\d\d)\D*(\d\d\d\d)/",
-                $this->billing_facility['phone'],
+                (string) $tmp_phone,
                 $tmp
             )
         ) {
@@ -763,68 +1010,140 @@ class Claim
 
     public function billingContactEmail()
     {
-        return $this->x12Clean(trim($this->billing_facility['email']));
+        if (!$this->x12_submitter_name()) {
+            return $this->x12Clean(trim($this->billing_facility['email'] ?? ''));
+        } else {
+            $query = "SELECT email FROM users WHERE id = ?";
+            $ores = sqlQuery($query, [$this->x12_partner['x12_submitter_id'] ?? '']);
+            return $this->x12Clean(trim($ores['email'] ?? ''));
+        }
     }
 
+    /**
+     * @return string
+     */
+    public function billingIdCode()
+    {
+        if (!$this->x12_submitter_name()) {
+            return $this->x12Clean(trim($this->x12_sender_id() ?? ''));
+        } else {
+            $query = "SELECT federaltaxid FROM users WHERE id = ?";
+            $ores = sqlQuery($query, [$this->x12_partner['x12_submitter_id'] ?? '']);
+            return $this->x12Clean(trim($ores['federaltaxid'] ?? ''));
+        }
+    }
+
+    /**
+     * @return string
+     */
     public function facilityName()
     {
-        return $this->x12Clean(trim($this->facility['name']));
+        return $this->x12Clean(trim((string) $this->facility['name']));
     }
 
+    /**
+     * @return string
+     */
     public function facilityStreet()
     {
-        return $this->x12Clean(trim($this->facility['street']));
+        return $this->x12Clean(trim((string) $this->facility['street']));
     }
 
+    /**
+     * @return string
+     */
     public function facilityCity()
     {
-        return $this->x12Clean(trim($this->facility['city']));
+        return $this->x12Clean(trim((string) $this->facility['city']));
     }
 
+    /**
+     * @return string
+     */
     public function facilityState()
     {
-        return $this->x12Clean(trim($this->facility['state']));
+        return $this->x12Clean(trim((string) $this->facility['state']));
     }
 
+    /**
+     * @return string
+     */
     public function facilityZip()
     {
-        return $this->x12Clean(trim($this->facility['postal_code']));
+        return $this->x12Zip($this->facility['postal_code']);
     }
 
+    /**
+     * Postal code stored for the service facility, before digit reduction.
+     */
+    public function facilityPostalCode(): string
+    {
+        return $this->facilityText($this->facility, 'postal_code');
+    }
+
+    /**
+     * Country stored for the service facility. Empty when the row has none.
+     */
+    public function facilityCountry(): string
+    {
+        return $this->facilityText($this->facility, 'country_code');
+    }
+
+    /**
+     * @return string
+     */
     public function facilityETIN()
     {
         return $this->x12Clean(trim(str_replace('-', '', $this->facility['federal_ein'])));
     }
 
+    /**
+     * @return string
+     */
     public function facilityNPI()
     {
-        return $this->x12Clean(trim($this->facility['facility_npi']));
+        return $this->x12Clean($this->x12NpiDigits((string) $this->facility['facility_npi']));
     }
 
-    public function facilityPOS()
+    /**
+     * @return string
+     */
+    public function facilityPOS(): string
     {
         if ($this->encounter['pos_code']) {
-            return sprintf('%02d', trim($this->encounter['pos_code']));
+            return sprintf('%02d', trim((string) $this->encounter['pos_code']));
         } else {
-            return sprintf('%02d', trim($this->facility['pos_code']));
+            return sprintf('%02d', trim((string) $this->facility['pos_code']));
         }
     }
 
+    /**
+     * @return string
+     */
     public function facilityTaxonomy()
     {
-        return $this->x12Clean(trim($this->facility['facility_taxonomy']));
+        return $this->x12Clean(trim($this->facility['facility_taxonomy'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function clearingHouseName()
     {
         return $this->x12Clean(trim($this->x12_partner['name'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function clearingHouseETIN()
     {
         return $this->x12Clean(trim(str_replace('-', '', ($this->x12_partner['id_number'] ?? ''))));
     }
 
+    /**
+     * @return string
+     */
     public function providerNumberType($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
@@ -832,6 +1151,9 @@ class Claim
         return ($tmp['provider_number_type'] ?? '');
     }
 
+    /**
+     * @return string
+     */
     public function providerNumber($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
@@ -839,6 +1161,9 @@ class Claim
         return $this->x12Clean(trim(str_replace('-', '', ($tmp['provider_number'] ?? ''))));
     }
 
+    /**
+     * @return string
+     */
     public function providerGroupNumber($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
@@ -848,14 +1173,14 @@ class Claim
 
   // Returns 'P', 'S' or 'T'.
   //
-    public function payerSequence($ins = 0)
+    public function payerSequence($ins = 0): string
     {
         return strtoupper(substr(($this->payers[$ins]['data']['type'] ?? ''), 0, 1));
     }
 
   // Returns the HIPAA code of the patient-to-subscriber relationship.
   //
-    public function insuredRelationship($ins = 0)
+    public function insuredRelationship($ins = 0): string
     {
         $tmp = strtolower(($this->payers[$ins]['data']['subscriber_relationship'] ?? ''));
         if (strcmp($tmp, 'self') == 0) {
@@ -879,7 +1204,7 @@ class Claim
 
     public function insuredTypeCode($ins = 0)
     {
-        if (strcmp($this->claimType($ins), 'MB') == 0 && $this->payerSequence($ins) != 'P') {
+        if (strcmp((string) $this->claimType($ins), 'MB') == 0 && $this->payerSequence($ins) != 'P') {
             return $this->payers[$ins]['data']['policy_type'];
         } else {
             return '';
@@ -888,28 +1213,40 @@ class Claim
 
   // Is the patient also the subscriber?
   //
-    public function isSelfOfInsured($ins = 0)
+    public function isSelfOfInsured($ins = 0): bool
     {
         $tmp = strtolower($this->payers[$ins]['data']['subscriber_relationship'] ?? '');
         return (strcmp($tmp, 'self') == 0);
     }
 
+    /**
+     * @return string
+     */
     public function planName($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['plan_name'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function policyNumber($ins = 0)
     {
  // "ID"
         return $this->x12Clean(trim($this->payers[$ins]['data']['policy_number'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function groupNumber($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['group_number'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function groupName($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_employer'] ?? ''));
@@ -961,42 +1298,63 @@ class Claim
         return $this->payers[$ins]['object']->get_ins_type_code();
     }
 
+    /**
+     * @return string
+     */
     public function insuredLastName($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_lname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function insuredFirstName($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_fname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function insuredMiddleName($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_mname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function insuredStreet($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_street'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function insuredCity($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_city'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function insuredState($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_state'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function insuredZip($ins = 0)
     {
-        return $this->x12Clean(trim($this->payers[$ins]['data']['subscriber_postal_code'] ?? ''));
+        return $this->x12Zip($this->payers[$ins]['data']['subscriber_postal_code'] ?? '');
     }
 
-    public function insuredPhone($ins = 0)
+    public function insuredPhone($ins = 0): string
     {
         if (
             preg_match(
@@ -1016,21 +1374,30 @@ class Claim
         return str_replace('-', '', ($this->payers[$ins]['data']['subscriber_DOB'] ?? ''));
     }
 
-    public function insuredSex($ins = 0)
+    public function insuredSex($ins = 0): string
     {
         return strtoupper(substr(($this->payers[$ins]['data']['subscriber_sex'] ?? ''), 0, 1));
     }
 
+    /**
+     * @return string
+     */
     public function payerName($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['company']['name'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function payerAttn($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['company']['attn'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function payerStreet($ins = 0)
     {
         if (empty($this->payers[$ins]['object'])) {
@@ -1039,9 +1406,12 @@ class Claim
 
         $tmp = $this->payers[$ins]['object'];
         $tmp = $tmp->get_address();
-        return $this->x12Clean(trim($tmp->get_line1()));
+        return $this->x12Clean(trim((string) $tmp->get_line1()));
     }
 
+    /**
+     * @return string
+     */
     public function payerCity($ins = 0)
     {
         if (empty($this->payers[$ins]['object'])) {
@@ -1050,9 +1420,12 @@ class Claim
 
         $tmp = $this->payers[$ins]['object'];
         $tmp = $tmp->get_address();
-        return $this->x12Clean(trim($tmp->get_city()));
+        return $this->x12Clean(trim((string) $tmp->get_city()));
     }
 
+    /**
+     * @return string
+     */
     public function payerState($ins = 0)
     {
         if (empty($this->payers[$ins]['object'])) {
@@ -1061,9 +1434,12 @@ class Claim
 
         $tmp = $this->payers[$ins]['object'];
         $tmp = $tmp->get_address();
-        return $this->x12Clean(trim($tmp->get_state()));
+        return $this->x12Clean(trim((string) $tmp->get_state()));
     }
 
+    /**
+     * @return string
+     */
     public function payerZip($ins = 0)
     {
         if (empty($this->payers[$ins]['object'])) {
@@ -1072,55 +1448,82 @@ class Claim
 
         $tmp = $this->payers[$ins]['object'];
         $tmp = $tmp->get_address();
-        return $this->x12Clean(trim($tmp->get_zip()));
+        return $this->x12Zip($tmp->get_zip());
     }
 
+    /**
+     * @return string
+     */
     public function payerID($ins = 0)
     {
         return $this->x12Clean(trim($this->payers[$ins]['company']['cms_id'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function payerAltID($ins = 0)
     {
-        return $this->x12Clean(trim($this->payers[$ins]['company']['alt_cms_id']));
+        return $this->x12Clean(trim((string) $this->payers[$ins]['company']['alt_cms_id']));
     }
 
+    /**
+     * @return string
+     */
     public function patientLastName()
     {
-        return $this->x12Clean(trim($this->patient_data['lname']));
+        return $this->x12Clean(trim((string) $this->patient_data['lname']));
     }
 
+    /**
+     * @return string
+     */
     public function patientFirstName()
     {
-        return $this->x12Clean(trim($this->patient_data['fname']));
+        return $this->x12Clean(trim((string) $this->patient_data['fname']));
     }
 
+    /**
+     * @return string
+     */
     public function patientMiddleName()
     {
-        return $this->x12Clean(trim($this->patient_data['mname']));
+        return $this->x12Clean(trim((string) $this->patient_data['mname']));
     }
 
+    /**
+     * @return string
+     */
     public function patientStreet()
     {
-        return $this->x12Clean(trim($this->patient_data['street']));
+        return $this->x12Clean(trim((string) $this->patient_data['street']));
     }
 
+    /**
+     * @return string
+     */
     public function patientCity()
     {
-        return $this->x12Clean(trim($this->patient_data['city']));
+        return $this->x12Clean(trim((string) $this->patient_data['city']));
     }
 
+    /**
+     * @return string
+     */
     public function patientState()
     {
-        return $this->x12Clean(trim($this->patient_data['state']));
+        return $this->x12Clean(trim((string) $this->patient_data['state']));
     }
 
+    /**
+     * @return string
+     */
     public function patientZip()
     {
-        return $this->x12Clean(trim($this->patient_data['postal_code']));
+        return $this->x12Zip($this->patient_data['postal_code']);
     }
 
-    public function patientPhone()
+    public function patientPhone(): string
     {
         $ptphone = $this->patient_data['phone_home'];
         if (!$ptphone) {
@@ -1131,11 +1534,7 @@ class Claim
             $ptphone = $this->patient_data['phone_cell'];
         }
 
-        if (preg_match("/([2-9]\d\d)\D*(\d\d\d)\D*(\d\d\d\d)/", $ptphone, $tmp)) {
-            return $tmp[1] . $tmp[2] . $tmp[3];
-        }
-
-        return '';
+        return PhoneNumberService::toNationalDigits((string) $ptphone) ?? '';
     }
 
     public function patientDOB()
@@ -1143,35 +1542,45 @@ class Claim
         return str_replace('-', '', $this->patient_data['DOB']);
     }
 
-    public function patientSex()
+    public function patientSex(): string
     {
-        return strtoupper(substr($this->patient_data['sex'], 0, 1));
+        return strtoupper(substr((string) $this->patient_data['sex'], 0, 1));
     }
 
   // Patient Marital Status: M = Married, S = Single, or something else.
-    public function patientStatus()
+    public function patientStatus(): string
     {
-        return strtoupper(substr($this->patient_data['status'], 0, 1));
+        return strtoupper(substr((string) $this->patient_data['status'], 0, 1));
     }
 
-  // This should be UNEMPLOYED, STUDENT, PT STUDENT, or anything else to
-  // indicate employed.
-    public function patientOccupation()
+    /**
+     * This should be UNEMPLOYED, STUDENT, PT STUDENT, or anything else to
+     * indicate employed.
+     *
+     * @return string
+     */
+    public function patientOccupation(): string
     {
-        return strtoupper($this->x12Clean(trim($this->patient_data['occupation'])));
+        return strtoupper((string) $this->x12Clean(trim((string) $this->patient_data['occupation'])));
     }
 
+    /**
+     * @return string
+     */
     public function cptCode($prockey)
     {
-        return $this->x12Clean(trim($this->procs[$prockey]['code']));
+        return $this->x12Clean(trim((string) $this->procs[$prockey]['code']));
     }
 
-    public function cptModifier($prockey)
+    /**
+     * @return string
+     */
+    public function cptModifier($prockey): string
     {
         // Split on the colon or space and clean each modifier
-        $mods = array();
-        $cln_mods = array();
-        $mods = preg_split("/[: ]/", trim($this->procs[$prockey]['modifier']));
+        $mods = [];
+        $cln_mods = [];
+        $mods = preg_split("/[: ]/", trim((string) $this->procs[$prockey]['modifier']));
         foreach ($mods as $mod) {
             array_push($cln_mods, $this->x12Clean($mod));
         }
@@ -1179,37 +1588,54 @@ class Claim
         return (implode(':', $cln_mods));
     }
 
+    /**
+     * @return string
+     */
     public function cptNotecodes($prockey)
     {
-        return $this->x12Clean(trim($this->procs[$prockey]['notecodes']));
+        return $this->x12Clean(trim((string) $this->procs[$prockey]['notecodes']));
     }
 
-  // Returns the procedure code, followed by ":modifier" if there is one.
-    public function cptKey($prockey)
+    /**
+     * Returns the procedure code, followed by ":modifier" if there is one.
+     *
+     * @return string
+     */
+    public function cptKey($prockey): string
     {
         $tmp = $this->cptModifier($prockey);
         return $this->cptCode($prockey) . ($tmp ? ":$tmp" : "");
     }
 
+    /**
+     * @return string
+     */
     public function cptCharges($prockey)
     {
-        return $this->x12Clean(trim($this->procs[$prockey]['fee']));
+        return $this->x12Clean(trim((string) $this->procs[$prockey]['fee']));
     }
 
+    /**
+     * @return string
+     */
     public function cptUnits($prockey)
     {
         if (empty($this->procs[$prockey]['units'])) {
             return '1';
         }
 
-        return $this->x12Clean(trim($this->procs[$prockey]['units']));
+        return $this->x12Clean(trim((string) $this->procs[$prockey]['units']));
     }
 
-  // NDC drug ID.
+    /**
+     * NDC drug ID.
+     *
+     * @return string
+     */
     public function cptNDCID($prockey)
     {
         $ndcinfo = $this->procs[$prockey]['ndc_info'];
-        if (preg_match('/^N4(\S+)\s+(\S\S)(.*)/', $ndcinfo, $tmp)) {
+        if (preg_match('/^N4(\S+)\s+(\S\S)(.*)/', $ndcinfo ?? '', $tmp)) {
             $ndc = $tmp[1];
             if (preg_match('/^(\d+)-(\d+)-(\d+)$/', $ndc, $tmp)) {
                 return sprintf('%05d%04d%02d', $tmp[1], $tmp[2], $tmp[3]);
@@ -1221,22 +1647,30 @@ class Claim
         return '';
     }
 
-  // NDC drug unit of measure code.
+    /**
+     * NDC drug unit of measure code.
+     *
+     * @return string
+     */
     public function cptNDCUOM($prockey)
     {
         $ndcinfo = $this->procs[$prockey]['ndc_info'];
-        if (preg_match('/^N4(\S+)\s+(\S\S)(.*)/', $ndcinfo, $tmp)) {
+        if (preg_match('/^N4(\S+)\s+(\S\S)(.*)/', (string) $ndcinfo, $tmp)) {
             return $this->x12Clean($tmp[2]);
         }
 
         return '';
     }
 
-  // NDC drug number of units.
+    /**
+     * NDC drug number of units.
+     *
+     * @return string
+     */
     public function cptNDCQuantity($prockey)
     {
         $ndcinfo = $this->procs[$prockey]['ndc_info'];
-        if (preg_match('/^N4(\S+)\s+(\S\S)(.*)/', $ndcinfo, $tmp)) {
+        if (preg_match('/^N4(\S+)\s+(\S\S)(.*)/', (string) $ndcinfo, $tmp)) {
             return $this->x12Clean(ltrim($tmp[3], '0'));
         }
 
@@ -1244,156 +1678,379 @@ class Claim
     }
 
     // Not Otherwise Classified codes require a description on the SV1 line after the modifiers
-    public function cptNOC($prockey)
+    public function cptNOC($prockey): bool
     {
         return in_array($this->cptCode($prockey), Claim::NOC_CODES);
     }
 
+    /**
+     * @return string
+     */
     public function cptDescription($prockey)
     {
         return $this->x12Clean($this->procs[$prockey]['code_text']);
     }
 
+    /**
+     * @return string
+     */
     public function onsetDate()
     {
         return $this->cleanDate($this->encounter['onset_date']);
     }
 
-    public function onsetDateValid()
+    public function onsetDateValid(): bool
     {
         return $this->onsetDate() !== '';
     }
 
-    public function serviceDate()
+    /**
+     * @return string
+     */
+    public function serviceDate(): string
     {
-        return str_replace('-', '', substr($this->encounter['date'], 0, 10));
+        return str_replace('-', '', substr((string) $this->encounter['date'], 0, 10));
     }
 
+    /**
+     * @return string
+     */
     public function priorAuth()
     {
         return $this->x12Clean(trim($this->billing_options['prior_auth_number'] ?? ''));
     }
 
-    public function isRelatedEmployment()
+    public function isRelatedEmployment(): bool
     {
         return !empty($this->billing_options['employment_related']);
     }
 
-    public function isRelatedAuto()
+    public function isRelatedAuto(): bool
     {
         return !empty($this->billing_options['auto_accident']);
     }
 
-    public function isRelatedOther()
+    public function isRelatedOther(): bool
     {
         return !empty($this->billing_options['other_accident']);
     }
 
+    /**
+     * @return string
+     */
     public function autoAccidentState()
     {
-        return $this->x12Clean(trim($this->billing_options['accident_state']));
+        return $this->x12Clean(trim((string) $this->billing_options['accident_state']));
     }
 
-    public function isUnableToWork()
+    /**
+     * CLM10 (patient signature source code) and CLM11 (related causes) for the
+     * end of the 837P CLM segment, each with its separator. CLM10 is "P"
+     * (signature generated by the provider) for workers' comp claims only; on
+     * other claims it would state that the patient wasn't present. CLM11-1 and
+     * CLM11-2 carry up to two causes (EM, AA, OA in that order), and CLM11-4
+     * carries the auto accident state, which the TR3 requires when either
+     * cause is AA. Empty trailing elements are left out, so a claim with no
+     * related cause ends at CLM09.
+     */
+    public function x12SignatureAndRelatedCauses(): string
+    {
+        $employment = $this->isRelatedEmployment();
+        $auto = $this->isRelatedAuto();
+        $causes = array_keys(array_filter(['EM' => $employment, 'AA' => $auto, 'OA' => $this->isRelatedOther()]));
+        if ($causes === []) {
+            return '';
+        }
+        // AA always lands in CLM11-1 or CLM11-2: only EM can come before it.
+        $components = [$causes[0], $causes[1] ?? ''];
+        $state = $auto ? $this->autoAccidentState() : '';
+        if ($state !== '') {
+            // CLM11-3 isn't used in the 837P.
+            $components[] = '';
+            $components[] = $state;
+        }
+        return '*' . ($employment ? 'P' : '') . '*' . rtrim(implode(':', $components), ':');
+    }
+
+    public function isUnableToWork(): bool
     {
         return !empty($this->billing_options['is_unable_to_work']);
     }
 
+    /**
+     * @return string
+     */
     public function offWorkFrom()
     {
         return $this->cleanDate($this->billing_options['off_work_from']);
     }
 
+    /**
+     * @return string
+     */
     public function offWorkTo()
     {
         return $this->cleanDate($this->billing_options['off_work_to']);
     }
 
-    public function isHospitalized()
+    public function isHospitalized(): bool
     {
         return !empty($this->billing_options['is_hospitalized']);
     }
 
+    /**
+     * @return string
+     */
     public function hospitalizedFrom()
     {
         return $this->cleanDate($this->billing_options['hospitalization_date_from']);
     }
 
-    public function hospitalizedFromDateValid()
+    public function hospitalizedFromDateValid(): bool
     {
         return $this->hospitalizedFrom() !== '';
     }
 
+    /**
+     * @return string
+     */
     public function hospitalizedTo()
     {
         return $this->cleanDate($this->billing_options['hospitalization_date_to']);
     }
-    public function hospitalizedToDateValid()
+    public function hospitalizedToDateValid(): bool
     {
         return $this->hospitalizedTo() !== '';
     }
 
-    public function isOutsideLab()
+    public function isOutsideLab(): bool
     {
         return !empty($this->billing_options['outside_lab']);
     }
 
-    public function outsideLabAmount()
+    public function outsideLabAmount(): string
     {
         return sprintf('%.2f', 0 + $this->billing_options['lab_amount']);
     }
 
+    /**
+     * @return string
+     */
     public function medicaidReferralCode()
     {
-        return $this->x12Clean(trim($this->billing_options['medicaid_referral_code']));
+        return $this->x12Clean(trim((string) $this->billing_options['medicaid_referral_code']));
     }
 
+    /**
+     * @return string
+     */
     public function epsdtFlag()
     {
         return $this->x12Clean(trim($this->billing_options['epsdt_flag'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
+    /**
+     * HCFA box 22, the resubmission code of a claim this one replaces.  The
+     * 08/05 revision of the form labelled this box "Medicaid Resubmission";
+     * the 02/12 revision dropped the Medicaid prefix.
+     *
+     * @return string
+     */
+    public function resubmissionCode()
+    {
+        return $this->x12Clean(trim($this->billing_options['resubmission_code'] ?? ''));
+    }
+
+    /**
+     * @deprecated since 8.5.0, use resubmissionCode() instead.
+     * @return string
+     */
     public function medicaidResubmissionCode()
     {
-        return $this->x12Clean(trim($this->billing_options['medicaid_resubmission_code'] ?? ''));
+        return $this->resubmissionCode();
     }
 
+    /**
+     * @return string
+     */
+    /**
+     * HCFA box 22a, the original reference number of a claim this one replaces.
+     * Not Medicaid-specific despite the old name.
+     *
+     * @return string
+     */
+    public function originalReferenceNumber()
+    {
+        return $this->x12Clean(trim($this->billing_options['original_reference_number'] ?? ''));
+    }
+
+    /**
+     * @deprecated since 8.5.0, use originalReferenceNumber() instead.
+     * @return string
+     */
     public function medicaidOriginalReference()
     {
-        return $this->x12Clean(trim($this->billing_options['medicaid_original_reference'] ?? ''));
+        return $this->originalReferenceNumber();
     }
 
-    public function frequencyTypeCode()
+    /**
+     * Map an index into $this->payers onto the payer level used by
+     * ar_activity.payer_type, where 1 = primary, 2 = secondary, 3 = tertiary.
+     *
+     * @param int $ins
+     * @return int 0 if the payer's sequence is unknown
+     */
+    public function payerLevel($ins = 0): int
     {
-        return (!empty($this->billing_options['replacement_claim']) && ($this->billing_options['replacement_claim'] == 1)) ? '7' : '1';
+        return match ($this->payerSequence($ins)) {
+            'P' => 1,
+            'S' => 2,
+            'T' => 3,
+            default => 0,
+        };
     }
 
+    /**
+     * The claim control number (ICN/DCN) that a prior payer assigned to this
+     * claim, captured from CLP07 of their 835 and stored in ar_activity.
+     * Used for Loop 2330B REF*F8 on secondary and tertiary claims.
+     *
+     * Note this is the PRIOR payer's number, and is distinct from HCFA box 22a
+     * (originalReferenceNumber) and from icnResubmissionNumber(), both of which
+     * carry the DESTINATION payer's number on a replacement claim.
+     *
+     * @param int $ins index into $this->payers, where 0 is the destination payer
+     * @return string
+     */
+    public function otherPayerClaimControlNumber($ins = 1)
+    {
+        $level = $this->payerLevel($ins);
+        if ($level < 1) {
+            return '';
+        }
+
+        $row = QueryUtils::querySingleRow(
+            "SELECT payer_claim_number FROM ar_activity WHERE " .
+            "pid = ? AND encounter = ? AND payer_type = ? AND " .
+            "payer_claim_number IS NOT NULL AND payer_claim_number != '' AND " .
+            "deleted IS NULL " .
+            "ORDER BY post_time DESC, sequence_no DESC LIMIT 1",
+            [$this->pid, $this->encounter_id, $level]
+        );
+
+        $icn = (is_array($row) && is_string($row['payer_claim_number'] ?? null))
+            ? $row['payer_claim_number']
+            : '';
+
+        return $this->x12Clean(trim($icn));
+    }
+
+    /**
+     * Whether loop 2430 reports this prior payer's adjudication of at least one
+     * service line, which is when the 837P generator sends an SVD for it: the
+     * payer paid something on the line or has adjustments on it.
+     */
+    public function hasLineAdjudication(int $ins): bool
+    {
+        for ($prockey = 0; $prockey < $this->procCount(); ++$prockey) {
+            $code = $this->cptKey($prockey);
+            $payerpaid = $this->payerTotals($ins, $code);
+            if ($payerpaid[1] != 0 || $this->payerAdjustments($ins, $code) !== []) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The date a prior payer adjudicated this claim, taken from the check date
+     * of the ERA session the payment was posted under.  Loop 2330B DTP*573.
+     *
+     * @param int $ins index into $this->payers, where 0 is the destination payer
+     * @return string CCYYMMDD, or an empty string if unknown
+     */
+    public function otherPayerAdjudicationDate($ins = 1)
+    {
+        $level = $this->payerLevel($ins);
+        if ($level < 1) {
+            return '';
+        }
+
+        $row = QueryUtils::querySingleRow(
+            "SELECT IFNULL(s.check_date, a.post_date) AS adjudication_date " .
+            "FROM ar_activity AS a " .
+            "LEFT JOIN ar_session AS s ON s.session_id = a.session_id WHERE " .
+            "a.pid = ? AND a.encounter = ? AND a.payer_type = ? AND " .
+            "a.pay_amount != 0 AND a.deleted IS NULL " .
+            "ORDER BY a.post_time DESC, a.sequence_no DESC LIMIT 1",
+            [$this->pid, $this->encounter_id, $level]
+        );
+
+        $adjudicationDate = (is_array($row) && is_string($row['adjudication_date'] ?? null))
+            ? $row['adjudication_date']
+            : '';
+
+        return $this->cleanDate($adjudicationDate);
+    }
+
+    public function frequencyTypeCode(): string
+    {
+        $tmp = '';
+        if (!empty($this->billing_options['replacement_claim'])) {
+            if ($this->billing_options['replacement_claim'] == 1) {
+                $tmp = '7';
+            } elseif ($this->billing_options['replacement_claim'] == 2) {
+                $tmp = '8';
+            }
+        } else {
+            $tmp = '1';
+        }
+
+        return $tmp;
+    }
+
+    /**
+     * @return string
+     */
     public function icnResubmissionNumber()
     {
         return $this->x12Clean($this->billing_options['icn_resubmission_number']);
     }
 
+    /**
+     * @return string
+     */
     public function additionalNotes()
     {
         return $this->x12Clean(trim($this->billing_options['comments'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function miscOnsetDate()
     {
         return $this->cleanDate($this->billing_options['onset_date'] ?? '');
     }
 
-    public function miscOnsetDateValid()
+    public function miscOnsetDateValid(): bool
     {
         return $this->miscOnsetDate() !== '';
     }
 
+    /**
+     * @return string
+     */
     public function dateInitialTreatment()
     {
         return $this->cleanDate($this->billing_options['date_initial_treatment'] ?? '');
     }
 
-    public function dateInitialTreatmentValid()
+    public function dateInitialTreatmentValid(): bool
     {
         return $this->dateInitialTreatment() !== '';
     }
@@ -1412,62 +2069,65 @@ class Claim
             $this->billing_options['box_15_date_qual'];
     }
 
-    public function box17Qualifier()
+    /**
+     * CMS-1500 Box 17 qualifier: DN referring, DK ordering, DQ supervising.
+     *
+     * Box 17 holds a single provider whose role is declared by this qualifier.
+     * The 837 expresses role by loop placement instead, so the qualifier decides
+     * which loop the misc billing options provider feeds: DN (or empty) routes it
+     * to Loop 2310A as the referring provider, DK to Loop 2420E as the ordering
+     * provider. Empty is treated as DN to match the provider_qualifier_code list
+     * default and the pre-existing paper fallback in Hcfa1500.
+     *
+     * DQ is accepted for the paper claim but has no 837 equivalent here. The
+     * supervising provider is emitted at Loop 2310D from
+     * form_encounter.supervisor_id, independent of this qualifier; the line-level
+     * Loop 2420D is not generated. A DQ selection therefore feeds neither the
+     * referring nor the ordering loop.
+     *
+     * @return string One of DN, DK, DQ, or '' — values originate as
+     *                provider_qualifier_code option_ids, so callers can compare
+     *                with === against those literals.
+     */
+    public function box17Qualifier(): string
     {
-        //If no box qualifier specified use "DK" for ordering provider
-        //someday might make mbo form the place to set referring instead of demographics under choices
-        return empty($this->billing_options['provider_qualifier_code']) ? '' :
-            $this->billing_options['provider_qualifier_code'];
+        $qual = $this->billing_options['provider_qualifier_code'] ?? '';
+        return is_string($qual) ? $qual : '';
     }
 
-  // Returns an array of unique diagnoses.  Periods are stripped by default
-  // Option to keep periods is to support HCFA 1500 02/12 version
-    public function diagArray($strip_periods = true)
+    /**
+     * Returns an array of unique diagnoses.  Periods are stripped by default
+     * Option to keep periods is to support HCFA 1500 02/12 version
+     * @return string[]
+     */
+    public function diagArray($strip_periods = true): array
     {
-        $da = array();
+        $da = [];
         foreach ($this->procs as $row) {
-            $atmp = explode(':', $row['justify']);
+            $atmp = explode(':', (string) $row['justify']);
             foreach ($atmp as $tmp) {
                 if (!empty($tmp)) {
                     $code_data = explode('|', $tmp);
 
-                    // If there was a | in the code data, the the first part of the array is the type, and the second is the identifier
+                    // If there was a | in the code data, the the first part of the array is the type
+                    // and the second is the identifier
                     if (!empty($code_data[1])) {
                         // This is the simplest way to determine if the claim is using ICD9 or ICD10 codes
-                        // a mix of code types is generally not allowed as there is only one specifier for all diagnoses on HCFA-1500 form
-                        // and there would be ambiguity with E and V codes
+                        // a mix of code types is generally not allowed as there is only one specifier
+                        // for all diagnoses on HCFA-1500 form and there would be ambiguity with E and V codes
                         $this->diagtype = $code_data[0];
 
                         //code is in the second part of the $code_data array.
-                        if ($strip_periods == true) {
-                                $diag = str_replace('.', '', $code_data[1]);
-                        } else {
-                            $diag = $code_data[1];
-                        }
+                        $diag = $strip_periods == true ? str_replace('.', '', $code_data[1]) : $code_data[1];
                     } else {
                         //No prepended code type label
-                        if ($strip_periods) {
-                            $diag = str_replace('.', '', $code_data[0]);
-                        } else {
-                            $diag = $code_data[0];
-                        }
+                        $diag = $strip_periods ? str_replace('.', '', $code_data[0]) : $code_data[0];
                     }
 
+                    $diag = trim($diag);
                     $da[$diag] = $diag;
                 }
             }
-        }
-
-        // The above got all the diagnoses used for justification, in the order
-        // used for justification.  Next we go through all diagnoses, justified
-        // or not, to make sure they all get into the claim.  We do it this way
-        // so that the more important diagnoses appear first.
-        foreach ($this->diags as $diag) {
-            if ($strip_periods) {
-                $diag = str_replace('.', '', $diag);
-            }
-
-            $da[$diag] = $diag;
         }
 
         return $da;
@@ -1478,7 +2138,7 @@ class Claim
     public function diagIndex($prockey)
     {
         $da = $this->diagArray();
-        $tmp = explode(':', $this->procs[$prockey]['justify']);
+        $tmp = explode(':', (string) $this->procs[$prockey]['justify']);
         if (empty($tmp)) {
             return '';
         }
@@ -1487,7 +2147,7 @@ class Claim
         $i = 0;
         foreach ($da as $value) {
             ++$i;
-            if (strcmp($value, $diag) == 0) {
+            if (strcmp((string) $value, $diag) == 0) {
                 return $i;
             }
         }
@@ -1495,13 +2155,17 @@ class Claim
         return '';
     }
 
-  // Compute array of 1-relative diagArray indices for the given procedure.
-    public function diagIndexArray($prockey)
+    /**
+     * Compute array of 1-relative diagArray indices for the given procedure.
+     * @return int[]
+     */
+    public function diagIndexArray($prockey): array
     {
-        $dia = array();
+        $dia = [];
         $da = $this->diagArray();
-        $atmp = explode(':', $this->procs[$prockey]['justify']);
+        $atmp = explode(':', (string) $this->procs[$prockey]['justify']);
         foreach ($atmp as $tmp) {
+            $tmp = trim($tmp);
             if (!empty($tmp)) {
                 $code_data = explode('|', $tmp);
                 if (!empty($code_data[1])) {
@@ -1515,7 +2179,7 @@ class Claim
                 $i = 0;
                 foreach ($da as $value) {
                     ++$i;
-                    if (strcmp($value, $diag) == 0) {
+                    if (strcmp((string) $value, $diag) == 0) {
                         $dia[] = $i;
                     }
                 }
@@ -1525,70 +2189,78 @@ class Claim
         return $dia;
     }
 
+    /**
+     * @return string
+     */
     public function providerLastName($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
         $this->provider : $this->procs[$prockey]['provider'];
-        return $this->x12Clean(trim($tmp['lname']));
+        return $this->x12Clean(trim((string) $tmp['lname']));
     }
 
+    /**
+     * @return string
+     */
     public function providerFirstName($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
         $this->provider : $this->procs[$prockey]['provider'];
-        return $this->x12Clean(trim($tmp['fname']));
+        return $this->x12Clean(trim((string) $tmp['fname']));
     }
 
+    /**
+     * @return string
+     */
     public function providerMiddleName($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
         $this->provider : $this->procs[$prockey]['provider'];
-        return $this->x12Clean(trim($tmp['mname']));
+        return $this->x12Clean(trim($tmp['mname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function providerSuffixName($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
             $this->provider : $this->procs[$prockey]['provider'];
-        return $this->x12Clean(trim($tmp['suffix']));
+        return $this->x12Clean(trim((string) $tmp['suffix']));
     }
 
+    /**
+     * @return string
+     */
     public function providerNPI($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
         $this->provider : $this->procs[$prockey]['provider'];
-        return $this->x12Clean(trim($tmp['npi']));
+        return $this->x12Clean($this->x12NpiDigits(trim($tmp['npi'] ?? '')));
     }
 
     public function NPIValid($npi)
     {
-        // A NPI MUST be a 10 digit number
-        if ($npi === '') {
-            return false;
-        }
-
-        if (strlen($npi) != 10) {
-            return false;
-        }
-
-        if (!preg_match("/[0-9]*/", $npi)) {
-            return false;
-        }
-
-        return true;
+        return ValidationUtils::isValidNPI((string) $npi);
     }
     public function providerNPIValid($prockey = -1)
     {
         return $this->NPIValid($this->providerNPI($prockey));
     }
 
+    /**
+     * @return string
+     */
     public function providerUPIN($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
         $this->provider : $this->procs[$prockey]['provider'];
-        return $this->x12Clean(trim($tmp['upin']));
+        return $this->x12Clean(trim((string) $tmp['upin']));
     }
 
+    /**
+     * @return string
+     */
     public function providerSSN($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
@@ -1596,6 +2268,9 @@ class Claim
         return $this->x12Clean(trim(str_replace('-', '', $tmp['federaltaxid'])));
     }
 
+    /**
+     * @return string
+     */
     public function providerTaxonomy($prockey = -1)
     {
         $tmp = ($prockey < 0 || empty($this->procs[$prockey]['provider_id'])) ?
@@ -1604,85 +2279,127 @@ class Claim
             return '207Q00000X';
         }
 
-        return $this->x12Clean(trim($tmp['taxonomy']));
+        return $this->x12Clean(trim((string) $tmp['taxonomy']));
     }
 
+    /**
+     * @return string
+     */
     public function referrerLastName()
     {
         return $this->x12Clean(trim($this->referrer['lname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function referrerFirstName()
     {
-        return $this->x12Clean(trim($this->referrer['fname']));
+        return $this->x12Clean(trim((string) $this->referrer['fname']));
     }
 
+    /**
+     * @return string
+     */
     public function referrerMiddleName()
     {
-        return $this->x12Clean(trim($this->referrer['mname']));
+        return $this->x12Clean(trim($this->referrer['mname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function referrerNPI()
     {
-        return $this->x12Clean(trim($this->referrer['npi']));
+        return $this->x12Clean($this->x12NpiDigits((string) $this->referrer['npi']));
     }
 
+    /**
+     * @return string
+     */
     public function referrerUPIN()
     {
-        return $this->x12Clean(trim($this->referrer['upin']));
+        return $this->x12Clean(trim((string) $this->referrer['upin']));
     }
 
+    /**
+     * @return string
+     */
     public function referrerSSN()
     {
         return $this->x12Clean(trim(str_replace('-', '', $this->referrer['federaltaxid'])));
     }
 
+    /**
+     * @return string
+     */
     public function referrerTaxonomy()
     {
         if (empty($this->referrer['taxonomy'])) {
             return '207Q00000X';
         }
 
-        return $this->x12Clean(trim($this->referrer['taxonomy']));
+        return $this->x12Clean(trim((string) $this->referrer['taxonomy']));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorLastName()
     {
         return $this->x12Clean(trim($this->supervisor['lname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorFirstName()
     {
-        return $this->x12Clean(trim($this->supervisor['fname']));
+        return $this->x12Clean(trim((string) $this->supervisor['fname']));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorMiddleName()
     {
-        return $this->x12Clean(trim($this->supervisor['mname']));
+        return $this->x12Clean(trim((string) $this->supervisor['mname']));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorNPI()
     {
-        return $this->x12Clean(trim($this->supervisor['npi']));
+        return $this->x12Clean($this->x12NpiDigits((string) $this->supervisor['npi']));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorUPIN()
     {
-        return $this->x12Clean(trim($this->supervisor['upin']));
+        return $this->x12Clean(trim((string) $this->supervisor['upin']));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorSSN()
     {
         return $this->x12Clean(trim(str_replace('-', '', $this->supervisor['federaltaxid'])));
     }
 
+    /**
+     * @return string
+     */
     public function supervisorTaxonomy()
     {
         if (empty($this->supervisor['taxonomy'])) {
             return '207Q00000X';
         }
 
-        return $this->x12Clean(trim($this->supervisor['taxonomy']));
+        return $this->x12Clean(trim((string) $this->supervisor['taxonomy']));
     }
 
     public function supervisorNumberType()
@@ -1690,71 +2407,239 @@ class Claim
         return $this->supervisor_numbers['provider_number_type'];
     }
 
+    /**
+     * @return string
+     */
     public function supervisorNumber()
     {
         return $this->x12Clean(trim(str_replace('-', '', ($this->supervisor_numbers['provider_number'] ?? ''))));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderLastName()
     {
         return $this->x12Clean(trim($this->billing_prov_id['lname'] ?? ''));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderFirstName()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['fname']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['fname']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderMiddleName()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['mname']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['mname']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderNPI()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['npi']));
+        return $this->x12Clean($this->x12NpiDigits((string) $this->billing_prov_id['npi']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderUPIN()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['upin']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['upin']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderSSN()
     {
         return $this->x12Clean(trim(str_replace('-', '', $this->billing_prov_id['federaltaxid'])));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderTaxonomy()
     {
         if (empty($this->billing_prov_id['taxonomy'])) {
             return '207Q00000X';
         }
-        return $this->x12Clean(trim($this->billing_prov_id['taxonomy']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['taxonomy']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderStreet()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['street']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['street']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderStreetB()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['streetb']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['streetb']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderCity()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['city']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['city']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderState()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['state']));
+        return $this->x12Clean(trim((string) $this->billing_prov_id['state']));
     }
 
+    /**
+     * @return string
+     */
     public function billingProviderZip()
     {
-        return $this->x12Clean(trim($this->billing_prov_id['zip']));
+        return $this->x12Zip($this->billing_prov_id['zip']);
+    }
+
+    /**
+     * Group an array of adjustment group codes into a new array with the keys based on
+     * the group code $a[1] and the adjustment reason code $a[2].
+     * If there are multiple for the same group and reason combine and add
+     * the amount $a[3] and return the date of the payment $a[0].
+     *
+     * @param  array $aarr Payer adjustment array from the X12837 script with payer adjustments
+     * @return array       Returns a grouped array to the 837 for output in the CAS segment
+     */
+    public function getLineItemAdjustments($aarr)
+    {
+        $this->line_item_adjs = [];
+        foreach ($aarr as $a) {
+            if (!array_key_exists($a[1], $this->line_item_adjs)) {
+                $this->line_item_adjs[$a[1]] = [];
+            }
+
+            if (!array_key_exists($a[2] ?? null, $this->line_item_adjs[$a[1]])) {
+                $this->line_item_adjs[$a[1]][$a[2]] = $a[3];
+            } else {
+                $this->line_item_adjs[$a[1]][$a[2]] += $a[3];
+                $this->line_item_adjs[$a[1]][$a[2]] = number_format($this->line_item_adjs[$a[1]][$a[2]], 2, '.', '');
+            }
+            $this->line_item_adjs['payer_paid_date'] = $a[0];
+        }
+
+        return $this->line_item_adjs;
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererLastName()
+    {
+        return $this->x12Clean(trim($this->orderer['lname'] ?? ''));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererFirstName()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['fname']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererMiddleName()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['mname']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererNPI()
+    {
+        return $this->x12Clean($this->x12NpiDigits((string) $this->orderer['npi']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererUPIN()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['upin']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererSSN()
+    {
+        return $this->x12Clean(trim(str_replace('-', '', $this->orderer['federaltaxid'])));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererTaxonomy()
+    {
+        if (empty($this->orderer['taxonomy'])) {
+            return '207Q00000X';
+        }
+
+        return $this->x12Clean(trim((string) $this->orderer['taxonomy']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererStreet()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['street']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererStreetB()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['streetb']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererCity()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['city']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererState()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['state']));
+    }
+
+    /**
+     * @return string
+     */
+    public function ordererZip()
+    {
+        return $this->x12Clean(trim((string) $this->orderer['zip']));
     }
 }

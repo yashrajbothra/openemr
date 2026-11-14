@@ -4,21 +4,36 @@
  * SmartLaunchController handles the display and launching of SMART apps from the user interface.
  *
  * @package openemr
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Stephen Nielson <stephen@nielson.org>
+ * @author    Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2020 Stephen Nielson <stephen@nielson.org>
+ * @copyright Copyright (c) 2026 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\FHIR\SMART;
 
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Acl\AccessDeniedException;
+use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Auth\OpenIDConnect\Entities\ClientEntity;
 use OpenEMR\Common\Auth\OpenIDConnect\Repositories\ClientRepository;
-use OpenEMR\Common\Logging\SystemLogger;
+use OpenEMR\Common\Csrf\CsrfInvalidException;
+use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Events\PatientDemographics\RenderEvent;
-use OpenEMR\RestControllers\AuthorizationController;
+use OpenEMR\FHIR\Config\ServerConfig;
+use OpenEMR\Services\AppointmentService;
+use OpenEMR\Services\EncounterService;
 use OpenEMR\Services\PatientService;
-use Symfony\Component\EventDispatcher\EventDispatcher;
+use OpenEMR\Services\Questionnaire\AvailabilityContext;
+use OpenEMR\Services\Questionnaire\QuestionnaireAvailabilityService;
+use OpenEMR\Services\Questionnaire\QuestionnaireSurface;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 // not sure I really like this here... it seems like some of this
 // should be encapsulated in a class that autoloading can reach.
@@ -32,24 +47,18 @@ class SmartLaunchController
     const CLIENT_APP_REQUIRED_LAUNCH_SCOPE = 'launch';
     const CLIENT_APP_STANDALONE_LAUNCH_SCOPE = 'launch/patient';
 
-    /**
-     * @var EventDispatcher
-     */
-    private $dispatcher;
-
-    public function __construct(EventDispatcher $dispatcher = null)
+    public function __construct(private readonly ?EventDispatcherInterface $dispatcher = null)
     {
-        $this->dispatcher = $dispatcher;
     }
 
     public function registerContextEvents()
     {
-        $this->dispatcher->addListener(RenderEvent::EVENT_SECTION_LIST_RENDER_AFTER, [$this, 'renderPatientSmartLaunchSection']);
+        $this->dispatcher->addListener(RenderEvent::EVENT_SECTION_LIST_RENDER_AFTER, $this->renderPatientSmartLaunchSection(...));
     }
 
     public function renderPatientSmartLaunchSection(RenderEvent $event)
     {
-        if (empty($GLOBALS['rest_fhir_api'])) {
+        if (empty(OEGlobalsBag::getInstance()->get('rest_fhir_api'))) {
             // do not show patient summary widget if fhir portal is off
             return;
         }
@@ -63,91 +72,134 @@ class SmartLaunchController
         $pid = $event->getPid();
         $patientService = new PatientService();
         // make sure we've created all of our missing UUIDs
-        (new UuidRegistry(['table_name' => 'patient_data']))->createMissingUuids();
+        UuidRegistry::createMissingUuidsForTables(['patient_data']);
         // going to work with string uuids
         $puuid = UuidRegistry::uuidToString($patientService->getUuid($pid));
+        // TODO: @adunsulag could this all be moved to twig?
         ?>
         <section>
             <?php
-            // Billing expand collapse widget
-            $widgetTitle = xl("SMART Enabled Apps");
-            $widgetLabel = "smart";
-            $widgetButtonLabel = xl("Edit");
-            $widgetButtonLink = ""; // "return newEvt();";
-            $widgetButtonClass = "";
-            $linkMethod = "javascript";
-            $bodyClass = "notab";
-            $widgetAuth = false;
-            $fixedWidth = false;
-            $forceExpandAlways = false;
             $launchCode = $this->getLaunchCodeContext($puuid);
-            // TODO: adunsulag is there an redirect_uri that we can specify for the launch path?? The spec feels vague
-            // here...  all the SMART apps we've seen appear to follow a 'launch.html' nomenclature but that doesn't
-            // appear to be required in the spec.
 
-            $issuer = $GLOBALS['site_addr_oath'] . $GLOBALS['web_root'] . '/apis/' . $_SESSION['site_id'] . "/fhir";
-            $launchParams = "?launch=" . urlencode($launchCode) . "&iss=" . urlencode($issuer);
+        // issuer and audience are the same in a EHR SMART Launch
+            $issuer = (new ServerConfig())->getFhirUrl();
+            $viewArgs = [
+                        'title' => xl('SMART Enabled Apps'),
+                        'card_container_class_list' => ['flex-fill', 'mx-1', 'card'],
+                        'id' => 'smart',
+                        'forceAlwaysOpen' => false,
+                        'initiallyCollapsed' => getUserSetting('smart') == 0,
+                        'linkMethod' => "javascript",
+                        'auth' => false,
+                        'issuer' => $issuer,
+                        'launchCode' => $launchCode,
+                        'smartClients' => $smartClients,
+                        'intent' => SMARTLaunchToken::INTENT_PATIENT_DEMOGRAPHICS_DIALOG
+            ];
 
-            expand_collapse_widget(
-                $widgetTitle,
-                $widgetLabel,
-                $widgetButtonLabel,
-                $widgetButtonLink,
-                $widgetButtonClass,
-                $linkMethod,
-                $bodyClass,
-                $widgetAuth,
-                $fixedWidth,
-                $forceExpandAlways
-            );
-            ?>
-            <div>
-                <ul>
-                        <?php if (empty($smartClients)) : ?>
-                            <li><p><?php echo xlt("No registered SMART apps in the system"); ?></p></li>
-                        <?php endif; ?>
-                        <?php foreach ($smartClients as $client) : ?>
-                            <li class="summary_item">
-                                <button class='btn btn-primary btn-sm smart-launch-btn' data-smart-name="<?php echo attr($client->getName()); ?>"
-                                        data-smart-redirect-url="<?php echo attr($client->getLaunchUri($launchParams)); ?>">
-                                    <?php echo xlt("Launch"); ?>
-                                </button>
-                                <?php echo text($client->getName()); ?>
-                            </li>
-                        <?php endforeach; ?>
-                </ul>
-            </div>
-        </section>
-        <?php
-        // it's too bad we don't have a centralized page renderer we could tie this into and render javascript at the
-        // end of our footer pages on everything...
+            $twig = ServiceContainer::getTwig();
+            echo $twig->render("patient/card/smart_launch.html.twig", $viewArgs);
+            $this->renderLaunchScript();
+    }
+
+    /**
+     * @param literal-string $launchText
+     */
+    public function renderLaunchButton(ClientEntity $client, string $issuer, SMARTLaunchToken $launchToken, string $launchText = "Launch")
+    {
+        $launchCode = $launchToken->serialize();
+        $launchParams = "?launch=" . urlencode($launchCode) . "&iss=" . urlencode($issuer) . "&aud=" . urlencode($issuer);
         ?>
-        <script>
-            (function(window) {
-                let smartLaunchers = document.querySelectorAll('.smart-launch-btn');
-                for (let launch of smartLaunchers) {
-                    let url =
-                        launch.addEventListener('click', function(evt) {
-                            let node = evt.target;
-                            let url = node.dataset.smartRedirectUrl;
-                            if (!url) {
-                                return;
-                            }
-                            let title = node.dataset.smartName || "<?php echo xlt("Smart App"); ?>";
-                            // we allow external dialog's  here because that is what a SMART app is
-                            dlgopen(url, '_blank', 950, 650, '', title, {allowExternal: true});
-                        });
-                }
-            })(window);
+        <button class='btn btn-primary btn-sm smart-launch-btn' data-smart-name="<?php echo attr($client->getName()); ?>"
+                            data-intent="<?php echo attr(SMARTLaunchToken::INTENT_PATIENT_DEMOGRAPHICS_DIALOG); ?>"
+                            data-client-id="<?php echo attr($client->getIdentifier()); ?>">
+                                    <?php echo xlt($launchText); ?>
+        </button>
+        <?php
+    }
 
-        </script>
+    public function redirectAndLaunchSmartApp($intent, $client_id, $csrf_token, array $intentData)
+    {
+        $clientRepository = new ClientRepository();
+        $client = $clientRepository->getClientEntity($client_id);
+        if (empty($client)) {
+            throw new \Exception("Invalid client id");
+        }
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+        // verifyCsrfToken() returns a boolean and never throws, so the result must be
+        // checked here or CSRF is silently unenforced on this launch endpoint.
+        if (!CsrfUtils::verifyCsrfToken($csrf_token, session: $session)) {
+            throw new CsrfInvalidException('CSRF token validation failed');
+        }
+        $puuid = null;
+        $euuid = null;
+        $pid = $session->get('pid');
+        if (!empty($pid)) {
+            // grab the patient puuid
+            $patientService = new PatientService();
+            $puuid = UuidRegistry::uuidToString($patientService->getUuid($pid));
+        }
+        $encounter = $session->get('encounter');
+        if (!empty($encounter) && $this->carriesSessionEncounter($intent)) {
+            // grab the encounter euuid
+            $euuid = UuidRegistry::uuidToString(EncounterService::getUuidById($encounter, 'form_encounter', 'encounter'));
+        }
+        $appointmentUuid = null;
+        if (!empty($intentData)) {
+            // let's grab specific data
+            if (!empty($intentData['appointment_id'])) {
+                if (!AclMain::aclCheckCore('patients', 'appt')) {
+                    throw new AccessDeniedException("patients", "appt", "You do not have permission to access appointments");
+                }
+                $appointmentService = new AppointmentService();
+                $appointment = $appointmentService->getAppointment($intentData['appointment_id']);
+                if (!empty($appointment)) {
+                    $patientService = new PatientService();
+                    $appointmentUuidValue = $appointment[0]['pc_uuid'] ?? null;
+                    $appointmentUuid = is_string($appointmentUuidValue) ? $appointmentUuidValue : null;
+                    $pid = $appointment[0]['pid'];
+                    $puuid = UuidRegistry::uuidToString($patientService->getUuid($pid));
+                    // at some point if the appointment has a link to encounters we could grab that here.
+//                    $euuid = UuidRegistry::uuidToString(EncounterService::getUuidById($appointment['encounter'], 'form_encounter', 'encounter'));
+                }
+            }
+        }
+
+        $issuer = (new ServerConfig())->getFhirUrl();
+        $launchCode = $this->getLaunchCodeContext($puuid, $euuid, $intent);
+
+        if (!empty($appointmentUuid)) {
+            $launchCode->setAppointmentUuid($appointmentUuid);
+        }
+
+        // Questionnaire context is resolved from OpenEMR database ids so the browser cannot inject FHIR references.
+        /** @var array<string, mixed> $intentData */
+        $this->addQuestionnaireLaunchContext(
+            $launchCode,
+            $intentData,
+            $pid,
+            $client->getIdentifier(),
+            $session->get('facilityId')
+        );
+
+        $serializedCode = $launchCode->serialize();
+        $launchParams = "?launch=" . urlencode($serializedCode) . "&iss=" . urlencode($issuer) . "&aud=" . urlencode($issuer);
+        $redirectUrl = $client->getLaunchUri($launchParams);
+        header("Location: " . $redirectUrl);
+        exit;
+    }
+
+    public function renderLaunchScript()
+    {
+        ?>
+
         <?php
     }
     /**
      * Retrieves the registered ClientEntities that are SMART only clients.
      * @return \OpenEMR\Common\Auth\OpenIDConnect\Entities\ClientEntity[]
      */
-    private function getSMARTClients()
+    private function getSMARTClients(): array
     {
         $clientRepository = new ClientRepository();
         $clientEntities = $clientRepository->listClientEntities();
@@ -159,24 +211,209 @@ class SmartLaunchController
             // work...
             if ($client->isEnabled() && $client->hasScope(self::CLIENT_APP_REQUIRED_LAUNCH_SCOPE)) {
                 $smartList[] = $client;
-            } else {
-                (new SystemLogger())->debug(
-                    "Skipping over client ",
-                    [
-                        "clientId" => $client->getIdentifier()
-                        , "enabled" => $client->isEnabled()
-                        , "hasLaunchScope" => $client->hasScope(self::CLIENT_APP_REQUIRED_LAUNCH_SCOPE)
-                    ]
-                );
             }
         }
         return $smartList;
     }
 
-    private function getLaunchCodeContext($patientUUID, $encounterId = null)
+    /**
+     * @param array<string, mixed> $intentData
+     * @param mixed $clientId identifier of the app being launched
+     * @param mixed $facility the session facility, which SMART rules may be scoped to
+     */
+    private function addQuestionnaireLaunchContext(
+        SMARTLaunchToken $launchCode,
+        array $intentData,
+        mixed $pid,
+        mixed $clientId,
+        mixed $facility
+    ): void {
+        $questionnaireValue = $intentData['questionnaire_id'] ?? null;
+        $questionnaireResponseValue = $intentData['questionnaire_response_id'] ?? null;
+        if ($questionnaireValue === null && $questionnaireResponseValue === null) {
+            if ($launchCode->getIntent() === SMARTLaunchToken::INTENT_QUESTIONNAIRE_ASSESSMENT) {
+                // An assessment launch with no questionnaire context gives the app nothing to open.
+                throw new \InvalidArgumentException("Questionnaire SMART launch context is invalid");
+            }
+            return;
+        }
+
+        $questionnaireId = $this->getPositiveInteger($questionnaireValue);
+        $questionnaireResponseId = $this->getPositiveInteger($questionnaireResponseValue);
+        $patientId = $this->getPositiveInteger($pid);
+        if (
+            $launchCode->getIntent() !== SMARTLaunchToken::INTENT_QUESTIONNAIRE_ASSESSMENT
+            || $questionnaireId === null
+            || $patientId === null
+            || ($questionnaireResponseValue !== null && $questionnaireResponseId === null)
+        ) {
+            throw new \InvalidArgumentException("Questionnaire SMART launch context is invalid");
+        }
+        if (!AclMain::aclCheckCore('patients', 'med')) {
+            throw new AccessDeniedException("patients", "med", "You do not have permission to access patient assessments");
+        }
+
+        // A questionnaire is launched into a SMART app only when a SMART availability rule
+        // allows it, for any app or for this one. The dashboard hides the launch menu for
+        // every other questionnaire; this refuses a launch URL built by hand for one.
+        $smartContext = new AvailabilityContext(
+            QuestionnaireSurface::Smart,
+            pid: $patientId,
+            facility: $this->getPositiveInteger($facility),
+            clientId: is_string($clientId) && $clientId !== '' ? $clientId : null,
+        );
+        if (!(new QuestionnaireAvailabilityService())->isAvailable($questionnaireId, $smartContext)) {
+            throw new AccessDeniedException(
+                "patients",
+                "med",
+                "Questionnaire is not assigned for SMART launch by this app"
+            );
+        }
+
+        $questionnaireRecords = QueryUtils::fetchRecordsNoLog(
+            "SELECT uuid, questionnaire FROM questionnaire_repository WHERE id = ? AND active = 1",
+            [$questionnaireId]
+        );
+        $questionnaireRecord = $questionnaireRecords[0] ?? null;
+        $questionnaireUuidBinary = is_array($questionnaireRecord) ? ($questionnaireRecord['uuid'] ?? null) : null;
+        if (!is_string($questionnaireUuidBinary) || $questionnaireUuidBinary === '') {
+            throw new \InvalidArgumentException("Questionnaire SMART launch context was not found");
+        }
+
+        $questionnaireUuid = UuidRegistry::uuidToString($questionnaireUuidBinary);
+        $questionnaireJson = is_string($questionnaireRecord['questionnaire'] ?? null)
+            ? $questionnaireRecord['questionnaire']
+            : null;
+        $launchCode->addFhirContextItem($this->buildQuestionnaireContextItem($questionnaireUuid, $questionnaireJson));
+
+        $responseStatus = '';
+        if ($questionnaireResponseId !== null) {
+            $responseRecords = QueryUtils::fetchRecordsNoLog(
+                "SELECT uuid, patient_id, questionnaire_foreign_id, status
+                 FROM questionnaire_response
+                 WHERE id = ? AND COALESCE(encounter, 0) = 0",
+                [$questionnaireResponseId]
+            );
+            $responseRecord = $responseRecords[0] ?? null;
+            $responseUuidBinary = is_array($responseRecord) ? ($responseRecord['uuid'] ?? null) : null;
+            $responsePatientId = is_array($responseRecord)
+                ? $this->getPositiveInteger($responseRecord['patient_id'] ?? null)
+                : null;
+            $responseQuestionnaireId = is_array($responseRecord)
+                ? $this->getPositiveInteger($responseRecord['questionnaire_foreign_id'] ?? null)
+                : null;
+            $responseStatus = is_array($responseRecord) && is_string($responseRecord['status'] ?? null)
+                ? $responseRecord['status']
+                : '';
+            if (
+                !is_string($responseUuidBinary)
+                || $responseUuidBinary === ''
+                || $responsePatientId !== $patientId
+                || $responseQuestionnaireId !== $questionnaireId
+            ) {
+                throw new \InvalidArgumentException("QuestionnaireResponse SMART launch context is invalid");
+            }
+
+            $questionnaireResponseUuid = UuidRegistry::uuidToString($responseUuidBinary);
+            $launchCode->addFhirContextItem([
+                'type' => 'QuestionnaireResponse',
+                'reference' => 'QuestionnaireResponse/' . $questionnaireResponseUuid,
+            ]);
+        }
+
+        $launchCode->setAppContext($this->buildQuestionnaireAppContext($questionnaireResponseId, $responseStatus));
+    }
+
+    /**
+     * Build the fhirContext item for the launched Questionnaire following the
+     * SMART App Launch 2.2 canonical-questionnaire example: always a relative
+     * reference and type, plus the canonical URL (with |version suffix) when the
+     * stored FHIR Questionnaire declares one.
+     *
+     * @return array<string, string>
+     */
+    private function buildQuestionnaireContextItem(string $questionnaireUuid, ?string $questionnaireJson): array
     {
+        $item = [
+            'type' => 'Questionnaire',
+            'reference' => 'Questionnaire/' . $questionnaireUuid,
+        ];
+        if ($questionnaireJson === null || $questionnaireJson === '') {
+            return $item;
+        }
+        $decoded = json_decode($questionnaireJson, true);
+        if (!is_array($decoded)) {
+            return $item;
+        }
+        $canonicalUrl = $decoded['url'] ?? null;
+        if (!is_string($canonicalUrl) || filter_var($canonicalUrl, FILTER_VALIDATE_URL) === false) {
+            return $item;
+        }
+        $version = $decoded['version'] ?? null;
+        $item['canonical'] = is_string($version) && $version !== ''
+            ? $canonicalUrl . '|' . $version
+            : $canonicalUrl;
+        return $item;
+    }
+
+    /**
+     * Resolve the app context JSON for a questionnaire assessment launch.
+     * Legacy rows store 'incomplete'/'active' where FHIR uses 'in-progress'
+     * (see FhirQuestionnaireResponseFormService status mapping), so all three
+     * mean the response is still open for editing.
+     */
+    private function buildQuestionnaireAppContext(?int $questionnaireResponseId, string $responseStatus): string
+    {
+        $action = 'start';
+        if ($questionnaireResponseId !== null) {
+            $openStatuses = ['in-progress', 'incomplete', 'active'];
+            $action = in_array($responseStatus, $openStatuses, true) ? 'continue' : 'review';
+        }
+        return json_encode(
+            [
+                'workflow' => 'questionnaire-assessment',
+                'action' => $action,
+                'returnContext' => 'patient-fhir-assessments',
+            ],
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        );
+    }
+
+    /**
+     * Whether a launch with this intent takes the encounter open in the session.
+     *
+     * A questionnaire assessment launched from Available Assessments is a patient-level
+     * response, saved with no encounter, like the native runtime saves it. Handing the app
+     * whatever encounter the user last opened would make it record the response against
+     * that encounter, so the dashboard form would land in the encounter's response
+     * context. Other intents keep the session encounter as before.
+     */
+    private function carriesSessionEncounter(mixed $intent): bool
+    {
+        return $intent !== SMARTLaunchToken::INTENT_QUESTIONNAIRE_ASSESSMENT;
+    }
+
+    private function getPositiveInteger(mixed $value): ?int
+    {
+        if (is_int($value)) {
+            return $value > 0 ? $value : null;
+        }
+        if (!is_string($value) || $value === '' || !ctype_digit($value)) {
+            return null;
+        }
+
+        $validated = filter_var($value, FILTER_VALIDATE_INT);
+        return is_int($validated) && $validated > 0 ? $validated : null;
+    }
+
+    private function getLaunchCodeContext(
+        $patientUUID,
+        $encounterId = null,
+        $intent = null
+    ): SMARTLaunchToken {
         $token = new SMARTLaunchToken($patientUUID, $encounterId);
-        $token->setIntent(SMARTLaunchToken::INTENT_PATIENT_DEMOGRAPHICS_DIALOG);
-        return $token->serialize();
+        $intent ??= SMARTLaunchToken::INTENT_PATIENT_DEMOGRAPHICS_DIALOG;
+        $token->setIntent($intent);
+        return $token;
     }
 }

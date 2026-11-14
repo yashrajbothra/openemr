@@ -4,7 +4,7 @@
  * List Amendments
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Hema Bandaru <hemab@drcloudemr.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2014 Ensoftek
@@ -13,16 +13,27 @@
  */
 
 require_once("../../globals.php");
-require_once("$srcdir/options.inc.php");
+$session = \OpenEMR\Common\Session\SessionWrapperFactory::getInstance()->getActiveSession();
+$pid = $session->get('pid', 0);
+require_once(\OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . "/options.inc.php");
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 
+//ensure user has proper access
+if (!AclMain::aclCheckCore('patients', 'amendment')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for patients/amendment: Amendment List", xl("Amendment List"));
+}
 ?>
 
 <html>
 <head>
 
-<?php Header::setupHeader(); ?>
+<?php Header::setupHeader();
+echo "<title>" . xlt('Amendment List') . "</title>";
+?>
 
 <script>
     function checkForAmendments() {
@@ -48,12 +59,10 @@ use OpenEMR\Core\Header;
         });
     }
     var AddAmendment = function () {
-        var iam = top.frames.editAmendments;
-        iam.location.href = "<?php echo $GLOBALS['webroot']?>/interface/patient_file/summary/add_edit_amendments.php"
+        window.location.href = "<?php echo OEGlobalsBag::getInstance()->getWebRoot()?>/interface/patient_file/summary/add_edit_amendments.php"
     };
     var ListAmendments = function () {
-        var iam = top.frames.editAmendments;
-        iam.location.href = "<?php echo $GLOBALS['webroot']?>/interface/patient_file/summary/list_amendments.php"
+        window.location.href = "<?php echo OEGlobalsBag::getInstance()->getWebRoot()?>/interface/patient_file/summary/list_amendments.php"
     };
 </script>
 </head>
@@ -68,7 +77,7 @@ use OpenEMR\Core\Header;
                 <form action="list_amendments.php" name="list_amendments" id="list_amendments" method="post" onsubmit='return top.restoreSession()'>
                 <?php
                 $query = "SELECT * FROM amendments WHERE pid = ? ORDER BY amendment_date DESC";
-                $resultSet = sqlStatement($query, array($pid));
+                $resultSet = sqlStatement($query, [$pid]);
                 if (sqlNumRows($resultSet)) { ?>
                     <div class="table-responsive">
                         <table class="table">
@@ -77,6 +86,7 @@ use OpenEMR\Core\Header;
                                     <a href="javascript:AddAmendment();" class="btn btn-primary btn-add"><?php echo xlt("Add"); ?></a>
                                     <a href="javascript:checkForAmendments();" class="btn btn-primary btn-print"><?php echo xlt("Print Amendments"); ?></a>
                                     <a href="javascript:ListAmendments();" class="btn btn-primary"><?php echo xlt("List"); ?></a>
+                                    <a href="demographics.php" class="btn btn-secondary"><?php echo xlt("Return Dashboard"); ?></a>
                                 </td>
                                 <td class="text-right">
                                     <a href="#" class="small" onClick="checkUncheck(1);"><?php echo xlt('Check All');?></a> |
@@ -105,8 +115,8 @@ use OpenEMR\Core\Header;
                                     <td><input id="check_list[]" name="check_list[]" type="checkbox" value="<?php echo attr($row['amendment_id']); ?>"></td>
                                     <td><?php echo $amendmentLink; ?> </td>
                                     <td><?php echo text($row['amendment_desc']); ?> </td>
-                                    <td><?php echo generate_display_field(array('data_type' => '1','list_id' => 'amendment_from'), $row['amendment_by']); ?> </td>
-                                    <td><?php echo generate_display_field(array('data_type' => '1','list_id' => 'amendment_status'), $row['amendment_status']); ?> </td>
+                                    <td><?php echo generate_display_field(['data_type' => '1','list_id' => 'amendment_from'], $row['amendment_by']); ?> </td>
+                                    <td><?php echo generate_display_field(['data_type' => '1','list_id' => 'amendment_status'], $row['amendment_status']); ?> </td>
                                 </tr>
                             <?php } ?>
                             </tbody>

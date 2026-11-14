@@ -2,11 +2,13 @@
  * tabs_view_model.js
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Kevin Yeh <kevin.y@integralemr.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2016 Kevin Yeh <kevin.y@integralemr.com>
  * @copyright Copyright (c) 2016 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
@@ -93,10 +95,26 @@ function tabRefresh(data,evt)
     top.restoreSession();
     // To do: Consider modification if part of frame.
     try {
+        /* eslint-disable-next-line no-self-assign */
         data.window.location = data.window.location;
         activateTab(data);
     } catch(e) {
-        // Do nothing, but avoid exceptions caused by iFrames from different domain (ie NewCrop)
+        // Do nothing, but avoid exceptions caused by iFrames from different domain (ie Ensora)
+    }
+}
+
+/**
+ *  Given a name, refresh that tab. This code is used to support custom code where it is required
+ *  to programmatically refresh a tab via javascript. This func may not be used by core code, please do not remove.
+ *
+ * @param name
+ */
+function tabRefreshByName(name) {
+    for (var tabIdx = 0; tabIdx < app_view_model.application_data.tabs.tabsList().length; tabIdx++) {
+        var curTab = app_view_model.application_data.tabs.tabsList()[tabIdx];
+        if (curTab.name() === name) {
+            tabRefresh(curTab);
+        }
     }
 }
 
@@ -124,7 +142,6 @@ function tabCloseByName(name)
 
 function navigateTab(url,name,afterLoadFunction,loading_label='')
 {
-
     top.restoreSession();
     if($("iframe[name='"+name+"']").length>0)
     {
@@ -190,7 +207,8 @@ function chooseEncounterEvent(data,evt)
 
 function goToEncounter(encId)
 {
-    var url=webroot_url+'/interface/patient_file/encounter/encounter_top.php?set_encounter=' + encId;
+    const params = new URLSearchParams({set_encounter: encId, csrf_token_form: csrf_token_js});
+    var url=webroot_url+'/interface/patient_file/encounter/encounter_top.php?' + params;
 
     navigateTab(url,"enc", function () {
         activateTabByName("enc",true);
@@ -227,23 +245,31 @@ function clickNewGroupEncounter(data,evt)
     newTherapyGroupEncounter();
 }
 
+// AI-generated code start (GitHub Copilot) - Refactored to use URLSearchParams
 function newEncounter(data, evt) {
-    var url = '';
+    const params = new URLSearchParams({
+        autoloaded: '1',
+        calenc: ''
+    });
     if (typeof(data) === "object" && data.mode === "follow_up_encounter") {
-        url = webroot_url + '/interface/forms/newpatient/new.php?mode=followup&enc=' + data.encounterId + '&autoloaded=1&calenc=';
+        params.append('mode', 'followup');
+        params.append('enc', data.encounterId);
     }
-    else {
-        url = webroot_url + '/interface/forms/newpatient/new.php?autoloaded=1&calenc=';
-    }
+    const url = webroot_url + '/interface/forms/newpatient/new.php?' + params.toString();
     navigateTab(url, "enc", function () {
         activateTabByName("enc", true);
     });
-
 }
+// AI-generated code end
 
 function newTherapyGroupEncounter()
 {
-    var url=webroot_url+'/interface/forms/newGroupEncounter/new.php?autoloaded=1&calenc==';
+    // AI-generated code (GitHub Copilot) - Refactored to use URLSearchParams
+    const params = new URLSearchParams({
+        autoloaded: '1',
+        calenc: ''
+    });
+    const url = webroot_url + '/interface/forms/newGroupEncounter/new.php?' + params.toString();
     navigateTab(url, "enc", function () {
         activateTabByName("enc",true);
     });
@@ -265,9 +291,14 @@ function loadCurrentPatient()
     });
 }
 
+/**
+ * Open the active therapy group's details in the group tab. The link sends
+ * the CSRF token because opening the group closes any open patient.
+ */
 function loadCurrentTherapyGroup() {
 
-    var url=webroot_url+'/interface/therapy_groups/index.php?method=groupDetails&group_id=from_session';
+    var params = new URLSearchParams({method: 'groupDetails', group_id: 'from_session', csrf_token_form: csrf_token_js});
+    var url=webroot_url+'/interface/therapy_groups/index.php?' + params;
     navigateTab(url,"gdg", function () {
         activateTabByName("gdg",true);
     });
@@ -288,9 +319,26 @@ function popMenuDialog(url, title) {
     });
 }
 
+/**
+ * Whether a menu URL, relative to the web root, opens a therapy group's
+ * details page. Matches the route and method in any query order.
+ *
+ * @param {string} menuUrl
+ * @returns {boolean}
+ */
+function isGroupDetailsUrl(menuUrl) {
+    var parsed = new URL(menuUrl, window.location.origin);
+    return parsed.origin === window.location.origin
+        && parsed.pathname === '/interface/therapy_groups/index.php'
+        && parsed.searchParams.get('method') === 'groupDetails';
+}
+
+/**
+ * Handle a click on a main menu item: open it in a popup or in its target
+ * tab, or alert when the item needs a patient, group, or encounter first.
+ */
 function menuActionClick(data,evt)
 {
-
     // Yet another menu fixup for legacy 'popup'.
     // let's abandon a tab and call a support function from this view.
     // we'll take along uri and current menu label as title for dialog.
@@ -302,7 +350,11 @@ function menuActionClick(data,evt)
 
     if(data.enabled())
     {
-        if(data.requirement===2)
+        // A locked (e-signed) encounter takes no new forms, but its fee sheet
+        // stays available, as in the encounter's own form menu. The form is
+        // read with the same match the navigation below uses to open it.
+        var openedForm = data.url().match(/load_form.php\?formname=(\w+)/);
+        if(data.requirement===2 && !(openedForm && openedForm[1] === 'fee_sheet'))
         {
             var encounterID=app_view_model.application_data[attendant_type]().selectedEncounterID();
             if(isEncounterLocked(encounterID))
@@ -330,8 +382,18 @@ function menuActionClick(data,evt)
             matches[1] + '&formdesc=' + encodeURIComponent(data.label());
         }
 
+        // Opening the group closes a patient opened in another browser tab,
+        // which the server allows only with the CSRF token.
+        if (isGroupDetailsUrl(dataurl)) {
+            dataurl += '&csrf_token_form=' + encodeURIComponent(csrf_token_js);
+        }
+
         navigateTab(webroot_url + dataurl, data.target, function () {
             activateTabByName(data.target,true);
+            // Send telemetry event. This is sent after the tab is activated to ensure the tab is visible.
+            if (top.telemetryEnabled) {
+                reportMenuClickData(data);
+            }
         },xl("Loading") + " " + dataLabel);
 
         var par = $(evt.currentTarget).closest("ul.menuEntries");
@@ -344,11 +406,11 @@ function menuActionClick(data,evt)
     }
     else
     {
-        if(data.requirement===1)
+        if(data.requirement === 1)
         {
-            alert((jsGlobals['globals']['enable_group_therapy'] == 1) ? xl('You must first select or add a patient or therapy group.') : xl('You must first select or add a patient.'));
+            alert((top.jsGlobals.enable_group_therapy == 1) ? xl('You must first select or add a patient or therapy group.') : xl('You must first select or add a patient.'));
         }
-        else if((data.requirement===2)||data.requirement===3)
+        else if((data.requirement === 2)||data.requirement === 3)
         {
             alert(xl('You must first select or create an encounter.'));
         }
@@ -356,7 +418,30 @@ function menuActionClick(data,evt)
 
 }
 
-function clearPatient()
+function reportMenuClickData(data, evt = 'menuClick') {
+    top.restoreSession();
+    const clickEventData = {
+        action: 'reportMenuClickData',
+        eventType: evt,
+        eventLabel: data.label(),
+        eventUrl: data.url(),
+        eventTarget: data.target,
+        csrf_token_form: top.csrf_token_js,
+    };
+
+    let url = top.webroot_url + '/library/ajax/track_events.php';
+    fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(clickEventData)
+    }).catch(error => {
+        console.error('reportMenu POST error:', error);
+    });
+}
+
+function clearPatient(openFinder = true)
 {
     top.restoreSession();
     app_view_model.application_data.patient(null);
@@ -364,25 +449,28 @@ function clearPatient()
     tabCloseByName('rev');
     tabCloseByName('pop');
     tabCloseByName('pat');
-    navigateTab(webroot_url+'/interface/main/finder/dynamic_finder.php','fin', function () {
-        activateTabByName('fin',true);
-    });
+    if (openFinder) {
+        navigateTab(webroot_url+'/interface/main/finder/dynamic_finder.php','fin', function () {
+            activateTabByName('fin',true);
+        });
+    }
+
+    if (WindowTitleAddPatient)
+    {
+        top.document.title = WindowTitleBase;
+    }
 
     //Ajax call to clear active patient in session
     $.ajax({
         type: "POST",
         url: webroot_url+"/library/ajax/unset_session_ajax.php",
-	    data: {
+        data: {
             func: "unset_pid",
             csrf_token_form: csrf_token_js
         },
-	    success:function( msg ) {
-
-
-	    }
+        success:function( msg ) { }
 	});
 }
-
 
 function clearTherapyGroup()
 {

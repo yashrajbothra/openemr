@@ -5,78 +5,72 @@
  *
  * This is the main controller for the therapy group views and functionality.
  *
- * Copyright (C) 2016 Shachar Zilbershlag <shaharzi@matrix.co.il>
- * Copyright (C) 2016 Amiel Elboim <amielel@matrix.co.il>
- *
- * LICENSE: This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 3
- * of the License, or (at your option) any later version.
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://opensource.org/licenses/gpl-license.php>;.
- *
- * @package OpenEMR
- * @author  Shachar Zilbershlag <shaharzi@matrix.co.il>
- * @author  Amiel Elboim <amielel@matrix.co.il>
- * @link    http://www.open-emr.org
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    Shachar Zilbershlag <shaharzi@matrix.co.il>
+ * @author    Amiel Elboim <amielel@matrix.co.il>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
+ * @copyright Copyright (c) 2016 Shachar Zilbershlag <shaharzi@matrix.co.il>
+ * @copyright Copyright (c) 2016 Amiel Elboim <amielel@matrix.co.il>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once dirname(__FILE__) . '/base_controller.php';
-require_once("{$GLOBALS['srcdir']}/appointments.inc.php");
-require_once("{$GLOBALS['srcdir']}/pid.inc");
+declare(strict_types=1);
+
+require_once __DIR__ . '/base_controller.php';
+require_once(\OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . "/appointments.inc.php");
 
 use OpenEMR\Common\Session\SessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Common\Session\TherapyGroupSessionUtil;
+use Symfony\Component\HttpFoundation\Request;
 
 class TherapyGroupsController extends BaseController
 {
-
     public $therapyGroupModel;
 
     /* Note: Created functions to return arrays so that xl method can be used in array rendering. */
 
     //list of group statuses
-    public static function prepareStatusesList()
+    public static function prepareStatusesList(): array
     {
-        $statuses = array(
+        $statuses = [
             '10' => xl('Active'),
             '20' => xl('Finished'),
             '30' => xl('Canceled')
-        );
+        ];
         return $statuses;
     }
 
     //list of participant statuses
-    public static function prepareParticipantStatusesList()
+    public static function prepareParticipantStatusesList(): array
     {
-        $participant_statuses = array(
+        $participant_statuses = [
                 '10' => xl('Active'),
                 '20' => xl('Not active')
-        );
+        ];
         return $participant_statuses;
     }
 
     //list of group types
-    public static function prepareGroupTypesList()
+    public static function prepareGroupTypesList(): array
     {
-        $group_types = array(
+        $group_types = [
             '1' => xl('Closed'),
             '2' => xl('Open'),
             '3' => xl('Training')
-        );
+        ];
         return $group_types;
     }
 
     //list of participation types
-    public static function prepareGroupParticipationList()
+    public static function prepareGroupParticipationList(): array
     {
-        $group_participation = array(
+        $group_participation = [
             '1' => xl('Mandatory'),
             '2' => xl('Optional')
-        );
+        ];
         return $group_participation;
     }
 
@@ -87,14 +81,14 @@ class TherapyGroupsController extends BaseController
     /**
      * add / edit therapy group
      * making validation and saving in the match tables.
-     * @param null $groupId - must pass when edit group
+     * @param ?int $groupId - must pass when edit group
      */
-    public function index($groupId = null)
+    public function index(?int $groupId = null)
     {
 
-        $data = array();
+        $data = [];
         if ($groupId) {
-            self::setSession($groupId);
+            self::setSession($groupId, $this->request);
         }
 
         //Load models
@@ -120,7 +114,8 @@ class TherapyGroupsController extends BaseController
         $_POST['group_end_date'] = DateToYYYYMMDD($_POST['group_end_date']);
 
         if (isset($_POST['save'])) {
-            $isEdit = empty($_POST['group_id']) ? false : true;
+            TherapyGroupSessionUtil::requireCsrfToken($this->request);
+            $isEdit = !empty($_POST['group_id']);
 
             // for new group - checking if already exist same name
             if ($_POST['save'] != 'save_anyway' && $this->alreadyExist($_POST, $isEdit)) {
@@ -134,17 +129,17 @@ class TherapyGroupsController extends BaseController
                 }
             }
 
-            $filters = array(
-                'group_name' => FILTER_DEFAULT,
+            $filters = [
+                'group_name' => FILTER_UNSAFE_RAW,
                 'group_start_date' => FILTER_SANITIZE_SPECIAL_CHARS,
                 'group_type' => FILTER_VALIDATE_INT,
                 'group_participation' => FILTER_VALIDATE_INT,
                 'group_status' => FILTER_VALIDATE_INT,
-                'group_notes' => FILTER_DEFAULT,
-                'group_guest_counselors' => FILTER_DEFAULT,
-                'counselors' => array('filter'    => FILTER_VALIDATE_INT,
-                                      'flags'     => FILTER_FORCE_ARRAY)
-            );
+                'group_notes' => FILTER_UNSAFE_RAW,
+                'group_guest_counselors' => FILTER_UNSAFE_RAW,
+                'counselors' => ['filter'    => FILTER_VALIDATE_INT,
+                                      'flags'     => FILTER_FORCE_ARRAY]
+            ];
             if ($isEdit) {
                 $filters['group_end_date'] = FILTER_SANITIZE_SPECIAL_CHARS;
                 $filters['group_id'] = FILTER_VALIDATE_INT;
@@ -162,7 +157,7 @@ class TherapyGroupsController extends BaseController
                     $data['groupData']['group_id'] = $id;
                     $data['message'] = xlt('New group was saved successfully') . '.';
                     $data['savingStatus'] = 'success';
-                    self::setSession($id);
+                    self::setSession($id, $this->request);
                     $events = $eventsModel->getGroupEvents($id);
                     $data['events'] = $events;
                     $data['readonly'] = 'disabled';
@@ -182,14 +177,14 @@ class TherapyGroupsController extends BaseController
         } else {
             if (is_null($groupId)) {
                 //for new form
-                $data['groupData'] = array('group_name' => null,
+                $data['groupData'] = ['group_name' => null,
                     'group_start_date' => date('Y-m-d'),
                     'group_type' => null,
                     'group_participation' => null,
                     'group_notes' => null,
                     'group_guest_counselors' => null,
                     'group_status' => null
-                );
+                ];
                 $this->loadView('addGroup', $data);
             } else {
                 //for exist group screen
@@ -232,6 +227,7 @@ class TherapyGroupsController extends BaseController
 
         //If deleting a group
         if ($_GET['deleteGroup'] == 1) {
+            TherapyGroupSessionUtil::requireCsrfToken($this->request);
             $group_id = $_GET['group_id'];
             $deletion_response = $this->deleteGroup($group_id);
             $data['deletion_try'] = 1;
@@ -263,12 +259,11 @@ class TherapyGroupsController extends BaseController
      * Prepares the therapy group list that will be sent to view.
      * @param $therapy_groups
      * @param $counselors
-     * @return array
      */
-    private function prepareGroups($therapy_groups, $counselors)
+    private function prepareGroups($therapy_groups, $counselors): array
     {
 
-        $new_array = array();
+        $new_array = [];
         $users_model = $this->loadModel('Users');
 
         //Insert groups into a new array and shorten notes for preview in list
@@ -276,7 +271,7 @@ class TherapyGroupsController extends BaseController
             $gid = $therapy_group['group_id'];
             $new_array[$gid] = $therapy_group;
             $new_array[$gid]['group_notes'] = $this->shortenNotes($therapy_group['group_notes']);
-            $new_array[$gid]['counselors'] = array();
+            $new_array[$gid]['counselors'] = [];
         }
 
         //Insert the counselors into their groups in new array.
@@ -295,9 +290,9 @@ class TherapyGroupsController extends BaseController
     private function shortenNotes($notes)
     {
 
-        $length = strlen($notes);
+        $length = strlen((string) $notes);
         if ($length > $this->notes_preview_proper_length) {
-            $notes = mb_substr($notes, 0, 50) . '...';
+            $notes = mb_substr((string) $notes, 0, 50) . '...';
         }
 
         return $notes;
@@ -306,12 +301,11 @@ class TherapyGroupsController extends BaseController
     /**
      * Returns a list of counselors without duplicates.
      * @param $counselors
-     * @return array
      */
-    private function prepareCounselorsList($counselors)
+    private function prepareCounselorsList($counselors): array
     {
 
-        $new_array = array();
+        $new_array = [];
         $users_model = $this->loadModel('Users');
 
         foreach ($counselors as $counselor) {
@@ -326,12 +320,11 @@ class TherapyGroupsController extends BaseController
     /**
      * Change group status to 'deleted'. Can be done only if group has no encounters.
      * @param $group_id
-     * @return array
      */
-    private function deleteGroup($group_id)
+    private function deleteGroup($group_id): array
     {
 
-        $response = array();
+        $response = [];
 
         //If group has encounters cannot delete the group.
         $group_has_encounters = $this->checkIfHasApptOrEncounter($group_id);
@@ -353,7 +346,7 @@ class TherapyGroupsController extends BaseController
      * @param $group_id
      * @return bool
      */
-    private function checkIfHasApptOrEncounter($group_id)
+    private function checkIfHasApptOrEncounter($group_id): bool
     {
         $therapy_groups_events_model = $this->loadModel('Therapy_Groups_Events');
         $therapy_groups_encounters_model = $this->loadModel('Therapy_Groups_Encounters');
@@ -376,7 +369,7 @@ class TherapyGroupsController extends BaseController
     private function saveNewGroup($groupData)
     {
 
-        $counselors = !empty($groupData['counselors']) ? $groupData['counselors'] : array();
+        $counselors = !empty($groupData['counselors']) ? $groupData['counselors'] : [];
         unset($groupData['groupId'], $groupData['save'], $groupData['counselors']);
 
         $groupId = $this->therapyGroupModel->saveNewGroup($groupData);
@@ -396,7 +389,7 @@ class TherapyGroupsController extends BaseController
     private function updateGroup($groupData)
     {
 
-        $counselors = !empty($groupData['counselors']) ? $groupData['counselors'] : array();
+        $counselors = !empty($groupData['counselors']) ? $groupData['counselors'] : [];
         unset($groupData['save'], $groupData['counselors']);
 
         $this->therapyGroupModel->updateGroup($groupData);
@@ -405,13 +398,22 @@ class TherapyGroupsController extends BaseController
         foreach ($counselors as $counselorId) {
             $this->counselorsModel->save($groupData['group_id'], $counselorId);
         }
+
+        return $groupData['group_id'];
     }
 
-    static function setSession($groupId)
+    /**
+     * Make $groupId the active therapy group, which closes any open patient.
+     * Ends the request with a 403 when this is a switch without the CSRF token.
+     */
+    public static function setSession(int $groupId, Request $request): void
     {
-
+        // Opening a group closes the open patient, so a link from another
+        // site must not be able to do it.
+        TherapyGroupSessionUtil::requireCsrfForGroupSwitch($request, $groupId);
         setpid(0);
-        if ($_SESSION['therapy_group'] != $groupId) {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+        if ($session->get('therapy_group') != $groupId) {
             SessionUtil::setSession('therapy_group', $groupId);
         }
     }

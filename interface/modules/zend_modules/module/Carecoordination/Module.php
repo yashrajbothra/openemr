@@ -1,37 +1,45 @@
 <?php
 
+/**
+ * Module is responsible for setting up the configuration of the module and any events it listens to.
+ *
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    Vinish K <vinish@zhservices.com>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
+ * @copyright Copyright (c) 2015 Z&H Consultancy Services Private Limited <sam@zhservices.com>
+ * @copyright Copyright (c) 2022 Discover and Change <snielson@discoverandchange.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
 namespace Carecoordination;
 
-use Carecoordination\Model\CarecoordinationTable;
-use Carecoordination\Model\SetupTable;
-use Carecoordination\Model\EncounterccdadispatchTable;
-use Carecoordination\Model\EncountermanagerTable;
-use Laminas\Db\ResultSet\ResultSet;
-use Laminas\Db\TableGateway\TableGateway;
+use Carecoordination\Listener\CCDAEventsSubscriber;
+use Carecoordination\Listener\ReferralNoticeSubscriber;
 use Laminas\ModuleManager\ModuleManager;
-use Laminas\View\Helper\Openemr\Emr;
-use Laminas\View\Helper\Openemr\Menu;
-use Carecoordination\Model\Progressnote;
-use Carecoordination\Model\ProgressnoteTable;
-use Carecoordination\Model\Continuitycaredocument;
-use Carecoordination\Model\ContinuitycaredocumentTable;
-use Carecoordination\Model\CcdTable;
+use Laminas\Mvc\MvcEvent;
+use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 
 class Module
 {
-    public function getAutoloaderConfig()
+    public function getAutoloaderConfig(): array
     {
-        return array(
-            'Laminas\Loader\ClassMapAutoloader' => array(
+        return [
+            \Laminas\Loader\ClassMapAutoloader::class => [
                 __DIR__ . '/autoload_classmap.php',
-            ),
-            'Laminas\Loader\StandardAutoloader' => array(
-                'namespaces' => array(
+            ],
+            \Laminas\Loader\StandardAutoloader::class => [
+                'namespaces' => [
                     __NAMESPACE__ => __DIR__ . '/src/' . __NAMESPACE__,
 
-                ),
-            ),
-        );
+                ],
+            ],
+        ];
     }
 
     public function getConfig()
@@ -42,14 +50,51 @@ class Module
     public function init(ModuleManager $moduleManager)
     {
         $sharedEvents = $moduleManager->getEventManager()->getSharedManager();
-        $sharedEvents->attach(__NAMESPACE__, 'dispatch', function ($e) {
+        $sharedEvents->attach(__NAMESPACE__, 'dispatch', function ($e): void {
+            $session = SessionWrapperFactory::getInstance()->getActiveSession();
+            // Enforce ACL for the Care Coordination module.
+            // Skip for patient portal sessions which have their own authorization.
+            if (($session->get('sessionUser') ?? '') !== '-patient-') {
+                $userId = $session->get('authUserID') ?? '';
+                if (
+                    !AclMain::zhAclCheck($userId, 'send_to_hie')
+                    && !AclMain::aclCheckCore('admin', 'super')
+                ) {
+                    echo xlt('Not Authorized');
+                    exit;
+                }
+            }
+
             $controller = $e->getTarget();
             $controller->layout('carecoordination/layout/layout');
                 $route = $controller->getEvent()->getRouteMatch();
-                $controller->getEvent()->getViewModel()->setVariables(array(
+                $controller->getEvent()->getViewModel()->setVariables([
                     'current_controller' => $route->getParam('controller'),
                     'current_action' => $route->getParam('action'),
-                ));
+                ]);
         }, 100);
+    }
+
+    /**
+     * Subscribes the module's listeners to the OpenEMR event dispatcher.
+     */
+    public function onBootstrap(MvcEvent $e): void
+    {
+        // we grab the OpenEMR event listener (which is injected as Laminas has its own dispatcher)
+        $serviceManager = $e->getApplication()->getServiceManager();
+        $oemrDispatcher = $serviceManager->get(EventDispatcherInterface::class);
+        if (!$oemrDispatcher instanceof EventDispatcherInterface) {
+            throw new \LogicException('The service manager has no OpenEMR event dispatcher');
+        }
+
+        // now we can listen to our module events; ReferralNoticeSubscriber sends a referral's
+        // recipient its Referral C-CDA by Direct when core asks (#15137).
+        foreach ([CCDAEventsSubscriber::class, ReferralNoticeSubscriber::class] as $name) {
+            $subscriber = $serviceManager->get($name);
+            if (!$subscriber instanceof EventSubscriberInterface) {
+                throw new \LogicException('The service manager has no ' . $name);
+            }
+            $oemrDispatcher->addSubscriber($subscriber);
+        }
     }
 }

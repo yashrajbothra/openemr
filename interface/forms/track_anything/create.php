@@ -4,19 +4,39 @@
  * Encounter form to track any clinical parameter.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Joe Slam <trackanything@produnis.de>
  * @copyright Copyright (c) 2014 Joe Slam <trackanything@produnis.de>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 require_once(__DIR__ . "/../../globals.php");
-require_once("$srcdir/api.inc");
-require_once("$srcdir/forms.inc");
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
 use OpenEMR\Common\Acl\AclMain;
-
+use OpenEMR\Common\Session\EncounterSessionUtil;
+use OpenEMR\Common\Session\PatientSessionUtil;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$srcdir = OEGlobalsBag::getInstance()->getSrcDir();
+$rootdir = OEGlobalsBag::getInstance()->getString('rootdir');
+$web_root = OEGlobalsBag::getInstance()->getWebRoot();
+$pid = PatientSessionUtil::getPid();
+$encounter = EncounterSessionUtil::getEncounter();
+
+// **** DB ACTION ******
+$dbaction = isset($_POST['dbaction']) ? trim((string) $_POST['dbaction']) : '';
+
+// Track Anything definitions are site-wide: every mutation (add / edit / delete /
+// activate / deactivate) requires admin/super. The delete branch below already
+// gates on this ACO; the add / edit / activate / deactivate branches share the
+// same scope and need the same gate here so the admin boundary is uniform.
+// Runs before any HTML output so AccessDeniedHelper::deny() can emit its 403.
+if (($dbaction === 'add' || $dbaction === 'edit') && !AclMain::aclCheckCore('admin', 'super')) {
+    AccessDeniedHelper::deny('Unauthorized Track Anything definition mutation');
+}
 
 formHeader("Form: Track anything");
 
@@ -26,10 +46,6 @@ formHeader("Form: Track anything");
     <?php Header::setupHeader('track-anything'); ?>
 <?php
 echo "<div id='ta_type'>";
-
-
-// **** DB ACTION ******
-$dbaction = isset($_POST['dbaction']) ? trim($_POST['dbaction']) : '';
 
 // save new item to a track
 //-----------------------------
@@ -43,7 +59,7 @@ if ($dbaction == 'add') {
     if ($the_name != null) {
         $insertspell  = "INSERT INTO form_track_anything_type ";
         $insertspell .= "(name, description, position, parent, active) VALUES (?,?,?,?,?)";
-        $save_into_db = sqlInsert($insertspell, array($the_name, $the_descr, $the_pos, $the_parent,1));
+        $save_into_db = sqlInsert($insertspell, [$the_name, $the_descr, $the_pos, $the_parent,1]);
     } else {
         if ($the_type == 'add') {
             echo "<br /><span class='failure'>\n";
@@ -76,7 +92,7 @@ if ($dbaction == 'edit') {
         $updatespell  = "UPDATE form_track_anything_type ";
         $updatespell .= "SET name = ?, description = ?, position = ? ";
         $updatespell .= "WHERE track_anything_type_id = ? ";
-        sqlStatement($updatespell, array($the_name, $the_descr, $the_pos, $the_item));
+        sqlStatement($updatespell, [$the_name, $the_descr, $the_pos, $the_item]);
     } else {
         echo "<br /><span class='failure'>\n";
         echo xlt('Editing failed') . ". ";
@@ -92,7 +108,7 @@ if ($dbaction == 'delete' && AclMain::aclCheckCore('admin', 'super')) {
         $the_item   = $_POST['itemid'];
         $deletespell  = "DELETE FROM form_track_anything_type ";
         $deletespell .= "WHERE track_anything_type_id = ? ";
-        sqlStatement($deletespell, array($the_item));
+        sqlStatement($deletespell, [$the_item]);
 }
 
 // end edit -----------------------------
@@ -101,7 +117,7 @@ if ($dbaction == 'delete' && AclMain::aclCheckCore('admin', 'super')) {
 
 
 // Create a new track
-$create_track = isset($_POST['create_track']) ? trim($_POST['create_track']) : '';
+$create_track = isset($_POST['create_track']) ? trim((string) $_POST['create_track']) : '';
 if ($create_track) {
     echo "<table class='create'><tr><td>\n";
     echo "<b>" . xlt('Create a new track')  . " </b><br />&nbsp;";
@@ -130,13 +146,13 @@ if ($create_track) {
 } // end create new track
 
 // user clicked some buttons...
-$the_item = isset($_POST['typeid']) ? trim($_POST['typeid']) : '';
+$the_item = isset($_POST['typeid']) ? trim((string) $_POST['typeid']) : '';
 if ($the_item) {
-    $add        = $_POST['add'];
-    $edit       = $_POST['edit'];
-    $delete     = $_POST['delete'];
-    $deactivate = $_POST['deact'];
-    $activate   = $_POST['act'];
+    $add        = $_POST['add'] ?? null;
+    $edit       = $_POST['edit'] ?? null;
+    $delete     = $_POST['delete'] ?? null;
+    $deactivate = $_POST['deact'] ?? null;
+    $activate   = $_POST['act'] ?? null;
 
     // add a new item to track
     //------------------------
@@ -145,7 +161,7 @@ if ($the_item) {
         echo "<table class='add'><tr><td>";
         $spell  = "SELECT name FROM form_track_anything_type ";
         $spell .= "WHERE track_anything_type_id = ?";
-        $myrow = sqlQuery($spell, array($the_item));
+        $myrow = sqlQuery($spell, [$the_item]);
         echo "<br />&nbsp;&nbsp;";
         echo xlt('Add item to track')  . " <b>" . text($myrow['name']) . "</b><br />&nbsp;\n";
         echo "<form method='post' action='" . $rootdir . "/forms/track_anything/create.php' onsubmit='return top.restoreSession()'>\n";
@@ -178,7 +194,7 @@ if ($the_item) {
         echo "<table class='edit'><tr><td>";
         $spell  = "SELECT name, description, position FROM form_track_anything_type ";
         $spell .= "WHERE track_anything_type_id = ?";
-        $myrow = sqlQuery($spell, array($the_item));
+        $myrow = sqlQuery($spell, [$the_item]);
         $the_name   = $myrow['name'];
         $the_descr  = $myrow['description'];
         $the_pos    = $myrow['position'];
@@ -211,7 +227,7 @@ if ($the_item) {
         echo "<table class='del'><tr><td>\n";
         $spell  = "SELECT name FROM form_track_anything_type ";
         $spell .= "WHERE track_anything_type_id = ?";
-        $myrow = sqlQuery($spell, array($the_item));
+        $myrow = sqlQuery($spell, [$the_item]);
         $the_name   = $myrow['name'];
 
         echo "<br />&nbsp;&nbsp;<span class='failure'>\n";
@@ -228,12 +244,18 @@ if ($the_item) {
     }
 
 
+    if (($deactivate || $activate) && !AclMain::aclCheckCore('admin', 'super')) {
+        http_response_code(403);
+        echo xlt('Not Authorized');
+        exit;
+    }
+
     if ($deactivate) {
-    // deactive the item/track
+    // deactivate the item/track
         $updatespell  = "UPDATE form_track_anything_type ";
         $updatespell .= "SET active = '0' ";
         $updatespell .= "WHERE track_anything_type_id = ? ";
-        sqlStatement($updatespell, array($the_item));
+        sqlStatement($updatespell, [$the_item]);
     }
 
     if ($activate) {
@@ -241,7 +263,7 @@ if ($the_item) {
         $updatespell  = "UPDATE form_track_anything_type ";
         $updatespell .= "SET active = '1' ";
         $updatespell .= "WHERE track_anything_type_id = ? ";
-        sqlStatement($updatespell, array($the_item));
+        sqlStatement($updatespell, [$the_item]);
     }
 } //end user clicked button
 
@@ -279,9 +301,9 @@ while ($myrow = sqlFetchArray($result)) {
         echo "<td class='parent'>&nbsp;&nbsp;" . text($type_descr) . "</td>\n";
         echo "<td class='parent'>&nbsp;&nbsp;" . text($type_pos) . "</td>\n";
     } elseif ($type_active == '0') {
-        echo "<td class='deactive'>&nbsp;&nbsp;" . text($type_name) . "</td>\n";
-        echo "<td class='deactive'>&nbsp;&nbsp;" . text($type_descr) . "</td>\n";
-        echo "<td class='deactive'>&nbsp;&nbsp;" . text($type_pos) . "</td>\n";
+        echo "<td class='deactivate'>&nbsp;&nbsp;" . text($type_name) . "</td>\n";
+        echo "<td class='deactivate'>&nbsp;&nbsp;" . text($type_descr) . "</td>\n";
+        echo "<td class='deactivate'>&nbsp;&nbsp;" . text($type_pos) . "</td>\n";
     }
 
     echo "<td class='op'>";
@@ -303,7 +325,7 @@ while ($myrow = sqlFetchArray($result)) {
     $spell2  = "SELECT * FROM form_track_anything_type ";
     $spell2 .= "WHERE parent = ? ";
     $spell2 .= "ORDER BY position ASC, active DESC, name ASC";
-    $result2 = sqlStatement($spell2, array($type_id));
+    $result2 = sqlStatement($spell2, [$type_id]);
     while ($myrow2 = sqlFetchArray($result2)) {
         $item_id        = $myrow2['track_anything_type_id'];
         $item_name      = $myrow2['name'];
@@ -317,9 +339,9 @@ while ($myrow = sqlFetchArray($result)) {
             echo "<td class='child'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_descr) . "</td>\n";
             echo "<td class='child'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_pos) . "</td>\n";
         } elseif ($item_active == '0') {
-            echo "<td class='deactive'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_name) . "</td>\n";
-            echo "<td class='deactive'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_descr) . "</td>\n";
-            echo "<td class='deactive'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_pos) . "</td>\n";
+            echo "<td class='deactivate'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_name) . "</td>\n";
+            echo "<td class='deactivate'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_descr) . "</td>\n";
+            echo "<td class='deactivate'>&nbsp;&nbsp;&nbsp;&nbsp; | " . text($item_pos) . "</td>\n";
         }
 
         echo "<td class='op'>";

@@ -464,7 +464,7 @@ class FHIRConsentProvision extends FHIRBackboneElement implements \JsonSerializa
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -472,7 +472,7 @@ class FHIRConsentProvision extends FHIRBackboneElement implements \JsonSerializa
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->type)) {
@@ -536,15 +536,13 @@ class FHIRConsentProvision extends FHIRBackboneElement implements \JsonSerializa
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ConsentProvision xmlns="http://hl7.org/fhir"></ConsentProvision>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ConsentProvision xmlns="http://hl7.org/fhir"></ConsentProvision>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->type)) {
             $this->type->xmlSerialize(true, $sxe->addChild('type'));

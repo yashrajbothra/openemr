@@ -4,7 +4,7 @@
  * PatientReportEvent class.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  *
  * @author    Stephen Nielson <stephen@nielson.org>
  * @copyright Copyright (c) 2019 Stephen Nielson <stephen@nielson.org>
@@ -13,7 +13,7 @@
 
 namespace OpenEMR\Events\PatientReport;
 
-use Symfony\Component\EventDispatcher\Event;
+use Symfony\Contracts\EventDispatcher\Event;
 
 class PatientReportEvent extends Event
 {

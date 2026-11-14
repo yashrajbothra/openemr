@@ -9,25 +9,43 @@
 //
 require_once('AbstractAmcReport.php');
 
-class AMC_Unimplemented extends AbstractAmcReport implements RsUnimplementedIF
+class AMC_Unimplemented extends AbstractAmcReport implements RsUnimplementedIF, IAmcItemizedReport
 {
     public function __construct()
     {
-        parent::__construct(array(), array(), null);
+        parent::__construct([], [], null, []);
     }
 
-    public function getObjectToCount()
+    public function getObjectToCount(): null
     {
         return null;
     }
 
-    public function createDenominator()
+    public function createDenominator(): null
     {
         return null;
     }
 
-    public function createNumerator()
+    public function createNumerator(): null
     {
         return null;
+    }
+
+    /**
+     * Returns our action data that we wish to store in the database
+     * @return AmcItemizedActionData
+     */
+    public function getItemizedDataForLastTest(): AmcItemizedActionData
+    {
+        return new AmcItemizedActionData();
+    }
+
+    /**
+     * Returns the hydrated (language translated) data record that was generated
+     * @return array
+     */
+    public function hydrateItemizedDataFromRecord($actionData): AmcItemizedActionData
+    {
+        return new AmcItemizedActionData();
     }
 }

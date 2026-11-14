@@ -4,7 +4,7 @@
  * AppointmentService
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Matthew Vita <matthewvita48@gmail.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2018 Matthew Vita <matthewvita48@gmail.com>
@@ -14,23 +14,88 @@
 
 namespace OpenEMR\Services;
 
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\Services\ServiceDeleteEvent;
+use OpenEMR\Services\Search\BasicSearchField;
+use OpenEMR\Services\Search\DateSearchField;
+use OpenEMR\Services\Search\FhirSearchWhereClauseBuilder;
+use OpenEMR\Services\Search\ISearchField;
+use OpenEMR\Services\Search\ReferenceSearchValue;
+use OpenEMR\Services\Search\SearchModifier;
+use OpenEMR\Services\Search\StringSearchField;
+use OpenEMR\Services\Search\TokenSearchField;
+use OpenEMR\Services\Search\TokenSearchValue;
+use OpenEMR\Validators\ProcessingResult;
+use Particle\Validator\Exception\InvalidValueException;
 use Particle\Validator\Validator;
 
-class AppointmentService
+class AppointmentService extends BaseService
 {
+    const TABLE_NAME = "openemr_postcalendar_events";
+    const PATIENT_TABLE = "patient_data";
+    const PRACTITIONER_TABLE = "users";
+    const FACILITY_TABLE = "facility";
+
+    const CATEGORY_CONSTANT_NO_SHOW = 'no_show';
+
+    /**
+     * @var EncounterService
+     */
+    private $encounterService;
+
+    /**
+     * @var PatientService
+     */
+    private $patientService;
 
   /**
    * Default constructor.
    */
     public function __construct()
     {
+        parent::__construct(self::TABLE_NAME);
+        UuidRegistry::createMissingUuidsForTables([self::TABLE_NAME, self::PATIENT_TABLE, self::PRACTITIONER_TABLE,
+            self::FACILITY_TABLE]);
+    }
+
+    public function setEncounterService(EncounterService $service)
+    {
+        $this->encounterService = $service;
+    }
+
+    public function getEncounterService()
+    {
+        if (empty($this->encounterService)) {
+            $this->encounterService = new EncounterService();
+        }
+        return $this->encounterService;
+    }
+
+    public function setPatientService(PatientService $patientService)
+    {
+        $this->patientService = $patientService;
+    }
+
+    public function getPatientService()
+    {
+        if (empty($this->patientService)) {
+            $this->patientService = new PatientService();
+        }
+        return $this->patientService;
+    }
+
+    public function getUuidFields(): array
+    {
+        return ['puuid', 'pce_aid_uuid', 'pc_uuid', 'facility_uuid', 'billing_location_uuid' ];
     }
 
     public function validate($appointment)
     {
         $validator = new Validator();
 
-        $validator->required('pc_eid')->numeric();
         $validator->required('pc_catid')->numeric();
         $validator->required('pc_title')->lengthBetween(2, 150);
         $validator->required('pc_duration')->numeric();
@@ -40,78 +105,329 @@ class AppointmentService
         $validator->required('pc_startTime')->length(5); // HH:MM is 5 chars
         $validator->required('pc_facility')->numeric();
         $validator->required('pc_billing_location')->numeric();
+        $validator->optional('pc_aid')->numeric()
+            ->callback(function ($value, $data) {
+                $id = QueryUtils::fetchSingleValue('Select id FROM users WHERE id = ? ', 'id', [$value]);
+                if (empty($id)) {
+                    throw new InvalidValueException('pc_aid must be for a valid user', 'pc_aid');
+                }
+                return true;
+            });
+        $validator->optional('pid')->callback(function ($value, $data) {
+            // The plain number the pc_pid lookups match ('05' is patient 5). Text the numeric comparison would
+            // also read as 5 ('5abc', '5e0') names no patient: stored as given, no lookup would find it again.
+            $pid = is_int($value) || is_string($value) ? self::calendarPid($value) : '';
+            $id = ctype_digit($pid) ? QueryUtils::fetchSingleValue('Select id FROM patient_data WHERE pid = ? ', 'id', [$pid]) : null;
+            if (empty($id)) {
+                throw new InvalidValueException('pid must be for a valid patient', 'pid');
+            }
+            return true;
+        });
+        $validator->optional('pc_website')->string();
 
         return $validator->validate($appointment);
     }
 
-    public function getAppointmentsForPatient($pid)
+    public function search($search, $isAndCondition = true): ProcessingResult
     {
-        $sqlBindArray = array();
-
         $sql = "SELECT pce.pc_eid,
+                       pce.pc_uuid,
+                       pd.puuid,
                        pd.fname,
                        pd.lname,
                        pd.DOB,
+                       pd.pid,
+                       providers.uuid AS pce_aid_uuid,
+                       providers.fname AS pce_aid_fname,
+                       providers.lname AS pce_aid_lname,
+                       providers.npi AS pce_aid_npi,
+                       pce.pc_aid,
                        pce.pc_apptstatus,
                        pce.pc_eventDate,
                        pce.pc_startTime,
                        pce.pc_endTime,
+                       pce.pc_time,
               	       pce.pc_facility,
                        pce.pc_billing_location,
+                       pce.pc_catid,
+                       pce.pc_pid,
+                       pce.pc_duration,
+                       pce.pc_title,
+                       pce.pc_website,
+                       pce.pc_informant,
                        f1.name as facility_name,
-                       f2.name as billing_location_name
-                       FROM openemr_postcalendar_events as pce
+                       f1_map.uuid as facility_uuid,
+                       f2.name as billing_location_name,
+                       f2_map.uuid as billing_location_uuid
+                       FROM (
+                             SELECT
+                               pc_eid,
+                               uuid AS pc_uuid, -- we do this because our uuid registry requires the field to be named this way
+                               pc_aid,
+                               pc_apptstatus,
+                               pc_eventDate,
+                               pc_startTime,
+                               pc_duration,
+                               pc_endTime,
+                               pc_time,
+                               pc_facility,
+                               pc_billing_location,
+                               pc_catid,
+                               pc_pid,
+                               pc_title,
+                               pc_website,
+                               pc_informant
+                            FROM
+                                 openemr_postcalendar_events
+                       ) pce
                        LEFT JOIN facility as f1 ON pce.pc_facility = f1.id
+                       LEFT JOIN uuid_mapping as f1_map ON f1_map.target_uuid=f1.uuid AND f1_map.resource='Location'
                        LEFT JOIN facility as f2 ON pce.pc_billing_location = f2.id
-                       LEFT JOIN patient_data as pd ON pd.pid = pce.pc_pid";
+                       LEFT JOIN uuid_mapping as f2_map ON f2_map.target_uuid=f2.uuid AND f2_map.resource='Location'
+                       LEFT JOIN (
+                           select uuid AS puuid
+                           ,fname
+                           ,lname
+                           ,DOB
+                           ,pid
+                           FROM
+                                patient_data
+                      ) pd ON pd.pid = pce.pc_pid
+                       LEFT JOIN users as providers ON pce.pc_aid = providers.id";
 
-        if ($pid) {
-            $sql .= " WHERE pd.pid = ?";
-            array_push($sqlBindArray, $pid);
+        // A patient's events are found through pc_pid, a varchar whose index serves only a comparison with text.
+        // The join above compares it with patient_data.pid, a number, which reads every event; a cast in SQL
+        // clashes with the column's collation on MySQL 8. So the named patients' pids are looked up and bound as text.
+        if ($isAndCondition && ($search['puuid'] ?? null) instanceof ISearchField && !isset($search['pc_pid'])) {
+            $pids = self::patientPids($search['puuid']);
+            if ($pids !== []) {
+                $search['pc_pid'] = new StringSearchField('pc_pid', $pids, SearchModifier::EXACT, usesIndex: true);
+            }
         }
 
-        $statementResults = sqlStatement($sql, $sqlBindArray);
+        $whereClause = FhirSearchWhereClauseBuilder::build($search, $isAndCondition);
 
-        $results = array();
+        $sql .= $whereClause->getFragment();
+        $sqlBindArray = $whereClause->getBoundValues();
+        $statementResults = QueryUtils::sqlStatementThrowException($sql, $sqlBindArray);
+
+        $processingResult = new ProcessingResult();
         while ($row = sqlFetchArray($statementResults)) {
-            array_push($results, $row);
+            $processingResult->addData($this->createResultRecordFromDatabaseResult($row));
         }
 
-        return $results;
+        return $processingResult;
     }
 
-    public function getAppointment($eid)
+    /**
+     * A pid as openemr_postcalendar_events.pc_pid is matched and written: as text. pc_pid is a varchar, so
+     * compared with a number the database reads and converts every event; compared with text its index finds
+     * the patient's. The pid is trimmed, and digits become the plain number OpenEMR writes ("05", " 5" and
+     * "5\n" are "5"), as the numeric comparison matched them. Other text comes back trimmed; '' is no patient.
+     */
+    public static function calendarPid(int|string $pid): string
     {
+        if (is_int($pid)) {
+            return (string) $pid;
+        }
+        $pid = trim($pid);
+        if (ctype_digit($pid)) {
+            $plain = ltrim($pid, '0');
+            return $plain === '' ? '0' : $plain;
+        }
+        return $pid;
+    }
+
+    /**
+     * calendarPid() for a value typed mixed (a database row, a global, an untyped parameter): null, which
+     * matches no event, for anything but an int or a string.
+     */
+    public static function calendarPidOrNull(mixed $pid): ?string
+    {
+        return is_int($pid) || is_string($pid) ? self::calendarPid($pid) : null;
+    }
+
+    /**
+     * The pids of the patients a plain puuid match names, as text; [] when the field is anything else (a
+     * modifier, or values that aren't uuids), so the search runs as before.
+     *
+     * @return list<string>
+     */
+    private static function patientPids(ISearchField $field): array
+    {
+        if (!$field instanceof BasicSearchField) {
+            return [];
+        }
+        // getModifier() is documented as a string but is null when none was given.
+        if (!in_array($field->getModifier(), [null, ''], true)) {
+            return [];
+        }
+        $uuids = [];
+        foreach ($field->getValues() as $value) {
+            $uuid = match (true) {
+                $value instanceof ReferenceSearchValue => $value->getId(),
+                $value instanceof TokenSearchValue => $value->getCode(),
+                default => null,
+            };
+            if (!is_string($uuid) || strlen($uuid) !== 16) {
+                return [];
+            }
+            $uuids[] = $uuid;
+        }
+        if ($uuids === []) {
+            return [];
+        }
+        // One query for all the patients named, however many there are.
+        $rows = QueryUtils::fetchRecords(
+            'SELECT pid FROM patient_data WHERE uuid IN (' . implode(',', array_fill(0, count($uuids), '?')) . ')',
+            $uuids
+        );
+        $pids = [];
+        foreach ($rows as $row) {
+            if (is_numeric($row['pid'] ?? null)) {
+                $pids[] = (string) $row['pid'];
+            }
+        }
+        return $pids;
+    }
+
+    public function getAppointmentsForPatient($pid): array
+    {
+        $sqlBindArray = [];
+
         $sql = "SELECT pce.pc_eid,
+                       pce.uuid AS pc_uuid,
                        pd.fname,
                        pd.lname,
                        pd.DOB,
+                       pd.pid,
+                       pd.uuid AS puuid,
+                       providers.uuid AS pce_aid_uuid,
+                       providers.fname AS pce_aid_fname,
+                       providers.lname AS pce_aid_lname,
+                       providers.npi AS pce_aid_npi,
+                       pce.pc_aid,
                        pce.pc_apptstatus,
                        pce.pc_eventDate,
                        pce.pc_startTime,
                        pce.pc_endTime,
+                       pce.pc_time,
               	       pce.pc_facility,
                        pce.pc_billing_location,
+                       pce.pc_catid,
+                       pce.pc_pid,
+                       pce.pc_title,
+                       pce.pc_website,
+                       pce.pc_informant,
                        f1.name as facility_name,
-                       f2.name as billing_location_name
+                       f1_map.uuid as facility_uuid,
+                       f2.name as billing_location_name,
+                       f2_map.uuid as billing_location_uuid
                        FROM openemr_postcalendar_events as pce
                        LEFT JOIN facility as f1 ON pce.pc_facility = f1.id
+                       LEFT JOIN uuid_mapping as f1_map ON f1_map.target_uuid=f1.uuid AND f1_map.resource='Location'
                        LEFT JOIN facility as f2 ON pce.pc_billing_location = f2.id
+                       LEFT JOIN uuid_mapping as f2_map ON f2_map.target_uuid=f2.uuid AND f2_map.resource='Location'
                        LEFT JOIN patient_data as pd ON pd.pid = pce.pc_pid
+                       LEFT JOIN users as providers ON pce.pc_aid = providers.id";
+
+        // pc_pid bound as text lets its index find the patient's events. No pid (null, false, 0, '' or '0', as
+        // master's `if ($pid)` read them) lists every appointment; any other value names one patient, or none.
+        if ($pid !== null && $pid !== false && $pid !== 0 && $pid !== '' && $pid !== '0') {
+            $calendarPid = is_int($pid) || is_string($pid) ? self::calendarPid($pid) : '';
+            if ($calendarPid === '' || $calendarPid === '0') {
+                // '00' or ' ' names no patient (it would find the events with none, or holidays), and neither does a
+                // value that's neither a number nor text: never every patient's events.
+                return [];
+            }
+            // The patient has to exist, as master's join on pd.pid required: events whose pc_pid names no patient
+            // (a removed one, or text) aren't anyone's. The pc_pid index still finds the rows.
+            $sql .= " WHERE pce.pc_pid = ? AND pd.pid IS NOT NULL";
+            $sqlBindArray[] = $calendarPid;
+        }
+
+        $records = QueryUtils::fetchRecords($sql, $sqlBindArray);
+        $finalRecords = [];
+        if (!empty($records)) {
+            foreach ($records as $record) {
+                $finalRecords[] = $this->createResultRecordFromDatabaseResult($record);
+            }
+        }
+        return $finalRecords;
+    }
+
+    public function getAppointment($eid): array
+    {
+        $sql = "SELECT pce.pc_eid,
+                       pce.uuid AS pc_uuid,
+                       pd.fname,
+                       pd.lname,
+                       pd.DOB,
+                       pd.pid,
+                       pd.uuid AS puuid,
+                       providers.uuid AS pce_aid_uuid,
+                       providers.fname AS pce_aid_fname,
+                       providers.lname AS pce_aid_lname,
+                       providers.npi AS pce_aid_npi,
+                       pce.pc_aid,
+                       pce.pc_apptstatus,
+                       pce.pc_eventDate,
+                       pce.pc_startTime,
+                       pce.pc_endTime,
+                       pce.pc_time,
+                       pce.pc_duration,
+              	       pce.pc_facility,
+                       pce.pc_billing_location,
+                       pce.pc_catid,
+                       pce.pc_room,
+                       pce.pc_pid,
+                       pce.pc_hometext,
+                       pce.pc_title,
+                       pce.pc_website,
+                       pce.pc_informant,
+                       f1.name as facility_name,
+                       f1_map.uuid as facility_uuid,
+                       f2.name as billing_location_name,
+                       f2_map.uuid as billing_location_uuid
+                       FROM openemr_postcalendar_events as pce
+                       LEFT JOIN facility as f1 ON pce.pc_facility = f1.id
+                       LEFT JOIN uuid_mapping as f1_map ON f1_map.target_uuid=f1.uuid AND f1_map.resource='Location'
+                       LEFT JOIN facility as f2 ON pce.pc_billing_location = f2.id
+                       LEFT JOIN uuid_mapping as f2_map ON f2_map.target_uuid=f2.uuid AND f2_map.resource='Location'
+                       LEFT JOIN patient_data as pd ON pd.pid = pce.pc_pid
+                       LEFT JOIN users as providers ON pce.pc_aid = providers.id
                        WHERE pce.pc_eid = ?";
 
-        return sqlQuery($sql, array($eid));
+        $records = QueryUtils::fetchRecords($sql, [$eid]);
+        $finalRecords = [];
+        if (!empty($records)) {
+            foreach ($records as $record) {
+                $finalRecords[] = $this->createResultRecordFromDatabaseResult($record);
+            }
+        }
+        return $finalRecords;
     }
 
     public function insert($pid, $data)
     {
-        $startTime = date("H:i:s", strtotime($data['pc_startTime']));
-        $endTime = $startTime + $data['pc_duration'];
+        $startUnixTime = strtotime((string) $data['pc_startTime']);
+        $startTime = date('H:i:s', $startUnixTime);
+
+        // DateInterval _needs_ a valid constructor, so set it to 0s then update.
+        $endTimeInterval = new \DateInterval('PT0S');
+        $endTimeInterval->s = $data['pc_duration'];
+
+        $endTime = (new \DateTime())->setTimestamp($startUnixTime)->add($endTimeInterval);
+        $uuid = (new UuidRegistry())->createUuid();
+
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
 
         $sql  = " INSERT INTO openemr_postcalendar_events SET";
+        $sql .= "     uuid=?,";
         $sql .= "     pc_pid=?,";
         $sql .= "     pc_catid=?,";
         $sql .= "     pc_title=?,";
+        $sql .= "     pc_time=NOW(),";
         $sql .= "     pc_duration=?,";
         $sql .= "     pc_hometext=?,";
         $sql .= "     pc_eventDate=?,";
@@ -120,14 +436,18 @@ class AppointmentService
         $sql .= "     pc_endTime=?,";
         $sql .= "     pc_facility=?,";
         $sql .= "     pc_billing_location=?,";
-        $sql .= "     pc_informant=1,";
+        $sql .= "     pc_informant=?,";
         $sql .= "     pc_eventstatus=1,";
-        $sql .= "     pc_sharing=1";
+        $sql .= "     pc_sharing=1,";
+        $sql .= "     pc_aid=?,";
+        $sql .= "     pc_website=?";
 
         $results = sqlInsert(
             $sql,
-            array(
-                $pid,
+            [
+                $uuid,
+                // the plain number, which the text lookups of pc_pid match ("05" from a URL is stored as "5")
+                self::calendarPidOrNull($pid),
                 $data["pc_catid"],
                 $data["pc_title"],
                 $data["pc_duration"],
@@ -135,17 +455,357 @@ class AppointmentService
                 $data["pc_eventDate"],
                 $data['pc_apptstatus'],
                 $startTime,
-                $endTime,
+                $endTime->format('H:i:s'),
                 $data["pc_facility"],
-                $data["pc_billing_location"]
-            )
+                $data["pc_billing_location"],
+                $session->get('authUserID') ?? 1, // Grab authenticated user ID or default to 1
+                $data["pc_aid"] ?? null,
+                $data["pc_website"] ?? null,
+            ]
         );
 
         return $results;
     }
 
-    public function delete($eid)
+    /**
+     * @param $eid
+     * @param $recurr_affect
+     * @param $event_selected_date
+     * @return void
+     */
+    public function deleteAppointment($eid, $recurr_affect, $event_selected_date)
     {
-        return sqlStatement("DELETE FROM openemr_postcalendar_events WHERE pc_eid = ?", $eid);
+        // =======================================
+        //  multi providers event
+        // =======================================
+        if (OEGlobalsBag::getInstance()->getBoolean('select_multi_providers')) {
+            // what is multiple key around this $eid?
+            $row = sqlQuery("SELECT pc_multiple FROM openemr_postcalendar_events WHERE pc_eid = ?", [$eid]);
+
+            // obtain current list of providers regarding the multiple key
+            $providers_current = [];
+            $up = sqlStatement("SELECT pc_aid FROM openemr_postcalendar_events WHERE pc_multiple=?", [$row['pc_multiple']]);
+            while ($current = sqlFetchArray($up)) {
+                $providers_current[] = $current['pc_aid'];
+            }
+
+            // establish a WHERE clause
+            if ($row['pc_multiple']) {
+                $whereClause = "pc_multiple = ?";
+                $whereBind = $row['pc_multiple'];
+            } else {
+                $whereClause = "pc_eid = ?";
+                $whereBind = $eid;
+            }
+
+            if ($recurr_affect == 'current') {
+                // update all existing event records to exclude the current date
+                foreach ($providers_current as $provider) {
+                    // update the provider's original event
+                    // get the original event's repeat specs
+                    $origEvent = sqlQuery("SELECT pc_recurrspec FROM openemr_postcalendar_events " .
+                        " WHERE pc_aid <=> ? AND pc_multiple=?", [$provider,$row['pc_multiple']]);
+                    $oldRecurrspec = unserialize($origEvent['pc_recurrspec'], ['allowed_classes' => false]);
+                    $selected_date = date("Y-m-d", strtotime((string) $event_selected_date));
+                    if ($oldRecurrspec['exdate'] != "") {
+                        $oldRecurrspec['exdate'] .= "," . $selected_date;
+                    } else {
+                        $oldRecurrspec['exdate'] .= $selected_date;
+                    }
+
+                    // mod original event recur specs to exclude this date
+                    sqlStatement("UPDATE openemr_postcalendar_events SET " .
+                        " pc_recurrspec = ? " .
+                        " WHERE " . $whereClause, [serialize($oldRecurrspec), $whereBind]);
+                }
+            } elseif ($recurr_affect == 'future') {
+                // update all existing event records to stop recurring on this date-1
+                $selected_date = date("Y-m-d", (strtotime((string) $event_selected_date) - 24 * 60 * 60));
+                foreach ($providers_current as $provider) {
+                    // In case of a change in the middle of the event
+                    if (strcmp((string) $_POST['event_start_date'], (string) $event_selected_date) != 0) {
+                        // update the provider's original event
+                        sqlStatement("UPDATE openemr_postcalendar_events SET " .
+                            " pc_enddate = ? " .
+                            " WHERE " . $whereClause, [$selected_date, $whereBind]);
+                    } else { // In case of a change in the event head
+                        // as we need to notify events that we are deleting this record we need to grab all of the pc_eid
+                        // so we can process the events
+                        $pc_eids = QueryUtils::fetchTableColumn(
+                            "SELECT pc_eid FROM openemr_postcalendar_events WHERE " . $whereClause,
+                            'pc_eid',
+                            [$whereBind]
+                        );
+                        foreach ($pc_eids as $pc_eid) {
+                            $this->deleteAppointmentRecord($pc_eid);
+                        }
+                    }
+                }
+            } else {
+                // really delete the event from the database
+                // as we need to notify events that we are deleting this record we need to grab all of the pc_eid
+                // so we can process the events
+                $pc_eids = QueryUtils::fetchTableColumn(
+                    "SELECT pc_eid FROM openemr_postcalendar_events WHERE " . $whereClause,
+                    'pc_eid',
+                    [$whereBind]
+                );
+                foreach ($pc_eids as $pc_eid) {
+                    $this->deleteAppointmentRecord($pc_eid);
+                }
+            }
+        } else { //  single provider event
+            if ($recurr_affect == 'current') {
+                // mod original event recur specs to exclude this date
+                // get the original event's repeat specs
+                $origEvent = sqlQuery("SELECT pc_recurrspec FROM openemr_postcalendar_events WHERE pc_eid = ?", [$eid]);
+                $oldRecurrspec = unserialize($origEvent['pc_recurrspec'], ['allowed_classes' => false]);
+                $selected_date = date("Ymd", strtotime((string) $_POST['selected_date']));
+                if ($oldRecurrspec['exdate'] != "") {
+                    $oldRecurrspec['exdate'] .= "," . $selected_date;
+                } else {
+                    $oldRecurrspec['exdate'] .= $selected_date;
+                }
+
+                sqlStatement("UPDATE openemr_postcalendar_events SET " .
+                    " pc_recurrspec = ? " .
+                    " WHERE pc_eid = ?", [serialize($oldRecurrspec),$eid]);
+            } elseif ($recurr_affect == 'future') {
+                // mod original event to stop recurring on this date-1
+                $selected_date = date("Ymd", (strtotime((string) $_POST['selected_date']) - 24 * 60 * 60));
+                sqlStatement("UPDATE openemr_postcalendar_events SET " .
+                    " pc_enddate = ? " .
+                    " WHERE pc_eid = ?", [$selected_date,$eid]);
+            } else {
+                // fully delete the event from the database
+                $this->deleteAppointmentRecord($eid);
+            }
+        }
+    }
+
+    public function deleteAppointmentRecord($eid, ?int $pid = null): bool
+    {
+        $servicePreDeleteEvent = new ServiceDeleteEvent($this, $eid);
+        $this->getEventDispatcher()->dispatch($servicePreDeleteEvent, ServiceDeleteEvent::EVENT_PRE_DELETE);
+        if ($pid !== null) {
+            QueryUtils::sqlStatementThrowException(
+                "DELETE FROM openemr_postcalendar_events WHERE pc_eid = ? AND pc_pid = ?",
+                [$eid, $pid]
+            );
+        } else {
+            QueryUtils::sqlStatementThrowException("DELETE FROM openemr_postcalendar_events WHERE pc_eid = ?", $eid);
+        }
+        $affected = QueryUtils::affectedRows();
+        $deleted = is_int($affected) && $affected > 0;
+        if ($deleted) {
+            $servicePostDeleteEvent = new ServiceDeleteEvent($this, $eid);
+            $this->getEventDispatcher()->dispatch($servicePostDeleteEvent, ServiceDeleteEvent::EVENT_POST_DELETE);
+        }
+        return $deleted;
+    }
+
+    /**
+     * Returns a list of categories
+     * @return array
+     */
+    public function getCalendarCategories()
+    {
+        $sql = "SELECT pc_catid, pc_constant_id, pc_catname, pc_cattype,aco_spec, pc_last_updated FROM openemr_postcalendar_categories "
+        . " WHERE pc_active = 1 ORDER BY pc_seq";
+        return QueryUtils::fetchRecords($sql);
+    }
+
+    /**
+     * check to see if a status code exist as a check in
+     * @param $option
+     * @return bool
+     */
+    public static function isCheckInStatus($option): bool
+    {
+        $row = sqlQuery("SELECT toggle_setting_1 FROM list_options WHERE " .
+            "list_id = 'apptstat' AND option_id = ? AND activity = 1", [$option]);
+        if (empty($row['toggle_setting_1'])) {
+            return(false);
+        }
+
+        return(true);
+    }
+
+    /**
+     * check to see if a status code exist as a check out
+     * @param $option
+     * @return bool
+     */
+    public static function isCheckOutStatus($option): bool
+    {
+        $row = sqlQuery("SELECT toggle_setting_2 FROM list_options WHERE " .
+            "list_id = 'apptstat' AND option_id = ? AND activity = 1", [$option]);
+        if (empty($row['toggle_setting_2'])) {
+            return(false);
+        }
+
+        return(true);
+    }
+
+    public function isPendingStatus($option): bool
+    {
+        // TODO: @adunsulag is there ANY way to track this in the database of what statii are pending?
+        if ($option == '^') {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns a list of appointment statuses (also used with encounters).
+     */
+    public function getAppointmentStatuses(): array
+    {
+        $listService = new ListService();
+        $options = $listService->getOptionsByListName('apptstat', ['activity' => 1]);
+        return $options;
+    }
+
+    /**
+     * Checks to see if the passed in status is a valid appointment status for calendar appointments.
+     * @param $status_option_id The status to check if its a valid appointment status
+     * @return bool True if its valid, false otherwise
+     */
+    public function isValidAppointmentStatus($status_option_id): bool
+    {
+        $listService = new ListService();
+        $option = $listService->getListOption('apptstat', $status_option_id);
+        if (!empty($option)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Updates the status for an appointment.  TODO: should be refactored at some point to update the entire record
+     * @param $eid number The id of the appointment event
+     * @param $status string The status the appointment event should be set to.
+     * @param $user number The user performing the update
+     * @param $encounter number The encounter of the appointment
+     */
+    public function updateAppointmentStatus($eid, $status, $user, $encounter = '')
+    {
+        $appt = $this->getAppointment($eid);
+        if (empty($appt)) {
+            throw new \InvalidArgumentException("Appointment does not exist for eid " . $eid);
+        } else {
+            // TODO: Not sure why getAppointment returns an array of records instead of a single record
+            $appt = $appt[0];
+        }
+
+        $sql = "UPDATE " . self::TABLE_NAME . " SET pc_apptstatus = ? WHERE pc_eid = ? ";
+        $binds = [$status, $eid];
+
+        if (!empty($appt['pid'])) {
+            $trackerService = new PatientTrackerService();
+            $trackerService->manage_tracker_status($appt['pc_eventDate'], $appt['pc_startTime'], $eid, $appt['pid'], $user, $status, $appt['pc_room'], $encounter);
+        } else {
+            $this->getLogger()->error("AppointmentService->updateAppointmentStatus() failed to update manage_tracker_status"
+            . " as patient pid was empty", ['pc_eid' => $eid, 'status' => $status, 'user' => $user, 'encounter' => $encounter]);
+        }
+        return QueryUtils::sqlStatementThrowException($sql, $binds);
+    }
+
+    /**
+     * @param $eid
+     * @param $pid
+     * @return array The most recent encounter for a given appointment
+     */
+    public function getEncounterForAppointment($pc_eid, $pid)
+    {
+        $appointment = $this->getAppointment($pc_eid)[0];
+        $date = $appointment['pc_eventDate'];
+        // we grab the most recent encounter for today's date for the given patient
+        $encounterService = $this->getEncounterService();
+        $dateField = new DateSearchField('date', ['eq' . $date], DateSearchField::DATE_TYPE_DATE);
+        $pidField = new TokenSearchField('pid', [new TokenSearchValue($pid)]);
+        // returns the most recent encounter for the given appointment..
+        // TODO: @adunsulag we should look at in the future of making an actual join table between encounters and appointments...
+        // this fuzzy match by date seems like it will have major problems for both inpatient settings as well as any kind
+        // of emergency care (patient sees doctor, patient does telehealth visit during the night due to crisis situation).
+        $encounterResult = $encounterService->search(['date' => $dateField, 'pid' => $pidField], true, null, ['limit' => 1]);
+        if ($encounterResult->hasData()) {
+            $result = $encounterResult->getData();
+            return array_pop($result);
+        }
+        return null;
+    }
+
+    public function createEncounterForAppointment($eid)
+    {
+        $appointment = $this->getAppointment($eid)[0];
+        $patientService = $this->getPatientService();
+        $patientUuid = UuidRegistry::uuidToString($patientService->getUuid($appointment['pid']));
+
+        $userService = new UserService();
+        $user = $userService->getUser($appointment['pc_aid']);
+        if ($user === false) {
+            throw new \RuntimeException("User not found for appointment");
+        }
+        $authGroup = $userService->getAuthGroupForUser($user['username']);
+
+        $pos_code = QueryUtils::fetchSingleValue(
+            "SELECT pos_code FROM facility WHERE id = ?",
+            'pos_code',
+            [$appointment['pc_facility']]
+        );
+
+        $visit_reason = $appointment['pc_hometext'] ?? xl('Please indicate visit reason');
+        if (OEGlobalsBag::getInstance()->getBoolean('auto_create_prevent_reason')) {
+            $visit_reason = 'Please indicate visit reason';
+        }
+        $data = [
+            'pc_catid' => $appointment['pc_catid']
+            // TODO: where would we get this information if it wasn't defaulted to ambulatory?  Should this be a globals setting?
+            // this is imitating the work from encounter_events.inc.php::todaysEncounterCheck
+            ,'class_code' => EncounterService::DEFAULT_CLASS_CODE
+            ,'puuid' => $patientUuid
+            ,'pid' => $appointment['pid']
+            ,'provider_id' => $user['id']
+            ,'reason' => $visit_reason
+            ,'facility_id' => $appointment['pc_facility']
+            ,'billing_facility' => $appointment['pc_billing_location']
+            ,'pos_code' => $pos_code
+            ,'user' => $user['username']
+            ,'group' => $authGroup
+        ];
+
+        $encounterService = $this->getEncounterService();
+        $result = $encounterService->insertEncounter($patientUuid, $data);
+        if ($result->hasData()) {
+            $result = $result->getData();
+            return $result[0]['encounter'];
+        }
+        return null;
+    }
+
+    /**
+     * Returns the calendar category record from a supplied category id
+     * @return array
+     */
+    public function getOneCalendarCategory($cat_id)
+    {
+        $sql = "SELECT * FROM openemr_postcalendar_categories WHERE pc_catid = ?";
+        return QueryUtils::fetchRecords($sql, [$cat_id]);
+    }
+
+    public function searchCalendarCategories(array $oeSearchParameters): ProcessingResult
+    {
+        $sql = "SELECT * FROM openemr_postcalendar_categories ";
+        $whereClause = FhirSearchWhereClauseBuilder::build($oeSearchParameters, true);
+        $sql .= $whereClause->getFragment();
+        $sqlBindArray = $whereClause->getBoundValues();
+        $records = QueryUtils::fetchRecords($sql, $sqlBindArray);
+        $processingResult = new ProcessingResult();
+        if (!empty($records)) {
+            $processingResult->setData($records);
+        }
+        // TODO: look at handling offset and limit here
+        return $processingResult;
     }
 }

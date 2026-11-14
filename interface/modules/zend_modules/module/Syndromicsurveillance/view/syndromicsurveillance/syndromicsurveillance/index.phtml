@@ -1,3 +1,4 @@
+
 <?php
 /**
  * interface/modules/zend_modules/module/Syndromicsurveillance/view/syndromicsurveillance/syndromicsurveillance/index.phtml
@@ -49,6 +50,9 @@ $provider   = $this->provider;
                             <input readonly maxlength="10" style="width: 42%" type="text" name="form_date_to" id="form_date_to" class="dateClass_syndrome"/>
                             <script>
                                 $(function () {
+                                    <?php $display_format = \Application\Model\ApplicationTable::datePickerFormat($GLOBALS['date_display_format']); ?>
+                                    $( "#form_date_from" ).datepicker("option", "dateFormat", "<?php echo $display_format;?>");
+                                    $( "#form_date_to" ).datepicker("option", "dateFormat", "<?php echo $display_format;?>");
                                     $( "#form_date_from" ).datepicker("setDate", '<?php echo $this->commonplugin->date_format($this->form_data['form_date_from'], $GLOBALS['date_display_format'], 'yyyy-mm-dd');?>' );
                                     $( "#form_date_to" ).datepicker("setDate", '<?php echo $this->commonplugin->date_format($this->form_data['form_date_to'], $GLOBALS['date_display_format'], 'yyyy-mm-dd');?>');
                                 });
@@ -171,7 +175,7 @@ $provider   = $this->provider;
     <input type="hidden" name="form_current_page" id="form_current_page" value="<?php echo $this->escapeHtml($this->form_data['current_page']);?>" />
     <input type="hidden" name="form_total_pages" id="form_total_pages" value="<?php echo $this->escapeHtml($this->form_data['total_pages']);?>" />
     <input type="hidden" name="form_count" id="form_count" value="<?php echo $this->escapeHtml($this->form_data['res_count']);?>" />
-    <input type="hidden" name="form_sl_no" id="form_sl_no" value="<?php echo $this->escapeHtml($slno);?>" />
+    <input type="hidden" name="form_sl_no" id="form_sl_no" value="<?php echo $this->escapeHtml($slno ?? '');?>" />
     <input type="hidden" name="form_new_search" id="form_new_search" value="" />
 </div>
 </form>

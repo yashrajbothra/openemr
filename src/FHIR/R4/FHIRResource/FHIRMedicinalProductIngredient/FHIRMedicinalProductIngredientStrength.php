@@ -312,7 +312,7 @@ class FHIRMedicinalProductIngredientStrength extends FHIRBackboneElement impleme
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -320,7 +320,7 @@ class FHIRMedicinalProductIngredientStrength extends FHIRBackboneElement impleme
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->presentation)) {
@@ -354,15 +354,13 @@ class FHIRMedicinalProductIngredientStrength extends FHIRBackboneElement impleme
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<MedicinalProductIngredientStrength xmlns="http://hl7.org/fhir"></MedicinalProductIngredientStrength>');
-        }
+        $sxe ??= new \SimpleXMLElement('<MedicinalProductIngredientStrength xmlns="http://hl7.org/fhir"></MedicinalProductIngredientStrength>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->presentation)) {
             $this->presentation->xmlSerialize(true, $sxe->addChild('presentation'));

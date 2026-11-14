@@ -243,7 +243,7 @@ class FHIRQuantity extends FHIRElement implements \JsonSerializable
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return (string)$this->getValue();
     }
@@ -251,7 +251,7 @@ class FHIRQuantity extends FHIRElement implements \JsonSerializable
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->value)) {
@@ -273,15 +273,13 @@ class FHIRQuantity extends FHIRElement implements \JsonSerializable
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<Quantity xmlns="http://hl7.org/fhir"></Quantity>');
-        }
+        $sxe ??= new \SimpleXMLElement('<Quantity xmlns="http://hl7.org/fhir"></Quantity>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->value)) {
             $this->value->xmlSerialize(true, $sxe->addChild('value'));

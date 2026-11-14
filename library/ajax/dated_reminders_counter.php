@@ -2,6 +2,7 @@
 
 /**
  * Returns a count of due messages for current user.
+ *  In 2021, added the timeout mechanism to this script.
  *
  * @package   OpenEMR
  * @link      https://www.open-emr.org
@@ -9,33 +10,51 @@
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2012 tajemo.co.za <https://www.tajemo.co.za/>
- * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2018-2021 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 require_once(__DIR__ . "/../../interface/globals.php");
-require_once("$srcdir/dated_reminder_functions.php");
-require_once("$srcdir/pnotes.inc");
 
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionTracker;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 
-if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-    CsrfUtils::csrfNotVerified();
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+
+CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
+
+// ensure timeout has not happened
+if (SessionTracker::isSessionExpired()) {
+    echo json_encode(['timeoutMessage' => 'timeout']);
+    exit;
 }
 
-$portal_count = array();
+$total_counts = [];
+$other_count = [];
 // if portal is enabled get various alerts
 if (!empty($_POST['isPortal'])) {
-    $portal_count = GetPortalAlertCounts();
+    $total_counts = GetPortalAlertCounts();
 }
 
+if (!empty($_POST['isServicesOther'])) {
+    $other_count = GetServiceOtherCounts();
+    $total_counts = array_merge($total_counts, $other_count);
+}
 //Collect number of due reminders
-$dueReminders = GetDueReminderCount(5, strtotime(date('Y/m/d')));
-
+$dueReminders = GetDueReminderCount(5, (new DateTimeImmutable('today'))->getTimestamp());
 //Collect number of active messages
-$activeMessages = getPnotesByUser("1", "no", $_SESSION['authUser'], true);
-
+$activeMessages = getPnotesByUser("1", "no", $session->get('authUser'), true);
+// Below for Message Button count display.
 $totalNumber = $dueReminders + $activeMessages;
-$portal_count['reminderText'] = ($totalNumber > 0 ? '(' . text((int)$totalNumber) . ')' : '');
+$total_counts['reminderText'] = ($totalNumber > 0 ? text((string)$totalNumber) : '');
 
-echo json_encode($portal_count);
+// Background repeater requests include skip_timeout_reset=1, so this read does
+// not extend the session. An unavailable tracker value is deliberately omitted
+// rather than being interpreted as an expired session.
+$sessionSecondsRemaining = SessionTracker::getSessionSecondsRemaining();
+if ($sessionSecondsRemaining !== null) {
+    $total_counts['sessionSecondsRemaining'] = $sessionSecondsRemaining;
+}
+
+echo json_encode($total_counts);

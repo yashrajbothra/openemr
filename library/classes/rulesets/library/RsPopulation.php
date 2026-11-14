@@ -13,13 +13,16 @@ require_once("RsPatient.php");
  */
 class RsPopulation implements Countable, Iterator, ArrayAccess
 {
-    protected $_patients = array();
+    private $position = 0;
+    protected $_patients = [];
 
     /*
      * initialize the patient population
      */
     public function __construct(array $patientIdArray)
     {
+        $this->position = 0;
+
         foreach ($patientIdArray as $patientId) {
             $this->_patients[] = new RsPatient($patientId);
         }
@@ -28,7 +31,7 @@ class RsPopulation implements Countable, Iterator, ArrayAccess
     /*
      * Countable Interface
      */
-    public function count()
+    public function count(): int
     {
         return count($this->_patients);
     }
@@ -36,36 +39,40 @@ class RsPopulation implements Countable, Iterator, ArrayAccess
     /*
      * Iterator Interface
      */
-    public function rewind()
+    public function rewind(): void
     {
         reset($this->_patients);
+        $this->position = 0;
     }
 
-    public function current()
+    /**
+     * @return RsPatient
+     */
+    public function current(): mixed
     {
-        return current($this->_patients);
+        return $this->_patients[$this->position];
     }
 
-    public function key()
+    public function key(): mixed
     {
-        return key($this->_patients);
+        return $this->position;
     }
 
-    public function next()
+    public function next(): void
     {
-        return next($this->_patients);
+        ++$this->position;
     }
 
-    public function valid()
+    public function valid(): bool
     {
-        return $this->current() !== false;
+        return isset($this->_patients[$this->position]);
     }
 
 
     /*
      * ArrayAccess Interface
      */
-    public function offsetSet($offset, $value)
+    public function offsetSet($offset, $value): void
     {
         if ($value instanceof CqmPatient) {
             if ($offset == "") {
@@ -78,18 +85,18 @@ class RsPopulation implements Countable, Iterator, ArrayAccess
         }
     }
 
-    public function offsetExists($offset)
+    public function offsetExists($offset): bool
     {
         return isset($this->_patients[$offset]);
     }
 
-    public function offsetUnset($offset)
+    public function offsetUnset($offset): void
     {
         unset($this->_patients[$offset]);
     }
 
-    public function offsetGet($offset)
+    public function offsetGet($offset): mixed
     {
-        return isset($this->_patients[$offset]) ? $this->container[$offset] : null;
+        return $this->_patients[$offset] ?? null;
     }
 }

@@ -154,12 +154,12 @@ foreach my $var (@filenames) {
  my $smartyXL = 0; #flag
 
 
- if ($fileString =~ /xl[astj]?\s*\(/i) {
+ if ($fileString =~ /xl[ajtx]?\s*\(/i) {
   # line contains a traditional xl(function)
   $traditionalXL = 1;
  }
 
- if ($fileString =~ /\{\s*xl[atj]?\s*t\s*=\s*/i) {
+ if ($fileString =~ /\{\s*xl[ajtx]?\s*t\s*=\s*/i) {
   # line contains a smarty xl function
   $smartyXL = 1;
  }
@@ -172,10 +172,10 @@ foreach my $var (@filenames) {
  # break apart each xl function statement if exist
  my @xlInstances;
  if ($smartyXL) {
-  @xlInstances = split(/\{\s*xl[atj]?\s*t\s*=\s*/i, $fileString);
+  @xlInstances = split(/\{\s*xl[ajtx]?\s*t\s*=\s*/i, $fileString);
  }
  elsif ($traditionalXL) {
-  @xlInstances = split(/xl[astj]?\s*\(+/i, $fileString);
+  @xlInstances = split(/xl[ajtx]?\s*\(+/i, $fileString);
  }
  else {
   # no xl functions to parse on this page
@@ -213,6 +213,14 @@ foreach my $var (@filenames) {
    # if require.
    if ($de eq "\$") {
     print LOGFILE "MESSAGE:  Special case character \$ skipped\n";
+    print LOGFILE $editvar2."\n";
+    next;
+   }
+
+   # skip \. Another rare usage of xl() function.
+   #  Can put in manually if require.
+   if ($de eq "\\") {
+    print LOGFILE "MESSAGE:  Special case character \\ skipped\n";
     print LOGFILE $editvar2."\n";
     next;
    }

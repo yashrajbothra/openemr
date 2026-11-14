@@ -5,6 +5,7 @@
  *
  * Copyright (C) 2013-2016 Rod Roark <rod@sunsetsystems.com>
  * Copyright (C) 2017-2020 Jerry Padgett <sjpadgett@gmail.com>
+ * Copyright (C) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  *
  * LICENSE: This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,26 +21,28 @@
  * @package OpenEMR
  * @author  Rod Roark <rod@sunsetsystems.com>
  * @author  Jerry Padgett <sjpadgett@gmail.com>
+ * @author  Michael A. Smith <michael@opencoreemr.com>
  * 07-2015: Ensoftek: Edited for MU2 170.314(b)(5)(A)
  */
 
-require_once($GLOBALS['srcdir'] . "/forms.inc");
-require_once($GLOBALS['srcdir'] . "/pnotes.inc");
-
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\EventAuditLogger;
-use phpseclib\Net\SFTP;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use phpseclib3\Net\SFTP;
 
-$rhl7_return = array();
+$rhl7_return = [];
 
-function parseZPS($segment)
+function parseZPS($segment): string
 {
     $composites = $segment; //explode('|', $segment);
 
     // Try to parse composites
     foreach ($composites as $key => $composite) {
         // If it is a composite ...
-        if (!(strpos($composite, '^') === false)) {
-            $composites[$key] = explode('^', $composite);
+        if (str_contains((string) $composite, '^')) {
+            $composites[$key] = explode('^', (string) $composite);
         }
     }
 
@@ -59,7 +62,8 @@ function parseZPS($segment)
         $zps[$pos]['lab_clia']
     ] = $composites;
     $labdir = $zps[0]['lab_director'][0] . " " . $zps[0]['lab_director'][1] . ", " . $zps[0]['lab_director'][2];
-    $address = $zps[0]['lab_address'][0] . "\n" . $zps[0]['lab_address'][2] . " " . $zps[0]['lab_address'][3] . " " . $zps[0]['lab_address'][4];
+    $address = $zps[0]['lab_address'][0] . "\n" . $zps[0]['lab_address'][2] . " " . $zps[0]['lab_address'][3] .
+        " " . $zps[0]['lab_address'][4];
     $r = $zps[0]['lab_name'] . "\n" . $address . "\n" . $zps[0]['lab_phone'] . "\n" . $labdir . "\n";
     return $r;
 }
@@ -70,7 +74,14 @@ function rhl7LogMsg($msg, $fatal = true)
     if ($fatal) {
         $rhl7_return['mssgs'][] = '*' . $msg;
         $rhl7_return['fatal'] = true;
-        EventAuditLogger::instance()->newEvent("lab-results-error", $_SESSION['authUser'], $_SESSION['authProvider'], 0, $msg);
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+        EventAuditLogger::getInstance()->newEvent(
+            "lab-results-error",
+            $session->get('authUser'),
+            $session->get('authProvider'),
+            0,
+            $msg
+        );
     } else {
         $rhl7_return['mssgs'][] = '>' . $msg;
     }
@@ -89,7 +100,7 @@ function rhl7InsertRow(&$arr, $tablename)
     // echo " -->\n";
 
     $query = "INSERT INTO $tablename SET";
-    $binds = array();
+    $binds = [];
     $sep = '';
     foreach ($arr as $key => $value) {
         $query .= "$sep `$key` = ?";
@@ -97,12 +108,12 @@ function rhl7InsertRow(&$arr, $tablename)
         $binds[] = $value;
     }
 
-    $arr = array();
+    $arr = [];
     return sqlInsert($query, $binds);
 }
 
 // Write all of the accumulated reports and their results.
-function rhl7FlushMain(&$amain, $commentdelim = "\n")
+function rhl7FlushMain(&$amain, $commentdelim = "\n"): void
 {
     foreach ($amain as $arr) {
         if (!isset($amain[0]['rep']['procedure_order_id'])) {
@@ -120,10 +131,10 @@ function rhl7FlushMain(&$amain, $commentdelim = "\n")
             unset($ares['obxkey']);
             // If TX result is not over 10 characters, move it from comments to result field.
             if ($ares['result'] === '' && $ares['result_data_type'] == 'L') {
-                $i = strpos($ares['comments'], $commentdelim);
+                $i = strpos((string) $ares['comments'], (string) $commentdelim);
                 if ($i && $i <= 10) {
-                    $ares['result'] = substr($ares['comments'], 0, $i);
-                    $ares['comments'] = substr($ares['comments'], $i);
+                    $ares['result'] = substr((string) $ares['comments'], 0, $i);
+                    $ares['comments'] = substr((string) $ares['comments'], $i);
                 }
             }
 
@@ -134,14 +145,14 @@ function rhl7FlushMain(&$amain, $commentdelim = "\n")
 
 // Write the MDM document if appropriate.
 //
-function rhl7FlushMDM($patient_id, $mdm_docname, $mdm_datetime, $mdm_text, $mdm_category_id, $provider)
+function rhl7FlushMDM($patient_id, $mdm_docname, $mdm_datetime, $mdm_text, $mdm_category_id, $provider): string
 {
     if ($patient_id) {
         if (!empty($mdm_docname)) {
             $mdm_docname .= '_';
         }
 
-        $mdm_docname .= preg_replace('/[^0-9]/', '', $mdm_datetime);
+        $mdm_docname .= preg_replace('/[^0-9]/', '', (string) $mdm_datetime);
         $filename = $mdm_docname . '.txt';
         $d = new Document();
         $rc = $d->createDocument($patient_id, $mdm_category_id, $filename, 'text/plain', $mdm_text);
@@ -169,23 +180,19 @@ function rhl7Text($s, $allow_newlines = false)
     $s = str_replace('\\T\\', '&', $s);
     $s = str_replace('\\X0d\\', "\r", $s);
     $s = str_replace('\\E\\', '\\', $s);
-    if ($allow_newlines) {
-        $s = str_replace('\\.br\\', "\n", $s);
-    } else {
-        $s = str_replace('\\.br\\', '~', $s);
-    }
+    $s = $allow_newlines ? str_replace('\\.br\\', "\n", $s) : str_replace('\\.br\\', '~', $s);
 
     return $s;
 }
 
-function rhl7DateTime($s)
+function rhl7DateTime($s): string
 {
     // Remove UTC offset if present.
-    if (preg_match('/^([0-9.]+)[+-]/', $s, $tmp)) {
+    if (preg_match('/^([0-9.]+)[+-]/', (string) $s, $tmp)) {
         $s = $tmp[1];
     }
 
-    $s = preg_replace('/[^0-9]/', '', $s);
+    $s = preg_replace('/[^0-9]/', '', (string) $s);
     if (empty($s)) {
         return '0000-00-00 00:00:00';
     }
@@ -203,17 +210,17 @@ function rhl7DateTime($s)
     return $ret;
 }
 
-function rhl7DateTimeZone($s)
+function rhl7DateTimeZone($s): string
 {
     // UTC offset if present always begins with "+" or "-".
-    if (preg_match('/^[0-9.]+([+-].*)$/', $s, $tmp)) {
+    if (preg_match('/^[0-9.]+([+-].*)$/', (string) $s, $tmp)) {
         return trim($tmp[1]);
     }
 
     return '';
 }
 
-function rhl7Date($s)
+function rhl7Date($s): string
 {
     return substr(rhl7DateTime($s), 0, 10);
 }
@@ -281,7 +288,7 @@ function rhl7ReportStatus($s)
  * @param string $fileext The lower case extension.
  * @return string            MIME type.
  */
-function rhl7MimeType($fileext)
+function rhl7MimeType($fileext): string
 {
     if ($fileext == 'pdf') {
         return 'application/pdf';
@@ -335,14 +342,14 @@ function rhl7DecodeData($enctype, &$src)
     return false;
 }
 
-function rhl7CWE($s, $componentdelimiter)
+function rhl7CWE($s, $componentdelimiter): string
 {
     $out = '';
     if ($s === '') {
         return $out;
     }
 
-    $arr = explode($componentdelimiter, $s);
+    $arr = explode($componentdelimiter, (string) $s);
     if (!empty($arr[8])) {
         $out = $arr[8];
     } else {
@@ -360,7 +367,7 @@ function rhl7CWE($s, $componentdelimiter)
  *
  * @param string $specimen Encoding type from SPM.
  */
-function rhl7UpdateReportWithSpecimen(&$amain, $specimen, $d2)
+function rhl7UpdateReportWithSpecimen(&$amain, $specimen, $d2): void
 {
     $specimen_display = '';
 
@@ -407,7 +414,7 @@ function getPerformingOrganizationDetails($obx23, $obx24, $obx25, $componentdeli
         // OBX25 Example: "2343242^Knowsalot^Phil^J.^III^Dr.^^^NIST-AA-1&2.16.840.1.113883.3.72.5.30.1&ISO^L^^^DNSPM"
         //             Dr. Phil Knowsalot J. III
         if (!empty($obx25)) {
-            $obx25_segs = explode($componentdelimiter, $obx25);
+            $obx25_segs = explode($componentdelimiter, (string) $obx25);
             $s .= "$obx25_segs[5] $obx25_segs[2] $obx25_segs[1] $obx25_segs[3] $obx25_segs[4]" . $commentdelim;
         }
 
@@ -416,8 +423,8 @@ function getPerformingOrganizationDetails($obx23, $obx24, $obx25, $componentdeli
         if (!empty($obx24)) {
             $obx24 = str_replace('~', ' ', $obx24);
             $obx24_segs = explode($componentdelimiter, $obx24);
-            //$s .= "$obx24_segs[0] $obx24_segs[1], $obx24_segs[2], $obx24_segs[3], $obx24_segs[4], $obx24_segs[5]" . $commentdelim;
-            $s .= "$obx24_segs[0]$commentdelim$obx24_segs[1]$commentdelim$obx24_segs[2], $obx24_segs[3] $obx24_segs[4]$commentdelim$obx24_segs[5]$commentdelim";
+            $s .= "$obx24_segs[0]$commentdelim$obx24_segs[1]$commentdelim$obx24_segs[2], " .
+                "$obx24_segs[3] $obx24_segs[4]$commentdelim$obx24_segs[5]$commentdelim";
             if (!empty($obx24_segs[6])) {
                 $s .= "$obx24_segs[6]$commentdelim";
             }
@@ -437,13 +444,13 @@ function getPerformingOrganizationDetails($obx23, $obx24, $obx25, $componentdeli
  *   0  No patient is close to a match.
  *  -1  It's not clear if there is a match.
  */
-function match_patient($ptarr)
+function match_patient($ptarr): int
 {
     $in_ss = str_replace('-', '', $ptarr['ss']);
     $in_fname = $ptarr['fname'];
     $in_lname = $ptarr['lname'];
     $in_dob = $ptarr['DOB'];
-    $in_sex = strtoupper($ptarr['sex']) == 'M' ? 'Male' : 'Female'; // AND sex IS NOT NULL AND sex = ?
+    $in_sex = strtoupper((string) $ptarr['sex']) == 'M' ? 'Male' : 'Female'; // AND sex IS NOT NULL AND sex = ?
 
     $patient_id = 0;
     $res = sqlStatement(
@@ -457,7 +464,7 @@ function match_patient($ptarr)
         "lname IS NOT NULL AND lname != '' AND lname = ? OR " .
         "DOB IS NOT NULL AND DOB = ?)) " .
         "ORDER BY ss DESC, pid DESC LIMIT 2",
-        array($in_ss, $in_fname, $in_lname, $in_dob, $in_ss, $in_fname, $in_lname, $in_dob)
+        [$in_ss, $in_fname, $in_lname, $in_dob, $in_ss, $in_fname, $in_lname, $in_dob]
     );
     if (sqlNumRows($res) > 1) {
         // Multiple matches, so ambiguous.
@@ -475,7 +482,7 @@ function match_patient($ptarr)
             "lname IS NOT NULL AND lname != '' AND lname = ?) OR " .
             "(DOB IS NOT NULL AND DOB = ?) " .
             "LIMIT 1",
-            array($in_ss, $in_fname, $in_lname, $in_dob)
+            [$in_ss, $in_fname, $in_lname, $in_dob]
         );
         if (!empty($tmp['pid'])) {
             $patient_id = -1;
@@ -489,17 +496,16 @@ function match_patient($ptarr)
  * Look for a lab matching the given XCN field from some segment.
  *
  * @param array $seg MSH seg identifying a provider.
- * @return mixed        TRUE, or FALSE if no match.
  */
-function match_lab(&$hl7, $send_acct, $lab_acct = '', $lab_app = '', $lab_npi = '')
+function match_lab(&$hl7, $send_acct, $lab_acct = '', $lab_app = '', $lab_npi = ''): bool
 {
     if (empty($hl7)) {
         return false;
     }
     $d0 = "\r";
-    $d1 = substr($hl7, 3, 1); // typically |
+    $d1 = substr((string) $hl7, 3, 1); // typically |
 
-    $segs = explode($d0, $hl7);
+    $segs = explode($d0, (string) $hl7);
     $a = explode($d1, $segs[0]);
     if ($a[0] != 'MSH') {
         unset($segs);
@@ -507,9 +513,10 @@ function match_lab(&$hl7, $send_acct, $lab_acct = '', $lab_app = '', $lab_npi = 
     }
 
     unset($segs);
-    if ($lab_npi == '1891752424' || strtoupper($lab_npi) == 'AMMON') {
-        if (strtoupper(trim($a[5])) == strtoupper(trim($send_acct))) {
-            $srch = '|' . strtoupper(trim($send_acct)) . '-';
+    // CMS has deactivated NPI 1891752424, not sure who AMMON is
+    if ($lab_npi == '1891752424' || strtoupper((string) $lab_npi) == 'AMMON') {
+        if (strtoupper(trim($a[5])) == strtoupper(trim((string) $send_acct))) {
+            $srch = '|' . strtoupper(trim((string) $send_acct)) . '-';
             $hl7 = str_replace($srch, "|", $hl7);
             return true;
         }
@@ -517,9 +524,9 @@ function match_lab(&$hl7, $send_acct, $lab_acct = '', $lab_app = '', $lab_npi = 
     }
 
     if (
-        strtoupper(trim($a[5])) == strtoupper(trim($send_acct)) ||
-        strtoupper(trim($a[3])) == strtoupper(trim($lab_acct)) ||
-        strtoupper(trim($a[2])) == strtoupper(trim($lab_app))
+        strtoupper(trim($a[5])) == strtoupper(trim((string) $send_acct)) ||
+        strtoupper(trim($a[3])) == strtoupper(trim((string) $lab_acct)) ||
+        strtoupper(trim($a[2])) == strtoupper(trim((string) $lab_app))
     ) {
         return true;
     }
@@ -537,21 +544,21 @@ function lookupTestCode($labid, $procedure_code)
         "(procedure_type LIKE 'ord' OR procedure_type LIKE 'pro') AND " .
         "activity = 1 AND procedure_code = ? " .
         "LIMIT 1";
-    $res = sqlQuery($query, array($labid, $procedure_code));
+    $res = sqlQuery($query, [$labid, $procedure_code]);
 
     return $res;
 }
 
 // create encounter
-function create_encounter($pid, $provider_id = '', $order_date, $lab_name)
+function create_encounter($pid, $provider_id, $order_date, $lab_name)
 {
     global $orphanLog;
-    $conn = $GLOBALS['adodb']['db'];
-    $encounter = $conn->GenID("sequences");
+    $encounter = QueryUtils::generateId();
     addForm(
         $encounter,
         "Auto Generated Lab Encounter",
-        sqlInsert("INSERT INTO form_encounter SET " .
+        sqlInsert(
+            "INSERT INTO form_encounter SET " .
             "date = ?, " .
             "onset_date = '', " .
             "reason = ?, " .
@@ -559,7 +566,15 @@ function create_encounter($pid, $provider_id = '', $order_date, $lab_name)
             "referral_source = '', " .
             "pid = ?, " .
             "encounter = ?, " .
-            "provider_id = ?", array(date('Y-m-d H:i:s', strtotime($order_date)), "Generated encounter for " . strtoupper($lab_name) . " result", $pid, $encounter, $provider_id)),
+            "provider_id = ?",
+            [
+                date('Y-m-d H:i:s', strtotime((string) $order_date)),
+                "Generated encounter for " . strtoupper((string) $lab_name) . " result",
+                $pid,
+                $encounter,
+                ($provider_id ?? '')
+            ]
+        ),
         "newpatient",
         $pid,
         0,
@@ -577,7 +592,9 @@ function labNotice($pid, $newtext, $assigned_to = 'admin', $datetime = '', $labn
         return;
     }
 
-    $message_sender = $_SESSION['authUser'];
+    $session = SessionWrapperFactory::getInstance()->getActiveSession();
+    $authUser = $session->get('authUser');
+    $message_sender = $authUser;
     $message_group = 'Default';
     $authorized = '0';
     $activity = '1';
@@ -588,7 +605,7 @@ function labNotice($pid, $newtext, $assigned_to = 'admin', $datetime = '', $labn
     }
 
     if (!$assigned_to) {
-        $assigned_to = $_SESSION['authUser'];
+        $assigned_to = $authUser;
     }
     $notify = $assigned_to; //@todo get user lookup
 
@@ -597,7 +614,18 @@ function labNotice($pid, $newtext, $assigned_to = 'admin', $datetime = '', $labn
     return sqlInsert(
         "INSERT INTO pnotes (date, body, pid, user, groupname, " .
         "authorized, activity, title, assigned_to, message_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        array($datetime, $body, $pid, $message_sender, $message_group, $authorized, $activity, $title, $notify, $message_status)
+        [
+            $datetime,
+            $body,
+            $pid,
+            $message_sender,
+            $message_group,
+            $authorized,
+            $activity,
+            $title,
+            $notify,
+            $message_status
+        ]
     );
 }
 
@@ -614,7 +642,7 @@ function match_provider($arr)
     }
 
     $op_lname = $op_fname = '';
-    $op_npi = preg_replace('/[^0-9]/', '', $arr[0]);
+    $op_npi = preg_replace('/[^0-9]/', '', (string) $arr[0]);
     if (!empty($arr[1])) {
         $op_lname = $arr[1];
     }
@@ -627,14 +655,14 @@ function match_provider($arr)
         if ($op_npi) {
             if ($op_fname && $op_lname) {
                 $where = "((npi IS NOT NULL AND npi = ?) OR ((npi IS NULL OR npi = ?) AND lname = ? AND fname = ?))";
-                $qarr = array($op_npi, '', $op_lname, $op_fname);
+                $qarr = [$op_npi, '', $op_lname, $op_fname];
             } else {
                 $where = "npi IS NOT NULL AND npi = ?";
-                $qarr = array($op_npi);
+                $qarr = [$op_npi];
             }
         } else {
             $where = "lname = ? AND fname = ?";
-            $qarr = array($op_lname, $op_fname);
+            $qarr = [$op_lname, $op_fname];
         }
 
         $oprow = sqlQuery(
@@ -651,30 +679,16 @@ function match_provider($arr)
     return false;
 }
 
-function ucname($string)
-{
-    $string = ucwords(strtolower($string));
-
-    foreach (array('-', '\'') as $delimiter) {
-        if (strpos($string, $delimiter) !== false) {
-            $string = implode($delimiter, array_map('ucfirst', explode($delimiter, $string)));
-        }
-    }
-    return $string;
-}
-
 /**
  * Create a patient using whatever patient_data attributes are provided.
  */
-function create_skeleton_patient($patient_data)
+function create_skeleton_patient($patient_data): int
 {
     global $orphanLog;
-    $employer_data = array();
+    $employer_data = [];
     $tmp = sqlQuery("SELECT MAX(pid)+1 AS pid FROM patient_data");
     $ptid = empty($tmp['pid']) ? 1 : intval($tmp['pid']);
-    if (!isset($patient_data['pubpid'])) {
-        $patient_data['pubpid'] = $ptid;
-    }
+    $patient_data['pubpid'] ??= $ptid;
 
     updatePatientData($ptid, $patient_data, true);
     updateEmployerData($ptid, $employer_data, true);
@@ -703,14 +717,14 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
     global $lab_npi;
     //$direction = 'R';
     // This will hold returned error messages and related variables.
-    $rhl7_return = array();
-    $rhl7_return['mssgs'] = array();
+    $rhl7_return = [];
+    $rhl7_return['mssgs'] = [];
     $rhl7_return['needmatch'] = false; // indicates if this file is pending a match request
 
     $rhl7_segnum = 0;
     $obrPerformingOrganization = '';
 
-    if (substr($hl7, 0, 3) != 'MSH') {
+    if (!str_starts_with($hl7, 'MSH')) {
         return rhl7LogMsg(xl('Input does not begin with a MSH segment'), true);
     }
 
@@ -723,13 +737,13 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
     // 'res' - array of rows to write to procedure_result for this procedure_report
     // 'fid' - unique lab-provided identifier for this report
     //
-    $amain = array();
+    $amain = [];
 
     // End-of-line delimiter for text in procedure_result.comments and other multi-line notes.
     $commentdelim = "\n";
 
     // Ensoftek: Different labs seem to send different EOLs. Edit HL7 input to a character we know.
-    $hl7 = (string)str_replace(array("\r\n", "\r", "\n"), "\r", $hl7);
+    $hl7 = str_replace(["\r\n", "\r", "\n"], "\r", $hl7);
 
     $today = time();
     $in_message_lab_name = '';
@@ -747,7 +761,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
     $pcrow = false;
     $oprow = false;
 
-    $code_seq_array = array(); // tracks sequence numbers of order codes
+    $code_seq_array = []; // tracks sequence numbers of order codes
     $results_category_id = 0;  // document category ID for lab results
 
     // This is so we know where we are if a segment like NTE that can appear in
@@ -773,17 +787,17 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
     // We'll need the document category IDs for any embedded documents.
     $catrow = sqlQuery(
         "SELECT id FROM categories WHERE name = ?",
-        array($GLOBALS['lab_results_category_name'])
+        [OEGlobalsBag::getInstance()->getString('lab_results_category_name')]
     );
     if (empty($catrow['id'])) {
         return rhl7LogMsg(xl('Document category for lab results does not exist') .
-            ': ' . $GLOBALS['lab_results_category_name'], true);
+            ': ' . OEGlobalsBag::getInstance()->getString('lab_results_category_name'), true);
     } else {
         $results_category_id = $catrow['id'];
         $mdm_category_id = $results_category_id;
         $catrow = sqlQuery(
             "SELECT id FROM categories WHERE name = ?",
-            array($GLOBALS['gbl_mdm_category_name'])
+            [OEGlobalsBag::getInstance()->getString('gbl_mdm_category_name')]
         );
         if (!empty($catrow['id'])) {
             $mdm_category_id = $catrow['id'];
@@ -796,7 +810,9 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
         if (empty($seg)) {
             continue;
         }
-
+        if ($seg == chr(28)) {
+            continue;
+        }
         // echo "<!-- $dryrun $seg -->\n"; // debugging
 
         ++$rhl7_segnum;
@@ -807,7 +823,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 rhl7FlushMain($amain, $commentdelim);
             }
 
-            $amain = array();
+            $amain = [];
 
             if ('MDM' == $msgtype && !$dryrun) {
                 $rc = rhl7FlushMDM(
@@ -829,7 +845,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
             // Ensoftek: Could come is as 'ORU^R01^ORU_R01'. Handle all cases when 'ORU^R01' is seen.
             if (strstr($a[8], "ORU^R01")) {
                 $msgtype = 'ORU';
-            } elseif ($a[8] == 'MDM^T02' || $a[8] == 'MDM^T04' || $a[8] == 'MDM^T08') {
+            } elseif (in_array($a[8], ['MDM^T02', 'MDM^T04', 'MDM^T08'])) {
                 $msgtype = 'MDM';
                 $mdm_datetime = '';
                 $mdm_docname = '';
@@ -864,37 +880,32 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
             $in_orderid = 0;
             $in_ssn = preg_replace('/[^0-9]/', '', $a[4]);
             $in_dob = rhl7Date($a[7]);
+            // foreign MRN
+            $in_pubpid = rhl7Text($a[3] ?? '');
             $tmp = explode($d2, $a[11]);
-            $in_street = rhl7Text($tmp[0]);
-            $in_street1 = rhl7Text($tmp[1]);
-            $in_city = rhl7Text($tmp[2]);
-            $in_state = rhl7Text($tmp[3]);
-            $in_zip = rhl7Text($tmp[4]);
-            $in_phone = rhl7Text($a[13]);
-            switch (strtoupper($a[8])) {
-                case 'M':
-                    $in_sex = 'Male';
-                    break;
-                case 'F':
-                    $in_sex = 'Female';
-                    break;
-                case 'T':
-                    $in_sex = 'Transgender';
-                    break;
-                default:
-                    $in_sex = 'Unassigned';
-            }
+            $in_street = rhl7Text($tmp[0]) ?? '';
+            $in_street1 = rhl7Text($tmp[1] ?? '');
+            $in_city = rhl7Text($tmp[2] ?? '');
+            $in_state = rhl7Text($tmp[3] ?? '');
+            $in_zip = rhl7Text($tmp[4] ?? '');
+            $in_phone = rhl7Text($a[13]) ?? '';
+            $in_sex = match (strtoupper($a[8])) {
+                'M' => 'Male',
+                'F' => 'Female',
+                'T' => 'Transgender',
+                default => 'Unassigned',
+            };
             $tmp = explode($d2, $a[5]);
             $in_lname = rhl7Text($tmp[0]);
             $in_fname = rhl7Text($tmp[1]);
-            $in_mname = rhl7Text($tmp[2]);
+            $in_mname = rhl7Text($tmp[2] ?? '');
 
             $patient_id = 0;
 
             // Patient matching is needed for a results-only interface or MDM message type.
             if ('R' == $direction || 'MDM' == $msgtype) {
-                $ptarr = array(
-                    'ss' => strtoupper($in_ssn),
+                $ptarr = [
+                    'ss' => strtoupper((string) $in_ssn),
                     'fname' => ucname($in_fname),
                     'lname' => ucname($in_lname),
                     'mname' => ucname($in_mname),
@@ -904,13 +915,19 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                     'city' => $in_city,
                     'state' => $in_state,
                     'postal_code' => $in_zip,
-                    'phone_home' => $in_phone
-                );
+                    'phone_home' => $in_phone,
+                    'pubpid' => $in_pubpid
+                ];
                 $patient_id = match_patient($ptarr);
                 if ($patient_id == -1) {
                     // Result is indeterminate.
                     // Make a stringified form of $ptarr to use as a key.
-                    $ptstring = serialize($ptarr);
+                    try {
+                        $ptstring = json_encode($ptarr, JSON_THROW_ON_ERROR);
+                    } catch (\JsonException) {
+                        return rhl7LogMsg(xl('Failed to encode patient match key for segment') .
+                            ' ' . $rhl7_segnum, true);
+                    }
                     // Check if the user has specified the patient.
                     if (isset($matchresp[$ptstring])) {
                         // This will be an existing pid, or 0 to specify creating a patient.
@@ -958,7 +975,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
             }
         } elseif ('ORC' == $a[0] && 'ORU' == $msgtype) {
             $context = $a[0];
-            $arep = array();
+            $arep = [];
             $porow = false;
             $pcrow = false;
             if ($direction != 'R' && $a[2]) {
@@ -972,7 +989,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
             // Is this ever used?
         } elseif ('OBR' == $a[0] && 'ORU' == $msgtype) {
             $context = $a[0];
-            $arep = array();
+            $arep = [];
             if ($direction != 'R' && $a[2]) {
                 $in_orderid = intval($a[2]);
                 $porow = false;
@@ -981,7 +998,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
 
             $tmp = explode($d2, $a[4]);
             $in_procedure_code = $tmp[0];
-            $in_procedure_name = $tmp[1];
+            $in_procedure_name = rhl7Text($tmp[1]);
             $in_report_status = rhl7ReportStatus($a[25]);
             if ($lab_npi == "QUEST") {
                 // for profiles that may return dif component codes for profile code.
@@ -1043,7 +1060,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                         "SELECT * FROM procedure_order " .
                         "WHERE lab_id = ? AND control_id = ? " .
                         "ORDER BY procedure_order_id DESC LIMIT 1",
-                        array($lab_id, $external_order_id)
+                        [$lab_id, $external_order_id]
                     );
                 }
 
@@ -1055,19 +1072,19 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                     // Create order.
                     // Need to identify the ordering provider and, if possible, a recent encounter.
                     $datetime_report = rhl7DateTime($a[22]);
-                    $date_report = substr($datetime_report, 0, 10) . ' 00:00:00';
                     $encounter_id = 0;
                     $provider_id = 0;
+                    $external_id = rhl7Text($a[3]) ?? null;
                     // Look for the most recent encounter within 30 days of the report date.
                     $encrow = sqlQuery(
                         "SELECT encounter FROM form_encounter WHERE " .
                         "pid = ? AND date <= ? AND DATE_ADD(date, INTERVAL 30 DAY) > ? " .
                         "ORDER BY date DESC, encounter DESC LIMIT 1",
-                        array($patient_id, $date_report, $date_report)
+                        [$patient_id, $datetime_report, $datetime_report]
                     );
                     if (!empty($encrow)) {
                         $encounter_id = intval($encrow['encounter']);
-                        $provider_id = intval($encrow['provider_id']);
+                        $provider_id = intval($encrow['provider_id'] ?? '');
                     }
 
                     if (!$provider_id) {
@@ -1082,24 +1099,36 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                     if (!$dryrun) {
                         // create an encounter. I mean, why not...
                         if (empty($encrow) && !$encounter_id) {
-                            $encounter_id = create_encounter($patient_id, $provider_id, $datetime_report, $in_message_lab_name);
+                            $encounter_id = create_encounter(
+                                $patient_id,
+                                $provider_id,
+                                $datetime_report,
+                                $in_message_lab_name
+                            );
                         }
                         // Now create the procedure order.
                         $in_orderid = sqlInsert(
                             "INSERT INTO procedure_order SET " .
-                            "date_ordered   = ?, " .
-                            "provider_id    = ?, " .
-                            "lab_id         = ?, " .
-                            "date_collected = ?, " .
-                            "date_transmitted = ?, " .
-                            "patient_id     = ?, " .
-                            "encounter_id   = ?, " .
-                            "control_id     = ?",
-                            array($datetime_report, $provider_id, $lab_id, rhl7DateTime($a[22]),
+                                "date_ordered   = ?, " .
+                                "provider_id    = ?, " .
+                                "lab_id         = ?, " .
+                                "date_collected = ?, " .
+                                "date_transmitted = ?, " .
+                                "patient_id     = ?, " .
+                                "encounter_id   = ?, " .
+                                "control_id     = ?, " .
+                                "external_id    = ?",
+                            [
+                                $datetime_report,
+                                $provider_id,
+                                $lab_id,
+                                rhl7DateTime($a[22]),
                                 rhl7DateTime($a[7]),
                                 $patient_id,
                                 $encounter_id,
-                                $external_order_id)
+                                $external_order_id,
+                                $external_id
+                            ]
                         );
                         // If an encounter was identified then link the order to it.
                         $form_name = ($lab_npi > '' ? $lab_npi : "Auto Result") . "-" . $in_orderid;
@@ -1108,16 +1137,17 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                         }
                         // create a note to provider about these actions
                         $txdate = rhl7DateTime($a[7]);
-                        $ptext = "$orphanLog $form_name Order ordered by $provider_username with lab result file creation date on " .
-                            "$datetime_report and specimen collections on $txdate has been created. " .
+                        $ptext = "$orphanLog $form_name Order ordered by" .  ($provider_username ?? '') .
+                            " with lab result file " .
+                            "creation date on $datetime_report and specimen collections on $txdate has been created. " .
                             "Please review these items to ensure proper resolution of order results.";
-                        $dumb = labNotice($patient_id, $ptext, $provider_username, '', $in_message_lab_name);
+                        $dumb = labNotice($patient_id, $ptext, ($provider_username ?? ''), '', $in_message_lab_name);
                     }
                 } // end no $porow
             } // end results-only
             if (empty($porow)) {
                 $porow = sqlQuery("SELECT * FROM procedure_order WHERE " .
-                    "procedure_order_id = ?", array($in_orderid));
+                    "procedure_order_id = ?", [$in_orderid]);
                 // The order must already exist. Currently we do not handle electronic
                 // results returned for manual orders.
                 if (empty($porow) && !($dryrun && $direction == 'R')) {
@@ -1143,25 +1173,18 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 $control_id = $tmp[0];
                 if ($control_id && empty($porow['control_id']) && $in_orderid) {
                     sqlStatement("UPDATE procedure_order SET control_id = ? WHERE " .
-                        "procedure_order_id = ?", array($control_id, $in_orderid));
+                        "procedure_order_id = ?", [$control_id, $in_orderid]);
                 }
 
-                $code_seq_array = array();
+                $code_seq_array = [];
             }
 
-            // Find the order line item (procedure code) that matches this result.
-            // If there is more than one, then we select the one whose sequence number
-            // is next after the last sequence number encountered for this procedure
-            // code; this assumes that result OBRs are returned in the same sequence
-            // as the corresponding OBRs in the order.
-            if (!isset($code_seq_array[$in_procedure_code])) {
-                $code_seq_array[$in_procedure_code] = 0;
-            }
+            $code_seq_array[$in_procedure_code] ??= 0;
 
             $pcquery = "SELECT pc.* FROM procedure_order_code AS pc " .
                 "WHERE pc.procedure_order_id = ? AND pc.procedure_code = ? " .
                 "ORDER BY (procedure_order_seq <= ?), procedure_order_seq LIMIT 1";
-            $pcqueryargs = array($in_orderid, $in_procedure_code, $code_seq_array[$in_procedure_code]);
+            $pcqueryargs = [$in_orderid, $in_procedure_code, $code_seq_array[$in_procedure_code]];
             $pcrow = sqlQuery($pcquery, $pcqueryargs);
             if (empty($pcrow)) {
                 // There is no matching procedure in the order, so it must have been
@@ -1170,36 +1193,52 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 // procedure_source = '2' indicates this.
                 if (!$dryrun) {
                     $lkup = lookupTestCode($lab_id, $in_procedure_code);
-                    $code_type = $lkup['procedure_type'] ? trim($lkup['procedure_type']) : '';
-                    $code_transport = $lkup['transport'] ? trim($lkup['transport']) : '';
-                    sqlBeginTrans();
-                    $procedure_order_seq = sqlQuery("SELECT IFNULL(MAX(procedure_order_seq),0) + 1 AS increment FROM procedure_order_code WHERE procedure_order_id = ? ", array($in_orderid));
-                    sqlInsert(
-                        "INSERT INTO procedure_order_code SET " .
-                        "procedure_order_id = ?, " .
-                        "procedure_order_seq = ?, " .
-                        "procedure_code = ?, " .
-                        "procedure_name = ?, " .
-                        "procedure_type = ?, " .
-                        "transport = ?, " .
-                        "procedure_source = '2'",
-                        array($in_orderid, $procedure_order_seq['increment'], $in_procedure_code, $in_procedure_name, $code_type, $code_transport)
-                    );
-                    $pcrow = sqlQuery($pcquery, $pcqueryargs);
-                    sqlCommitTrans();
+                    $code_type = ($lkup['procedure_type'] ?? '') ? trim($lkup['procedure_type']) : '';
+                    $code_transport = ($lkup['transport'] ?? '') ? trim($lkup['transport']) : '';
+                    $pcrow = QueryUtils::inTransaction(function () use ($in_orderid, $in_procedure_code, $in_procedure_name, $code_type, $code_transport, $pcquery, $pcqueryargs) {
+                        $procedure_order_seq = sqlQuery(
+                            <<<'SQL'
+                            SELECT IFNULL(MAX(procedure_order_seq), 0) + 1 AS increment
+                            FROM procedure_order_code
+                            WHERE procedure_order_id = ?
+                            SQL,
+                            [$in_orderid]
+                        );
+                        sqlInsert(
+                            <<<'SQL'
+                            INSERT INTO procedure_order_code SET
+                                procedure_order_id = ?,
+                                procedure_order_seq = ?,
+                                procedure_code = ?,
+                                procedure_name = ?,
+                                procedure_type = ?,
+                                transport = ?,
+                                procedure_source = '2'
+                            SQL,
+                            [
+                                $in_orderid,
+                                $procedure_order_seq['increment'],
+                                $in_procedure_code,
+                                $in_procedure_name,
+                                $code_type,
+                                $code_transport,
+                            ]
+                        );
+                        return sqlQuery($pcquery, $pcqueryargs);
+                    });
                 } else {
                     // Dry run, make a dummy procedure_order_code row.
-                    $pcrow = array(
+                    $pcrow = [
                         'procedure_order_id' => $in_orderid,
                         'procedure_order_seq' => 0, // TBD?
-                    );
+                    ];
                 }
             }
             if (!empty($a[21])) {
                 $obrPerformingOrganization = getPerformingOrganizationDetails('', $a[21], '', $d2, $commentdelim);
             }
             $code_seq_array[$in_procedure_code] = 0 + $pcrow['procedure_order_seq'];
-            $arep = array();
+            $arep = [];
             $arep['procedure_order_id'] = $in_orderid;
             $arep['procedure_order_seq'] = $pcrow['procedure_order_seq'];
             $arep['date_collected'] = rhl7DateTime($a[7]);
@@ -1224,10 +1263,10 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
 
             // Create the main array entry for this report and its results.
             $i = count($amain);
-            $amain[$i] = array();
+            $amain[$i] = [];
             $amain[$i]['rep'] = $arep;
             $amain[$i]['fid'] = $in_filler_id;
-            $amain[$i]['res'] = array();
+            $amain[$i]['res'] = [];
         } elseif ($a[0] == 'NTE' && $context == 'OBR') {
             // Append this note to those for the most recent report.
             $amain[count($amain) - 1]['rep']['report_notes'] .= rhl7Text($a[3], true) . "\n";
@@ -1249,19 +1288,22 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 $j >= 0 && $context == 'OBX' && $a[2] == 'TX'
                 && $amain[$i]['res'][$j]['result_data_type'] == 'L'
                 && $amain[$i]['res'][$j]['result_code'] == $result_code
-                && $amain[$i]['res'][$j]['date'] == rhl7DateTime($a[14])
-                && $amain[$i]['res'][$j]['facility'] == rhl7Text($a[15])
-                && $amain[$i]['res'][$j]['abnormal'] == rhl7Abnormal($a[8])
-                && $amain[$i]['res'][$j]['result_status'] == rhl7ReportStatus($a[11])
+                && $amain[$i]['res'][$j]['date'] == rhl7DateTime($a[14] ?? '')
+                && ($amain[$i]['res'][$j]['facility'] ?? '') == rhl7Text($a[15] ?? '')
+                && $amain[$i]['res'][$j]['abnormal'] == rhl7Abnormal($a[8] ?? '')
+                && $amain[$i]['res'][$j]['result_status'] == rhl7ReportStatus($a[11] ?? '')
             ) {
                 $amain[$i]['res'][$j]['comments'] =
-                    substr($amain[$i]['res'][$j]['comments'], 0, strlen($amain[$i]['res'][$j]['comments']) - 1) .
-                    '~' . rhl7Text($a[5]) . $commentdelim;
+                    substr(
+                        (string) $amain[$i]['res'][$j]['comments'],
+                        0,
+                        strlen((string) $amain[$i]['res'][$j]['comments'])
+                    ) . rhl7Text($a[5] ?? '') . $commentdelim;
                 continue;
             }
 
             $context = $a[0];
-            $ares = array();
+            $ares = [];
             $ares['result_data_type'] = substr($a[2], 0, 1); // N, S, F or E
             $ares['comments'] = $commentdelim;
             if ($a[2] == 'ED') {
@@ -1291,7 +1333,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                         $ares['document_id'] = $d->get_id();
                     }
                 } // @todo suspect below!!
-                $ares['date'] = $arep['date_report']; // $arep is left over from the OBR logic.
+                $ares['date'] = $arep['date_report'] ?? ''; // $arep is left over from the OBR logic.
                 // Append this result to those for the most recent report.
                 // Note the 'procedure_report_id' item is not yet present.
                 //$amain[count($amain) - 1]['res'][] = $ares;
@@ -1304,11 +1346,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 // The first line of comments is reserved for such things.
                 $ares['result_data_type'] = 'L';
                 $ares['result'] = '';
-                if (empty($a[5])) {
-                    $vTx = rhl7Text(str_replace('^', ' ', $a[3]));
-                } else {
-                    $vTx = rhl7Text($a[5]);
-                }
+                $vTx = empty($a[5]) ? rhl7Text(str_replace('^', ' ', $a[3])) : rhl7Text($a[5]);
                 $ares['comments'] = $vTx . $commentdelim;
             } else {
                 $ares['result'] = rhl7Text($a[5]);
@@ -1316,18 +1354,25 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
 
             $ares['result_code'] = $result_code;
             $ares['result_text'] = $result_text;
-            $ares['date'] = rhl7DateTime($a[14]);
+            $ares['date'] = rhl7DateTime($a[14] ?? '');
             //$ares['facility'] = rhl7Text($a[15]);
-            // Ensoftek: Units may have mutiple segments(as seen in MU2 samples), parse and take just first segment.
-            $tmp = explode($d2, $a[6]);
+            // Ensoftek: Units may have multiple segments(as seen in MU2 samples), parse and take just first segment.
+            $tmp = explode($d2, ($a[6] ?? ''));
             $ares['units'] = rhl7Text($tmp[0]);
-            $ares['range'] = rhl7Text($a[7]);
-            $ares['abnormal'] = rhl7Abnormal($a[8]); // values are lab dependent
-            $ares['result_status'] = rhl7ReportStatus($a[11]);
+            $ares['range'] = rhl7Text($a[7] ?? '');
+            $ares['abnormal'] = rhl7Abnormal($a[8] ?? ''); // values are lab dependent
+            $ares['result_status'] = rhl7ReportStatus($a[11] ?? '');
 
-            // Ensoftek: Performing Organization Details. Goes into "Pending Review/Patient Results--->Notes--->Facility" section.
+            // Ensoftek: Performing Organization Details.
+            // Goes into "Pending Review/Patient Results--->Notes--->Facility" section.
             if (empty($obrPerformingOrganization)) {
-                $performingOrganization = getPerformingOrganizationDetails($a[23], $a[24], $a[25], $d2, $commentdelim);
+                $performingOrganization = getPerformingOrganizationDetails(
+                    $a[23] ?? '',
+                    $a[24] ?? '',
+                    $a[25] ?? '',
+                    $d2,
+                    $commentdelim
+                );
             } else {
                 $performingOrganization = $obrPerformingOrganization;
             }
@@ -1343,7 +1388,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
              ****/
 
             // obxkey is to allow matching this as a parent result.
-            $ares['obxkey'] = $a[3] . $d1 . $a[4];
+            $ares['obxkey'] = $a[3] . $d1 . ($a[4] ?? '');
 
             // Append this result to those for the most recent report.
             // Note the 'procedure_report_id' item is not yet present.
@@ -1362,7 +1407,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
         } elseif ('ZEF' == $a[0] && 'ORU' == $msgtype) {
             // ZEF segment is treated like an OBX with an embedded Base64-encoded PDF.
             $context = 'OBX';
-            $ares = array();
+            $ares = [];
             $ares['result_data_type'] = 'E';
             $ares['comments'] = $commentdelim;
             //
@@ -1389,7 +1434,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 $ares['document_id'] = $d->get_id();
             }
 
-            $ares['date'] = $arep['date_report']; // $arep is left over from the OBR logic.
+            $ares['date'] = $arep['date_report'] ?? ''; // $arep is left over from the OBR logic.
             // Append this result to those for the most recent report.
             // Note the 'procedure_report_id' item is not yet present.
             $amain[count($amain) - 1]['res'][] = $ares;
@@ -1397,7 +1442,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
             // Append this note to the most recent result item's comments.
             $alast = count($amain) - 1;
             $rlast = count($amain[$alast]['res']) - 1;
-            $amain[$alast]['res'][$rlast]['comments'] .= rhl7Text($a[3], true) . $commentdelim;
+            $amain[$alast]['res'][$rlast]['comments'] .= rhl7Text($a[3] ?? '', true) . $commentdelim;
             // Ensoftek: Get data from SPM segment for specimen.
             // SPM segment always occurs after the OBX segment.
         } elseif ('SPM' == $a[0] && 'ORU' == $msgtype) {
@@ -1408,7 +1453,9 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
             // Ignore and do nothing.
         } elseif ($a[0] == 'NTE' && 'PID' == $context) {
             // will get orderid on save.
-            $amain[0]['rep']['report_notes'] .= rhl7Text($a[3], true) . "\n";
+            if (!empty($amain[0])) {
+                $amain[0]['rep']['report_notes'] .= rhl7Text($a[3], true) . "\n";
+            }
         } elseif ('ZPS' == $a[0] && 'ORU' == $msgtype) {
             //global $ares;
             $performingOrganization = parseZPS($a);
@@ -1417,7 +1464,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
                 $amain[$alast]['res'][0]['facility'] .= $performingOrganization . $commentdelim;
             }
         } else {
-            return rhl7LogMsg(xl('Segment name') . " '${a[0]}' " . xl('is misplaced or unknown'));
+            return rhl7LogMsg(xl('Segment name') . " '{$a[0]}' " . xl('is misplaced or unknown'));
         }
     }
 
@@ -1460,7 +1507,7 @@ function receive_hl7_results(&$hl7, &$matchreq, $lab_id = 0, $direction = 'B', $
  *
  * @return string  Error text, or empty if no errors.
  */
-function poll_hl7_results(&$info, $labs = 0)
+function poll_hl7_results(&$info, $labs = 0): string
 {
     global $srcdir, $orphanLog, $lab_npi;
     $labs = (int)$labs + 0;
@@ -1469,31 +1516,41 @@ function poll_hl7_results(&$info, $labs = 0)
 
     $filecount = 0;
     $badcount = 0;
-    $maxdl = $_REQUEST['form_max_results'];
+    $maxdl = $_REQUEST['form_max_results'] ?? 9999; // in case to prevent not running report.
     if (!isset($info['match'])) {
-        $info['match'] = array(); // match requests
+        $info['match'] = []; // match requests
     }
 
     if (!isset($info['select'])) {
-        $info['select'] = array(); // match request responses
+        $info['select'] = []; // match request responses
     }
 
-    $ppres = sqlStatement("SELECT * FROM procedure_providers ORDER BY name");
+    // Inactive providers are not polled: fetching deletes each processed file
+    // from the lab's server, so a polled inactive provider can take results
+    // meant for another system.
+    $ppres = sqlStatement("SELECT * FROM procedure_providers WHERE active = 1 ORDER BY name");
+
+    // Writes the archive copy of a results file, encrypted when enabled.
+    // True if the whole file was written.
+    $archiveHl7File = static function (string $path, string $hl7): bool {
+        $content = hl7Crypt($hl7);
+        return file_put_contents($path, $content) === strlen($content);
+    };
 
     while ($pprow = sqlFetchArray($ppres)) {
-        $ppid = 0 + $pprow['ppid'];
+        $ppid = (int)$pprow['ppid'];
         $protocol = $pprow['protocol'];
         $remote_host = $pprow['remote_host'];
         $send_account = $pprow['send_fac_id'];
         $recv_account = $pprow['recv_fac_id'];
         $lab_app = $pprow['recv_app_id'];
-        $lab_name = $pprow['name'];
-        $lab_npi = strtoupper(trim($pprow['npi']));
-        $debug = trim($pprow['DorP']) === 'D' ? true : false;
+        $lab_name = is_string($pprow['name']) ? $pprow['name'] : '';
+        $lab_npi = strtoupper(trim((string) $pprow['npi']));
+        $debug = trim((string) $pprow['DorP']) === 'D';
         $hl7 = '';
         $orphanLog = '';
         $log = '';
-        $logpath = $GLOBALS['OE_SITE_DIR'] . "/documents/procedure_results/logs/$lab_npi";
+        $logpath = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/procedure_results/logs/$lab_npi";
 
         if ($ppid !== $labs && $labs > 0) {
             continue;
@@ -1509,9 +1566,9 @@ function poll_hl7_results(&$info, $labs = 0)
         if ($protocol == 'SFTP') {
             $remote_port = 22;
             // Hostname may have ":port" appended to specify a nonstandard port number.
-            if ($i = strrpos($remote_host, ':')) {
-                $remote_port = 0 + substr($remote_host, $i + 1);
-                $remote_host = substr($remote_host, 0, $i);
+            if ($i = strrpos((string) $remote_host, ':')) {
+                $remote_port = (int)substr((string) $remote_host, $i + 1);
+                $remote_host = substr((string) $remote_host, 0, $i);
             }
 
             // Compute the target path name.
@@ -1527,17 +1584,18 @@ function poll_hl7_results(&$info, $labs = 0)
             }
 
             $files = $sftp->nlist($pathname);
+            if (!is_array($files)) {
+                $files = [];
+            }
             foreach ($files as $file) {
-                if (substr($file, 0, 1) === '.') {
+                if (!is_string($file) || str_starts_with($file, '.')) {
                     continue;
                 }
 
-                if (!isset($info["$lab_name/$ppid/$file"])) {
-                    $info["$lab_name/$ppid/$file"] = array();
-                }
+                $info["$lab_name/$ppid/$file"] ??= [];
 
                 // Ensure that archive directory exists.
-                $prpath = $GLOBALS['OE_SITE_DIR'] . "/documents/procedure_results";
+                $prpath = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/procedure_results";
                 if (!file_exists($prpath)) {
                     if (!mkdir($prpath, 0755, true) && !is_dir($prpath)) {
                         throw new RuntimeException(sprintf('Directory "%s" was not created', $prpath));
@@ -1553,10 +1611,13 @@ function poll_hl7_results(&$info, $labs = 0)
 
                 // Get file contents.
                 $hl7 = $sftp->get("$pathname/$file");
+
                 ++$filecount;
                 $fh = fopen("$prpath/$file", 'w');
                 if ($fh) {
-                    fwrite($fh, $hl7);
+                    // Store the file, encrypted when enabled
+                    $hl7_crypt = hl7Crypt($hl7);
+                    fwrite($fh, $hl7_crypt);
                     fclose($fh);
                     $log .= "Retrieved and Saved File #$filecount: $file\n";
                 } else {
@@ -1568,7 +1629,8 @@ function poll_hl7_results(&$info, $labs = 0)
                 if (!empty($info["$lab_name/$ppid/$file"]['delete'])) {
                     $fh = fopen("$prpath/$file.rejected", 'w');
                     if ($fh) {
-                        fwrite($fh, $hl7);
+                        $hl7_crypt = hl7Crypt($hl7);
+                        fwrite($fh, $hl7_crypt);
                         fclose($fh);
                     } else {
                         $log .= "Retrieved but Couldn't Save Rejected File #$filecount: $file\n";
@@ -1592,12 +1654,21 @@ function poll_hl7_results(&$info, $labs = 0)
                 }
                 // Do a dry run of its contents and check for errors and match requests.
                 $tmp = receive_hl7_results($hl7, $info['match'], $ppid, $pprow['direction'], true, $info['select']);
-                $log .= "Lab matched account $send_account. Results Dry Run Parse for Errors: " . $tmp['mssgs'] ? print_r($tmp['mssgs'], true) : "None" . "\n";
+                $log .= "Lab matched account $send_account. Results Dry Run Parse for Errors: " .
+                    $tmp['mssgs'] ? print_r($tmp['mssgs'], true) : "None" . "\n";
 
                 $info["$lab_name/$ppid/$file"]['mssgs'] = $tmp['mssgs'];
                 // $info["$lab_name/$ppid/$file"]['match'] = $tmp['match'];
                 if (!empty($tmp['fatal']) || !empty($tmp['needmatch'])) {
                     // There are errors or matching requests so skip this file.
+                    continue;
+                }
+                // Archive before importing: the file is removed from the lab only
+                // once archived, so a file imported without an archive copy would
+                // be imported again on the next run.
+                if (!$archiveHl7File("$prpath/$file", $hl7)) {
+                    $log .= "Couldn't Save File #$filecount, Not Imported: $file\n";
+                    $info["$lab_name/$ppid/$file"]['mssgs'] = ['*' . xl('Not imported, cannot create file') . ' "' . "$prpath/$file" . '"'];
                     continue;
                 }
                 $orphanLog = '';
@@ -1606,16 +1677,8 @@ function poll_hl7_results(&$info, $labs = 0)
                 $info["$lab_name/$ppid/$file"]['mssgs'] = $tmp['mssgs'];
                 // $info["$lab_name/$ppid/$file"]['match'] = $tmp['match'];
                 if (empty($tmp['fatal']) && empty($tmp['needmatch'])) {
-                    // It worked, archive and delete the file.
-                    $fh = fopen("$prpath/$file", 'w');
-                    if ($fh) {
-                        fwrite($fh, $hl7);
-                        fclose($fh);
-                        $log .= "Success Saved Results #$filecount to: $file\n";
-                    } else {
-                        $log .= "Success but Couldn't Save File #$filecount: $file\n";
-                        return xl('Cannot create file') . ' "' . "$prpath/$file" . '"';
-                    }
+                    // It worked and it's archived, delete the file.
+                    $log .= "Success Saved Results #$filecount to: $file\n";
                     if (strtoupper($lab_npi) != 'LABCORP') { // this is nuts
                         if (!$sftp->delete("$pathname/$file")) {
                             return xl('Cannot delete (from SFTP server) file') . ' "' . "$pathname/$file" . '"';
@@ -1644,25 +1707,24 @@ function poll_hl7_results(&$info, $labs = 0)
             }
 
             // Sort by filename just because.
-            $files = array();
+            $files = [];
             while (false !== ($file = readdir($dh))) {
-                if (substr($file, 0, 1) == '.') {
+                if (str_starts_with($file, '.')) {
                     continue;
                 }
-
+                if (is_dir($file)) {
+                    continue;
+                }
                 $files[$file] = $file;
             }
-
             closedir($dh);
             ksort($files);
             // For each file...
             foreach ($files as $file) {
-                if (!isset($info["$lab_name/$ppid/$file"])) {
-                    $info["$lab_name/$ppid/$file"] = array();
-                }
+                $info["$lab_name/$ppid/$file"] ??= [];
 
                 // Ensure that archive directory exists.
-                $prpath = $GLOBALS['OE_SITE_DIR'] . "/documents/procedure_results";
+                $prpath = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/procedure_results";
                 if (!file_exists($prpath) && !mkdir($prpath, 0755, true) && !is_dir($prpath)) {
                     throw new RuntimeException(sprintf('Directory "%s" was not created', $prpath));
                 }
@@ -1674,10 +1736,17 @@ function poll_hl7_results(&$info, $labs = 0)
 
                 // Get file contents.
                 $hl7 = file_get_contents("$pathname/$file");
+
                 ++$filecount;
+                if (empty($hl7)) {
+                    $log .= "Result file empty for some reason. #$filecount: $file\n";
+                    continue;
+                }
+
                 $fh = fopen("$prpath/$file", 'w');
                 if ($fh) {
-                    fwrite($fh, $hl7);
+                    $hl7_crypt = hl7Crypt($hl7);
+                    fwrite($fh, $hl7_crypt);
                     fclose($fh);
                     $log .= "Retrieved and Saved File #$filecount: $file\n";
                 }
@@ -1685,7 +1754,8 @@ function poll_hl7_results(&$info, $labs = 0)
                 if (!empty($info["$lab_name/$ppid/$file"]['delete'])) {
                     $fh = fopen("$prpath/$file.rejected", 'w');
                     if ($fh) {
-                        fwrite($fh, $hl7);
+                        $hl7_crypt = hl7Crypt($hl7);
+                        fwrite($fh, $hl7_crypt);
                         fclose($fh);
                     } else {
                         return xl('Cannot create file') . ' "' . "$prpath/$file.rejected" . '"';
@@ -1708,12 +1778,23 @@ function poll_hl7_results(&$info, $labs = 0)
 
                 // Do a dry run of its contents and check for errors and match requests.
                 $tmp = receive_hl7_results($hl7, $info['match'], $ppid, $pprow['direction'], true, $info['select']);
-                $log .= "Lab matched account $send_account. Results Dry Run Parse for Errors: " . $tmp['mssgs'] ? print_r($tmp['mssgs'], true) : "None" . "\n";
+                if (!empty($tmp['mssgs'])) {
+                    $log .= "Lab matched account $send_account. Results Dry Run Parse for Errors: " .
+                        $tmp['mssgs'] ? print_r($tmp['mssgs'][0], true) : "None" . "\n";
+                }
 
                 $info["$lab_name/$ppid/$file"]['mssgs'] = $tmp['mssgs'];
                 // $info["$lab_name/$ppid/$file"]['match'] = $tmp['match'];
                 if (!empty($tmp['fatal']) || !empty($tmp['needmatch'])) {
                     // There are errors or matching requests so skip this file.
+                    continue;
+                }
+                // Archive before importing: the file is removed from the lab only
+                // once archived, so a file imported without an archive copy would
+                // be imported again on the next run.
+                if (!$archiveHl7File("$prpath/$file", $hl7)) {
+                    $log .= "Couldn't Save File #$filecount, Not Imported: $file\n";
+                    $info["$lab_name/$ppid/$file"]['mssgs'] = ['*' . xl('Not imported, cannot create file') . ' "' . "$prpath/$file" . '"'];
                     continue;
                 }
                 $orphanLog = '';
@@ -1722,16 +1803,8 @@ function poll_hl7_results(&$info, $labs = 0)
                 $info["$lab_name/$ppid/$file"]['mssgs'] = $tmp['mssgs'];
                 // $info["$lab_name/$ppid/$file"]['match'] = $tmp['match'];
                 if (empty($tmp['fatal']) && empty($tmp['needmatch'])) {
-                    // It worked, archive and delete the file.
-                    $fh = fopen("$prpath/$file", 'w');
-                    if ($fh) {
-                        fwrite($fh, $hl7);
-                        fclose($fh);
-                        $log .= "Success Saved Results #$filecount to: $prpath/$file\n";
-                    } else {
-                        return xl('Cannot create file') . ' "' . "$prpath/$file" . '"';
-                    }
-
+                    // It worked and it's archived, delete the file.
+                    $log .= "Success Saved Results #$filecount to: $prpath/$file\n";
                     if (!unlink("$pathname/$file")) {
                         return xl('Cannot delete file') . ' "' . "$pathname/$file" . '"';
                     }
@@ -1777,12 +1850,10 @@ function poll_hl7_results(&$info, $labs = 0)
                 $file = "result_" . $control_id . ".hl7";
 
                 ++$filecount;
-                if (!isset($info["$lab_name/$ppid/$file"])) {
-                    $info["$lab_name/$ppid/$file"] = array();
-                }
+                $info["$lab_name/$ppid/$file"] ??= [];
 
                 // Ensure that archive directory exists.
-                $prpath = $GLOBALS['OE_SITE_DIR'] . "/documents/procedure_results";
+                $prpath = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/procedure_results";
                 if (!file_exists($prpath)) {
                     if (!mkdir($prpath, 0755, true) && !is_dir($prpath)) {
                         throw new RuntimeException(sprintf('Directory "%s" was not created', $prpath));
@@ -1801,7 +1872,7 @@ function poll_hl7_results(&$info, $labs = 0)
                 if (!$hl7) {
                     break;
                 }
-                $segs = explode("\r", $result->HL7Message->message);
+                $segs = explode("\r", (string) $result->HL7Message->message);
                 $a = explode('|', $segs[0]);
                 $client->SENDING_FACILITY = $a[5];
                 $client->RECEIVING_APPLICATION = $a[2];
@@ -1811,7 +1882,8 @@ function poll_hl7_results(&$info, $labs = 0)
                 if (!empty($info["$lab_name/$ppid/$file"]['delete'])) {
                     $fh = fopen("$prpath/$file.rejected", 'w');
                     if ($fh) {
-                        fwrite($fh, $hl7);
+                        $hl7_crypt = hl7Crypt($hl7);
+                        fwrite($fh, $hl7_crypt);
                         fclose($fh);
                     } else {
                         return xl('Cannot create file') . ' "' . "$prpath/$file.rejected" . '"';
@@ -1835,20 +1907,20 @@ function poll_hl7_results(&$info, $labs = 0)
                     // There are errors or matching requests so skip this file.
                     continue;
                 }
+                // Archive before importing: the file is removed from the lab only
+                // once archived, so a file imported without an archive copy would
+                // be imported again on the next run.
+                if (!$archiveHl7File("$prpath/$file", $hl7)) {
+                    $log .= "Couldn't Save File #$filecount, Not Imported: $file\n";
+                    $info["$lab_name/$ppid/$file"]['mssgs'] = ['*' . xl('Not imported, cannot create file') . ' "' . "$prpath/$file" . '"'];
+                    continue;
+                }
                 $orphanLog = '';
                 // Now the money shot - not a dry run.
                 $tmp = receive_hl7_results($hl7, $info['match'], $ppid, $pprow['direction'], false, $info['select']);
                 $info["$lab_name/$ppid/$file"]['mssgs'] = $tmp['mssgs'];
                 if (empty($tmp['fatal']) && empty($tmp['needmatch'])) {
-                    // It worked, archive and delete the file.
-                    $fh = fopen("$prpath/$file", 'w');
-                    if ($fh) {
-                        fwrite($fh, $hl7);
-                        fclose($fh);
-                    } else {
-                        return xl('Cannot create file') . ' "' . "$prpath/$file" . '"';
-                    }
-                    // remove ie ack
+                    // It worked and it's archived, remove ie ack
                     $acks = $client->buildResultAck($control_id);
                     $response = $client->sendResultAck($request_id, $acks, false);
                 }
@@ -1862,4 +1934,14 @@ function poll_hl7_results(&$info, $labs = 0)
 
     return '';
 }
-// PHP end tag omitted intentionally.
+
+/**
+ * Encrypt the content of the hl7 file if the global is turned on.
+ *
+ * @param string $content The unencrypted content of the hl7.
+ * @return string         The encrypted content of the hl7 if the global is set.
+ */
+function hl7Crypt($content): string
+{
+    return ServiceContainer::getCrypto()->encryptForFilesystem($content);
+}

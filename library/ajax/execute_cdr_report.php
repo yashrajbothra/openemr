@@ -10,14 +10,16 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(dirname(__FILE__) . "/../../interface/globals.php");
-require_once(dirname(__FILE__) . "/../clinical_rules.php");
+require_once(__DIR__ . "/../../interface/globals.php");
+require_once(__DIR__ . "/../clinical_rules.php");
 
+use OpenEMR\ClinicalDecisionRules\AMC\CertificationReportTypes;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
 
-if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-    CsrfUtils::csrfNotVerified();
-}
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 
 //Remove time limit, since script can take many minutes
 set_time_limit(0);
@@ -26,8 +28,8 @@ set_time_limit(0);
 // is increased, these cpu intensive reports will have less affect on the performance
 // of other server activities, albeit it may negatively impact the performance
 // of this report (note this is only applicable for linux).
-if (!empty($GLOBALS['cdr_report_nice'])) {
-    proc_nice($GLOBALS['cdr_report_nice']);
+if (!empty(OEGlobalsBag::getInstance()->get('cdr_report_nice'))) {
+    proc_nice(OEGlobalsBag::getInstance()->get('cdr_report_nice'));
 }
 
 //  Start a report, which will be stored in the report_results sql table..
@@ -41,22 +43,34 @@ if (!empty($_POST['execute_report_id'])) {
 
 
   // Process a new report and collect results
-    $options = array();
-    $array_date = array();
+    $options = [];
+    $array_date = [];
 
-    if (($rule_filter == "amc") || ($rule_filter == "amc_2011") || ($rule_filter == "amc_2014")  || ($rule_filter == "amc_2014_stage1") || ($rule_filter == "amc_2014_stage2")) {
+    // all 'amc' reports start with 'amc_', will need to make sure a user can't define their own rule with this pattern
+    if (CertificationReportTypes::isAMCReportType($rule_filter)) {
         // For AMC:
         //   need to make $target_date an array with two elements ('dateBegin' and 'dateTarget')
         //   need to send a manual data entry option (number of labs)
-        $array_date['dateBegin'] = $_POST['date_begin'];
+        $array_date['dateBegin'] = $_POST['date_begin'] ?? null;
         $array_date['dateTarget'] = $target_date;
-        $options = array('labs_manual' => $_POST['labs']);
+        $options = ['labs_manual' => $_POST['labs'] ?? 0];
     } else {
         // For others, use the unmodified target date array and send an empty options array
         $array_date = $target_date;
     }
 
-    test_rules_clinic_batch_method($provider, $rule_filter, $array_date, "report", $plan_filter, $organize_method, $options, $pat_prov_rel, '', $_POST['execute_report_id']);
+    test_rules_clinic_batch_method(
+        $provider,
+        $rule_filter,
+        $array_date,
+        "report",
+        $plan_filter,
+        $organize_method,
+        $options,
+        $pat_prov_rel,
+        '',
+        $_POST['execute_report_id']
+    );
 } else {
     echo "ERROR";
 }

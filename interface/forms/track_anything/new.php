@@ -4,7 +4,7 @@
  * Encounter form to track any clinical parameter.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Joe Slam <trackanything@produnis.de>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2014 Joe Slam <trackanything@produnis.de>
@@ -13,10 +13,21 @@
  */
 
 require_once(__DIR__ . "/../../globals.php");
-require_once("$srcdir/api.inc");
-require_once("$srcdir/forms.inc");
 
+use OpenEMR\Common\Forms\EncounterFormAccess;
+use OpenEMR\Common\Forms\FormActionBarSettings;
+use OpenEMR\Common\Session\EncounterSessionUtil;
+use OpenEMR\Common\Session\PatientSessionUtil;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$srcdir = OEGlobalsBag::getInstance()->getSrcDir();
+$rootdir = OEGlobalsBag::getInstance()->getString('rootdir');
+$web_root = OEGlobalsBag::getInstance()->getWebRoot();
+$pid = PatientSessionUtil::getPid();
+$encounter = EncounterSessionUtil::getEncounter();
+$userauthorized = PatientSessionUtil::getUserAuthorized();
 
 formHeader("Form: Track anything");
 
@@ -26,14 +37,16 @@ if (! $encounter) { // comes from globals.php
 }
 
 // get vars posted by FORMs
-if (!$formid) {
-    $formid = $_GET['id'];
+if (empty($formid)) {
+    $formid = $_GET['id'] ?? null;
     if (!$formid) {
-        $formid = $_POST['formid'];
+        $formid = $_POST['formid'] ?? null;
     }
 }
 
-$myprocedureid =  $_POST['procedure2track'];
+EncounterFormAccess::assertFormBelongsToSessionPatient(is_numeric($formid) ? (int) $formid : 0, 'track_anything');
+
+$myprocedureid =  $_POST['procedure2track'] ?? null;
 
 echo "<html><head>";
 ?>
@@ -45,7 +58,7 @@ $(function () {
         <?php $datetimepicker_timepicker = true; ?>
         <?php $datetimepicker_showseconds = true; ?>
         <?php $datetimepicker_formatInput = false; ?>
-        <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+        <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
         <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
     });
 });
@@ -59,8 +72,8 @@ echo "<div id='track_anything'>";
 if (!$formid) {
     // this is a new Track
 
-    // check if procedure is selcted
-    if ($_POST['bn_select']) {
+    // check if procedure is selected
+    if ($_POST['bn_select'] ?? null) {
         // "save"-Button was clicked, saving Form into db
 
         // save inbto db
@@ -68,14 +81,14 @@ if (!$formid) {
             $query = "INSERT INTO form_track_anything (procedure_type_id) VALUES (?)";
             $formid = sqlInsert($query, $myprocedureid);
             $spell = "SELECT name FROM form_track_anything_type WHERE track_anything_type_id = ?";
-            $myrow = sqlQuery($spell, array($myprocedureid));
+            $myrow = sqlQuery($spell, [$myprocedureid]);
             $myprocedurename = $myrow["name"];
             $register_as = "Track: " . $myprocedurename;
             // adding Form
             addForm($encounter, $register_as, $formid, "track_anything", $pid, $userauthorized);
         } else {
                 echo xlt('No track selected') . ".<br />";
-            ?><input type='button' value='<?php echo xla('Back'); ?>' onclick="top.restoreSession();location='<?php echo $GLOBALS['form_exit_url']; ?>'" /><?php
+            ?><input type='button' value='<?php echo xla('Back'); ?>' onclick="top.restoreSession();location='<?php echo FormActionBarSettings::EXIT_URL; ?>'" /><?php
         }
     } else {
     // procedure is not yet selected
@@ -100,7 +113,7 @@ if (!$formid) {
         echo "</select>";
         echo "</td></tr><tr><td align='center'>";
         echo "<input type='submit' name='bn_select' value='" . xla('Select') . "' />";
-        ?><input type='button' value='<?php echo  xla('Back'); ?>' onclick="top.restoreSession();location='<?php echo $GLOBALS['form_exit_url']; ?>'" /><?php
+        ?><input type='button' value='<?php echo  xla('Back'); ?>' onclick="top.restoreSession();location='<?php echo FormActionBarSettings::EXIT_URL; ?>'" /><?php
         echo "</form>";
         echo "<br />&nbsp;</td></tr>";
 
@@ -119,10 +132,10 @@ if ($formid) {
     // this is an existing Track
     //----------------------------------------------------
     // get submitted item-Ids
-    $mylist = $_POST['liste'];
+    $mylist = $_POST['liste'] ?? null;
     #echo $mylist;
-    $length = count($mylist);
-    $thedate = $_POST['datetime'];
+    $length = count($mylist ?? []);
+    $thedate = $_POST['datetime'] ?? null;
     #echo $thedate;
     //check if whole input is NULL
     $all_are_null = 0;
@@ -136,7 +149,7 @@ if ($formid) {
     }
 
     // if all of the input is NULL, we do nothing
-    // if at least one entrie is NOT NULL, we save all into db
+    // if at least one entry is NOT NULL, we save all into db
     if ($all_are_null > 0) {
         for ($i = 0; $i < $length; $i++) {
             $thisid = $mylist[$i];
@@ -144,7 +157,7 @@ if ($formid) {
 
             // store data to track_anything_db
             $query = "INSERT INTO form_track_anything_results (track_anything_id, track_timestamp, itemid, result) VALUES (?, ?, ?, ?)";
-            sqlStatement($query, array($formid,$thedate,$thisid,$thisvalue));
+            sqlStatement($query, [$formid,$thedate,$thisid,$thisvalue]);
         }
     }
 
@@ -156,21 +169,21 @@ if ($formid) {
     // ---------------------------
 
     // getting old entries from <form>
-    $old_id     = $_POST['old_id'];
-    $old_time   = $_POST['old_time'];
-    $old_value  = $_POST['old_value'];
+    $old_id     = $_POST['old_id'] ?? null;
+    $old_time   = $_POST['old_time'] ?? null;
+    $old_value  = $_POST['old_value'] ?? null;
 
-    $how_many = count($old_time);
+    $how_many = count($old_time ?? []);
     // do this for each data row
     for ($x = 0; $x <= $how_many; $x++) {
         // how many columns do we have
-        $how_many_cols = count($old_value[$x]);
+        $how_many_cols = count($old_value[$x] ?? []);
         for ($y = 0; $y < $how_many_cols; $y++) {
                 // here goes the UPDATE sql-spruch
                 $insertspell  = "UPDATE form_track_anything_results ";
                 $insertspell .= "SET track_timestamp = ? , result = ? ";
                 $insertspell .= "WHERE id = ? ";
-                sqlStatement($insertspell, array($old_time[$x], $old_value[$x][$y], $old_id[$x][$y]));
+                sqlStatement($insertspell, [$old_time[$x], $old_value[$x][$y], $old_id[$x][$y]]);
         }
     }
 
@@ -180,7 +193,7 @@ if ($formid) {
     //get procedure ID
     if (!$myprocedureid) {
         $spell = "SELECT procedure_type_id FROM form_track_anything WHERE id = ?";
-        $myrow = sqlQuery($spell, array($formid));
+        $myrow = sqlQuery($spell, [$formid]);
         $myprocedureid = $myrow["procedure_type_id"];
     }
 
@@ -199,9 +212,9 @@ if ($formid) {
 
     <?php
     // get items to track
-    $liste = array();
+    $liste = [];
     $spell = "SELECT * FROM form_track_anything_type WHERE parent = ? AND active = 1 ORDER BY position ASC, name ASC ";
-    $query = sqlStatement($spell, array($myprocedureid));
+    $query = sqlStatement($spell, [$myprocedureid]);
     while ($myrow = sqlFetchArray($query)) {
         echo "<input type='hidden' name='liste[]' value='" . attr($myrow['track_anything_type_id']) . "'>";
         echo "<tr><td> " . text($myrow['name']) . "</td>";
@@ -211,7 +224,7 @@ if ($formid) {
     echo "</table>";
     echo "<input type='hidden' name='formid' value='" . attr($formid) . "'>";
     echo "<input type='submit' name='bn_save' value='" . xla('Save') . "' />";
-    ?><input type='button' value='<?php echo  xla('Stop'); ?>' onclick="top.restoreSession();location='<?php echo $GLOBALS['form_exit_url']; ?>'" /><?php
+    ?><input type='button' value='<?php echo  xla('Stop'); ?>' onclick="top.restoreSession();location='<?php echo FormActionBarSettings::EXIT_URL; ?>'" /><?php
 
 
     // show old entries of track
@@ -223,7 +236,7 @@ if ($formid) {
     echo "<table border='1'>";
 
     $spell0 = "SELECT DISTINCT track_timestamp FROM form_track_anything_results WHERE track_anything_id = ? ORDER BY track_timestamp DESC";
-    $query = sqlStatement($spell0, array($formid));
+    $query = sqlStatement($spell0, [$formid]);
     $main_counter = 0; // this counts 'number of rows'  of old entries
 while ($myrow = sqlFetchArray($query)) {
     $thistime = $myrow['track_timestamp'];
@@ -234,7 +247,7 @@ while ($myrow = sqlFetchArray($query)) {
     $spell .= "INNER JOIN form_track_anything_type ON form_track_anything_results.itemid = form_track_anything_type.track_anything_type_id ";
     $spell .= "WHERE track_anything_id = ? AND track_timestamp = ? AND form_track_anything_type.active = 1 ";
     $spell .= "ORDER BY form_track_anything_type.position ASC, the_name ASC ";
-    $query2  = sqlStatement($spell, array($formid ,$thistime));
+    $query2  = sqlStatement($spell, [$formid ,$thistime]);
 
     // <table> heading line
     if ($shownameflag == 1) {
@@ -249,14 +262,14 @@ while ($myrow = sqlFetchArray($query)) {
     echo "<tr><td bgcolor=#eeeeec>";
     $main_counter++; // next row
     echo "<input type='text' class='datetimepicker' size='16' name='old_time[" . attr($main_counter) . "]' value='" . attr($thistime) . "'></td>";
-    $query2  = sqlStatement($spell, array($formid ,$thistime));
+    $query2  = sqlStatement($spell, [$formid ,$thistime]);
 
     $counter = 0; // this counts columns
     while ($myrow2 = sqlFetchArray($query2)) {
         echo "<td>";
         echo "<input type='hidden' name='old_id[" . attr($main_counter) . "][" . attr($counter) . "]' value='" . attr($myrow2['result_id']) . "'>";
         echo "<input type='text' size='12' name='old_value[" . attr($main_counter) . "][" . attr($counter) . "]' value='" . attr($myrow2['result']) . "'></td>";
-        $counter++; // next cloumn
+        $counter++; // next column
     }
 
     echo "</tr>";
@@ -265,7 +278,7 @@ while ($myrow = sqlFetchArray($query)) {
     echo "</tr></table>";
     echo "<input type='hidden' name='formid' value='" . attr($formid) . "'>";
     echo "<input type='submit' name='bn_save' value='" . xla('Save') . "' />";
-?><input type='button' value='<?php echo xla('Stop'); ?>' onclick="top.restoreSession();location='<?php echo $GLOBALS['form_exit_url']; ?>'" /><?php
+?><input type='button' value='<?php echo xla('Stop'); ?>' onclick="top.restoreSession();location='<?php echo FormActionBarSettings::EXIT_URL; ?>'" /><?php
 
     echo "</form>";
 }//end if($formid)

@@ -4,7 +4,7 @@
  * edih_view.php
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Kevin McCormick Longview, Texas
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2012 Kevin McCormick Longview, Texas
@@ -12,15 +12,20 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(dirname(__FILE__) . '/../globals.php');
+require_once(__DIR__ . '/../globals.php');
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 
 //
 if (!AclMain::aclCheckCore('acct', 'eob')) {
-    die(xlt("Access Not Authorized"));
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for acct/eob: EDI History", xl("EDI History"));
 }
 
 ?>
@@ -30,10 +35,10 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
 <head>
     <title><?php echo xlt("EDI History"); ?></title>
     <?php Header::setupHeader(['datetime-picker', 'datatables', 'datatables-dt', 'datatables-bs', 'datatables-scroller']); ?>
-    <?php if ($_SESSION['language_direction'] == "rtl") { ?>
-      <link rel="stylesheet" href="<?php echo $GLOBALS['themes_static_relative']; ?>/misc/rtl_edi_history_v2.css?v=<?php echo $GLOBALS['v_js_includes']; ?>" />
+    <?php if ($session->get('language_direction') === 'rtl') { ?>
+      <link rel="stylesheet" href="<?php echo OEGlobalsBag::getInstance()->getKernel()->getThemesRelative(); ?>/misc/rtl_edi_history_v2.css?v=<?php echo OEGlobalsBag::getInstance()->get('v_js_includes'); ?>" />
     <?php } else { ?>
-      <link rel="stylesheet" href="<?php echo $GLOBALS['themes_static_relative']; ?>/misc/edi_history_v2.css?v=<?php echo $GLOBALS['v_js_includes']; ?>" />
+      <link rel="stylesheet" href="<?php echo OEGlobalsBag::getInstance()->getKernel()->getThemesRelative(); ?>/misc/edi_history_v2.css?v=<?php echo OEGlobalsBag::getInstance()->get('v_js_includes'); ?>" />
     <?php } ?>
 </head>
 <!-- style for OpenEMR color -->
@@ -82,7 +87,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                         <div class="row">
                             <div class="col-sm-12 col-md-6">
                                 <form id="formupl" name="form_upl" action="edih_main.php" method="POST" enctype="multipart/form-data">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Select one or more files to upload"); ?></h4>
                                     <div class="custom-file">
                                         <label class="custom-file-label"><?php echo xlt("Choose file"); ?></label>
@@ -99,7 +104,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                             </div>
                             <div class="col-sm-12 col-md-6">
                                 <form id="processnew" name="process_new" action="edih_main.php" method="GET">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Process new files for CSV records"); ?>:</h4>
                                     <input type="checkbox" id="processhtml" name="process_html" form="processnew"  value="htm" checked /> <?php echo xlt("HTML Output?"); ?>
                                     <input type="checkbox" id="processerr" name="process_err" form="processnew"  value="err" checked /> <?php echo xlt("Show Errors Only?"); ?> &nbsp;&nbsp;<br />
@@ -130,7 +135,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                         <div class="row">
                             <div class="col-sm-12 col-md-8">
                                 <form id="formcsvtables" name="form_csvtables" action="edih_main.php" method="GET">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("View CSV tables"); ?>:</h4>
                                     <table>
                                         <tr>
@@ -165,7 +170,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                                             </td>
                                             <td class='text-left'>
                                                 <input type="hidden" name="csvShowTable" form="formcsvtables" value="gettable" />
-                                                <button type="button" class="btn btn-primary btn-add" id="csvshow" name="csv_show" form="formcsvtables" value="<?php echo xla("Submit"); ?>">
+                                                <button type="submit" class="btn btn-primary btn-add" id="csvshow" name="csv_show" form="formcsvtables" value="<?php echo xla("Submit"); ?>">
                                                     <?php echo xlt("Submit"); ?>
                                                 </button>
                                             </td>
@@ -175,7 +180,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                             </div>
                             <div class="col-sm-12 col-md-4">
                                 <form id="formcsvhist" name="hist_csv" action="edih_main.php" method="get">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Per Encounter"); ?></h4>
                                     <table>
                                         <tr>
@@ -214,7 +219,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                         <div class="row">
                             <div class="col-12">
                                 <form id="x12view" name="x12_view" action="edih_main.php" enctype="multipart/form-data" method="post">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("View EDI x12 file"); ?>:</h4>
                                     <table>
                                         <tr>
@@ -257,11 +262,11 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                     <div class="container">
                         <div class="row">
                             <div class="col-12">
-                                <a class="text-decoration-none" href="<?php echo $web_root; ?>/Documentation/Readme_edihistory.html" rel="noopener" target="_blank"><?php echo xlt("View the README file"); ?></a>
+                                <a class="text-decoration-none" href="<?php echo OEGlobalsBag::getInstance()->getWebRoot(); ?>/Documentation/Readme_edihistory.html" rel="noopener" target="_blank"><?php echo xlt("View the README file"); ?></a>
                             </div>
                             <div class="col-sm-12 col-md-6">
                                 <form id="formlog" name="form_log" action="edih_main.php" enctype="multipart/form-data" method="post">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Inspect the log"); ?></h4>
                                     <label for="logfile"><?php echo xlt("View Log"); ?></label>
                                     <select class="custom-select" id="logselect" name="log_select"></select>
@@ -281,7 +286,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                             </div>
                             <div class="col-sm-12 col-md-6">
                                 <form id="formnotes" name="form_notes" action="edih_main.php" enctype="multipart/form-data" method="post">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Notes"); ?></h4>
                                     <label for="notesget"><?php echo xlt("Notes"); ?></label>
                                     <div class="btn-group ml-2">
@@ -314,7 +319,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                             </div>
                             <div class="col-sm-12 col-md-6">
                                 <form id="formarchive" name="form_archive" action="edih_main.php" enctype="multipart/form-data" method="POST">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Archive old files"); ?></h4>
                                     <label for="archive_sel"><?php echo xlt("Older than"); ?>:</label>
                                     <select class="custom-select" id="archiveselect" name="archive_sel">
@@ -335,7 +340,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
                             </div>
                             <div class="col-sm-12 col-md-6">
                                 <form id="formarchrestore" name="form_archrestore" action="edih_main.php" enctype="multipart/form-data" method="POST">
-                                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                                     <h4><?php echo xlt("Restore Archive"); ?></h4>
                                     <label for="archrestore_sel"><?php echo xlt("Restore"); ?>:</label>
                                     <select class="custom-select" id="archrestoresel" name="archrestore_sel"> </select>
@@ -375,7 +380,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
             <?php $datetimepicker_timepicker = false; ?>
             <?php $datetimepicker_showseconds = false; ?>
             <?php $datetimepicker_formatInput = false; ?>
-            <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+            <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
             <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
         });
     });
@@ -399,7 +404,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
             url: 'edih_main.php',
             data: {
                 srvinfo: 'yes',
-                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
             },
             dataType: 'json',
             success: function(rsp){ phpserver = rsp }
@@ -415,7 +420,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
             url: 'edih_main.php',
             data: {
                 csvtbllist: 'yes',
-                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
             },
             dataType: 'json',
             success: function(data) {
@@ -442,7 +447,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
             url: 'edih_main.php',
             data: {
                 loglist: 'yes',
-                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
             },
             dataType: 'json',
             success: function(data) {
@@ -466,7 +471,7 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
             url: 'edih_main.php',
             data: {
                 archlist: 'yes',
-                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
             },
             dataType: 'json',
             success: function(data) {
@@ -487,61 +492,27 @@ if (!AclMain::aclCheckCore('acct', 'eob')) {
         });
     };
 
-/*
-jquery-UI dialog
-    control visibility by designating to which div the dialog is appended
-*/
-    function dialogOptions(appendElem) {
-        var tblDialogOpts = {
-            appendTo: appendElem,
-            draggable: true,
-            resizable: true,
-            height: 512,
-            width: 768,
-            // no need for maxWidth: 768, since some files are pretty wide
-            title: 'Transaction Detail',
-            close: function(event, ui)
-            {
-                $(this).dialog("close");
-                $(this).remove();
-            }
-        };
-        return tblDialogOpts;
-    }
-
-
     $('#tbcsvhist').on('click', 'a', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        var options = dialogOptions('#tbcsvhist');
         $('<div/>', {'class':'edihDlg', 'id':'link-'+($(this).index()+1)})
-            .load($(this).attr('href')).appendTo('#tbcsvhist').dialog(options);
+            .load($(this).attr('href')).appendTo('#tbcsvhist');
     });
+
 /* #csvTable  ****  */
     $('#tblshow').on('click', 'a', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        var ttl = $(this).attr('title');
-        var options = dialogOptions('#tblshow');
         $('<div/>', {'class':'edihDlg', 'id':'link-'+($(this).index()+1)})
-            .load($(this).attr('href')).appendTo('#tblshow').dialog(options);
+            .load($(this).attr('href')).appendTo('#tblshow');
     });
-/*
-    $('#tbrpt').on('click', 'a', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        var options = dialogOptions('#tblshow');
-        $('<div/>', {'class':'edihDlg', 'id':'link-'+($(this).index()+1)})
-            .load($(this).attr('href')).appendTo('#tblshow').dialog(options);
-    });
-*/
+
 /* **** links in dialog in uploads - processed div  ****    */
     $('#processed').on('click', 'a', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        var options = dialogOptions('#processed');
         $('<div/>', {'class':'edihDlg', 'id':'link-'+($(this).index()+1)})
-            .load($(this).attr('href')).appendTo('#processed').dialog(options);
+            .load($(this).attr('href')).appendTo('#processed');
     });
 /* ****************************
  *
@@ -625,6 +596,7 @@ jquery-UI dialog
                 contentType: false,
                 success: function(data) {
                     rspElem.html(data);
+                    rspElem.toggle();
                     rspElem.removeClass('d-none');
                     $('#fuplprocess').prop('disabled', false );
                     $('#fuplupload').prop('disabled', true);
@@ -756,7 +728,7 @@ jquery-UI dialog
                         'scrollX': true,
                         'paging': true,
                         <?php // Bring in the translations ?>
-                        <?php require($GLOBALS['srcdir'] . '/js/xl/datatables-net.js.php'); ?>
+                        <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/datatables-net.js.php'); ?>
                     });
                 },
             ]
@@ -841,7 +813,7 @@ jquery-UI dialog
             url: $('#formlog').attr('action'),
             data: {
                 archivelog: 'yes',
-                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
             },
             dataType: "json",
             success: function(data) {
@@ -904,7 +876,7 @@ jquery-UI dialog
             url: $('#formnotes').attr('action'),
             data: {
                 getnotes: "yes",
-                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
             },
             dataType: "text",
             success: function(data){
@@ -923,7 +895,7 @@ jquery-UI dialog
         e.preventDefault();
         var notetxt = $('#txtnotes').val();
         var noteURL = $('#formnotes').attr('action');
-        $.post(noteURL, { putnotes: 'yes', tnotes: notetxt, csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?> },
+        $.post(noteURL, { putnotes: 'yes', tnotes: notetxt, csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?> },
             function(data){ $('#notesrsp').append(data); });
     });
 
@@ -982,7 +954,7 @@ jquery-UI dialog
             type: 'GET',
             //cache: false,
             dataType: 'html',
-            data: { archivereport: 'yes', period: sprd, csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?> },
+            data: { archivereport: 'yes', period: sprd, csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?> },
 
             success: function(data) {
                 //rspElem.html(data);

@@ -155,7 +155,7 @@ class FHIRImplementationGuideGlobal extends FHIRBackboneElement implements \Json
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -163,7 +163,7 @@ class FHIRImplementationGuideGlobal extends FHIRBackboneElement implements \Json
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->type)) {
@@ -176,15 +176,13 @@ class FHIRImplementationGuideGlobal extends FHIRBackboneElement implements \Json
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ImplementationGuideGlobal xmlns="http://hl7.org/fhir"></ImplementationGuideGlobal>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ImplementationGuideGlobal xmlns="http://hl7.org/fhir"></ImplementationGuideGlobal>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->type)) {
             $this->type->xmlSerialize(true, $sxe->addChild('type'));

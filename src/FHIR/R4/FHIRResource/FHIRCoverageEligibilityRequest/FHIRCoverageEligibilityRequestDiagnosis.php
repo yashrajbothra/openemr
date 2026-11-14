@@ -149,7 +149,7 @@ class FHIRCoverageEligibilityRequestDiagnosis extends FHIRBackboneElement implem
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -157,7 +157,7 @@ class FHIRCoverageEligibilityRequestDiagnosis extends FHIRBackboneElement implem
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->diagnosisCodeableConcept)) {
@@ -170,15 +170,13 @@ class FHIRCoverageEligibilityRequestDiagnosis extends FHIRBackboneElement implem
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<CoverageEligibilityRequestDiagnosis xmlns="http://hl7.org/fhir"></CoverageEligibilityRequestDiagnosis>');
-        }
+        $sxe ??= new \SimpleXMLElement('<CoverageEligibilityRequestDiagnosis xmlns="http://hl7.org/fhir"></CoverageEligibilityRequestDiagnosis>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->diagnosisCodeableConcept)) {
             $this->diagnosisCodeableConcept->xmlSerialize(true, $sxe->addChild('diagnosisCodeableConcept'));

@@ -6,78 +6,107 @@
  * @package   OpenEMR
  * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Jerry Padgett <sjpadgett@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2019 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2019-2024 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(dirname(__FILE__) . "/../library/forms.inc");
-
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Acl\AccessDeniedHelper;
 use OpenEMR\Common\Acl\AclMain;
-use OpenEMR\Common\Crypto\CryptoGen;
+use OpenEMR\Common\Crypto\CryptoInterface;
+use OpenEMR\Common\Crypto\KeyVersion;
+use OpenEMR\Common\Crypto\PasswordBasedCrypto;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\Http\RequestTerminator;
+use OpenEMR\Common\Lists\IssueTypeRegistry;
+use OpenEMR\Common\Logging\EventAuditLogger;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\PatientDocuments\PatientDocumentTreeViewFilterEvent;
+use OpenEMR\Events\PatientDocuments\PatientRetrieveOffsiteDocument;
+use OpenEMR\Services\DocumentTemplates\DocumentTemplateService;
 use OpenEMR\Services\FacilityService;
 use OpenEMR\Services\PatientService;
 
 class C_Document extends Controller
 {
+    public $documents;
+    public $document_categories;
+    public $tree;
+    public $_config;
+    public $manual_set_owner = false; // allows manual setting of a document owner/service
+    public $facilityService;
+    public $patientService;
+    public $_last_node;
+    private $Document;
+    private readonly CryptoInterface $cryptoGen;
+    private bool $skip_acl_check = false;
+    private readonly DocumentTemplateService $templateService;
+    private bool $returnRetrieveKey = false;
 
-    var $template_mod;
-    var $documents;
-    var $document_categories;
-    var $tree;
-    var $_config;
-    var $manual_set_owner = false; // allows manual setting of a document owner/service
-    var $facilityService;
-    var $patientService;
-
-    function __construct($template_mod = "general")
-    {
+    /**
+     * @param bool $withCsrfToken false when nothing will be rendered, e.g. the REST API reading a file;
+     *                            API bearer token sessions have no CSRF key to build a token from
+     */
+    public function __construct(
+        ?CryptoInterface $crypto = null,
+        bool $withCsrfToken = true,
+    ) {
         parent::__construct();
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $this->facilityService = new FacilityService();
         $this->patientService = new PatientService();
-        $this->documents = array();
-        $this->template_mod = $template_mod;
-        $this->assign("FORM_ACTION", $GLOBALS['webroot'] . "/controller.php?" . attr($_SERVER['QUERY_STRING']));
-        $this->assign("CURRENT_ACTION", $GLOBALS['webroot'] . "/controller.php?" . "document&");
+        $this->documents = [];
+        $this->assign("FORM_ACTION", OEGlobalsBag::getInstance()->get('webroot') . "/controller.php?" . attr($_SERVER['QUERY_STRING'] ?? ''));
+        $this->assign("CURRENT_ACTION", OEGlobalsBag::getInstance()->get('webroot') . "/controller.php?" . "document&");
 
-        $this->assign("CSRF_TOKEN_FORM", CsrfUtils::collectCsrfToken());
+        if ($withCsrfToken && php_sapi_name() !== 'cli') {
+            // skip when this is being called via command line for the ccda importing
+            $this->assign("CSRF_TOKEN_FORM", CsrfUtils::collectCsrfToken($session));
+        }
 
-        $this->assign("IMAGES_STATIC_RELATIVE", $GLOBALS['images_static_relative']);
+        $this->assign("IMAGES_STATIC_RELATIVE", OEGlobalsBag::getInstance()->get('images_static_relative'));
 
         //get global config options for this namespace
-        $this->_config = $GLOBALS['oer_config']['documents'];
+        $this->_config = OEGlobalsBag::getInstance()->get('oer_config')['documents'];
 
-        $this->_args = array("patient_id" => $_GET['patient_id']);
+        $this->_args = ["patient_id" => ($_GET['patient_id'] ?? null)];
 
-        $this->assign("STYLE", $GLOBALS['style']);
+        $this->assign("STYLE", OEGlobalsBag::getInstance()->get('style'));
         $t = new CategoryTree(1);
         //print_r($t->tree);
         $this->tree = $t;
         $this->Document = new Document();
 
         // Create a crypto object that will be used for for encryption/decryption
-        $this->cryptoGen = new CryptoGen();
+        $this->cryptoGen = $crypto ?? ServiceContainer::getCrypto();
+        $this->templateService = new DocumentTemplateService();
     }
 
-    function upload_action($patient_id, $category_id)
+    public function upload_action($patient_id, $category_id): string
     {
         $category_name = $this->tree->get_node_name($category_id);
         $this->assign("category_id", $category_id);
         $this->assign("category_name", $category_name);
-        $this->assign("hide_encryption", $GLOBALS['hide_document_encryption']);
+        $this->assign("hide_encryption", OEGlobalsBag::getInstance()->getBoolean('hide_document_encryption'));
         $this->assign("patient_id", $patient_id);
 
         // Added by Rod to support document template download from general_upload.html.
         // Cloned from similar stuff in manage_document_templates.php.
-        $templatedir = $GLOBALS['OE_SITE_DIR'] . '/documents/doctemplates';
+        $templatedir = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/doctemplates';
         $templates_options = "<option value=''>-- " . xlt('Select Template') . " --</option>";
         if (file_exists($templatedir)) {
               $dh = opendir($templatedir);
         }
         if (!empty($dh)) {
-              $templateslist = array();
+              $templateslist = [];
             while (false !== ($sfname = readdir($dh))) {
-                if (substr($sfname, 0, 1) == '.') {
+                if (str_starts_with($sfname, '.')) {
                     continue;
                 }
                 $templateslist[$sfname] = $sfname;
@@ -91,44 +120,24 @@ class C_Document extends Controller
         }
         $this->assign("TEMPLATES_LIST", $templates_options);
 
-        // duplicate template list for new template form editor sjp 05/20/2019
         // will call as module or individual template.
-        $templatedir = $GLOBALS['OE_SITE_DIR'] . '/documents/onsite_portal_documents/templates';
-        $templates_options = "<option value=''>-- " . xlt('Open Forms Module') . " --</option>";
-        if (file_exists($templatedir)) {
-            $dh = opendir($templatedir);
-        }
-        if ($dh) {
-            $templateslist = array();
-            while (false !== ($sfname = readdir($dh))) {
-                if (substr($sfname, 0, 1) == '.') {
-                    continue;
-                }
-                if (substr(strtolower($sfname), strlen($sfname) - 4) == '.tpl') {
-                    $templateslist[$sfname] = $sfname;
-                }
-            }
-            closedir($dh);
-            ksort($templateslist);
-            foreach ($templateslist as $sfname) {
-                $optname = str_replace('_', ' ', basename($sfname, ".tpl"));
-                $templates_options .= "<option value='" . attr($sfname) . "'>" . text($optname) . "</option>";
-            }
-        }
-        $this->assign("TEMPLATES_LIST_PATIENT", $templates_options);
+        $templates_list = $this->templateService->renderPortalTemplateMenu($patient_id, '-patient-', false) ?? [];
+        $this->assign("TEMPLATES_LIST_PATIENT", $templates_list);
 
-        $activity = $this->fetch($GLOBALS['template_dir'] . "documents/" . $this->template_mod . "_upload.html");
+        $activity = $this->fetch(OEGlobalsBag::getInstance()->get('template_dir') . "documents/" . $this->template_mod . "_upload.html");
         $this->assign("activity", $activity);
         return $this->list_action($patient_id);
     }
 
-    function zip_dicom_folder($study_name = null)
+    public function zip_dicom_folder($study_name = null)
     {
         $zip = new ZipArchive();
-        $zip_name = $GLOBALS['temporary_files_dir'] . "/" . $study_name;
+        $zip_name = OEGlobalsBag::getInstance()->getString('temporary_files_dir') . "/" . $study_name;
         if ($zip->open($zip_name, (ZipArchive::CREATE | ZipArchive::OVERWRITE)) === true) {
             foreach ($_FILES['dicom_folder']['name'] as $i => $name) {
-                $zfn = $GLOBALS['temporary_files_dir'] . "/" . $name;
+                // Strip directory components to prevent path traversal.
+                $name = basename((string) $name);
+                $zfn = OEGlobalsBag::getInstance()->getString('temporary_files_dir') . "/" . $name;
                 $fparts = pathinfo($name);
                 if (empty($fparts['extension'])) {
                     // viewer requires lowercase.
@@ -160,23 +169,14 @@ class C_Document extends Controller
     }
 
     //Upload multiple files on single click
-    function upload_action_process()
+    public function upload_action_process()
     {
-
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         // Collect a manually set owner if this has been set
         // Used when want to manually assign the owning user/service such as the Direct mechanism
         $non_HTTP_owner = false;
         if ($this->manual_set_owner) {
             $non_HTTP_owner = $this->manual_set_owner;
-        }
-
-        $couchDB = false;
-        $harddisk = false;
-        if ($GLOBALS['document_storage_method'] == 0) {
-            $harddisk = true;
-        }
-        if ($GLOBALS['document_storage_method'] == 1) {
-            $couchDB = true;
         }
 
         if ($_POST['process'] != "true") {
@@ -187,26 +187,35 @@ class C_Document extends Controller
         $encrypted = $_POST['encrypted'] ?? false;
         $passphrase = $_POST['passphrase'] ?? '';
         if (
-            !$GLOBALS['hide_document_encryption'] &&
+            !OEGlobalsBag::getInstance()->getBoolean('hide_document_encryption') &&
             $encrypted && $passphrase
         ) {
             $doDecryption = true;
         }
 
-        if (is_numeric($_POST['category_id'])) {
-            $category_id = $_POST['category_id'];
-        }
+        $category_id = is_numeric($_POST['category_id']) ? $_POST['category_id'] : 1;
 
         $patient_id = 0;
-        if (isset($_GET['patient_id']) && !$couchDB) {
-            $patient_id = $_GET['patient_id'];
-        } elseif (is_numeric($_POST['patient_id'])) {
+        if (is_numeric($_POST['patient_id'])) {
             $patient_id = $_POST['patient_id'];
         }
 
-        if (!empty($_FILES['dicom_folder']['name'][0])) {
+        // ensure user has access to the category that is being uploaded to
+        $skipUpload = false;
+        if (!$this->isSkipAclCheck()) {
+            $acoSpec = sqlQuery("SELECT `aco_spec` from `categories` WHERE `id` = ?", [$category_id])['aco_spec'];
+            if (AclMain::aclCheckAcoSpec($acoSpec) === false) {
+                $error = xl("Not authorized to upload to the selected category.\n");
+                $skipUpload = true;
+                ServiceContainer::getLogger()->debug("An attempt was made to upload a document to an unauthorized category", ['user-id' => $session->get('authUserID'), 'patient-id' => $patient_id, 'category-id' => $category_id]);
+            }
+        }
+
+        if (!$skipUpload && !empty($_FILES['dicom_folder']['name'][0])) {
             // let's zip um up then pass along new zip
-            $study_name = $_POST['destination'] ? (trim($_POST['destination']) . ".zip") : 'DicomStudy.zip';
+            $study_name = $_POST['destination'] ? (trim((string) $_POST['destination']) . ".zip") : 'DicomStudy.zip';
+            // Strip directory components to prevent path traversal (e.g. "../../evil" → "evil.zip").
+            $study_name = basename($study_name);
             $study_name =  preg_replace('/\s+/', '_', $study_name);
             $_POST['destination'] = "";
             $zipped = $this->zip_dicom_folder($study_name);
@@ -217,8 +226,8 @@ class C_Document extends Controller
             // do its normal file processing..
         }
 
-        $sentUploadStatus = array();
-        if (count($_FILES['file']['name']) > 0) {
+        $sentUploadStatus = [];
+        if (!$skipUpload && count($_FILES['file']['name']) > 0) {
             $upl_inc = 0;
 
             foreach ($_FILES['file']['name'] as $key => $value) {
@@ -233,11 +242,11 @@ class C_Document extends Controller
                     if ($_FILES['file']['size'][$key] == 0) {
                         $error .= xl("The system does not permit uploading files of with size 0.") . "\n";
                     }
-                } elseif ($GLOBALS['secure_upload'] && !isWhiteFile($_FILES['file']['tmp_name'][$key])) {
+                } elseif (OEGlobalsBag::getInstance()->getBoolean('secure_upload') && !isWhiteFile($_FILES['file']['tmp_name'][$key])) {
                     $error = xl("The system does not permit uploading files with MIME content type") . " - " . mime_content_type($_FILES['file']['tmp_name'][$key]) . ".\n";
                 } else {
                     // Test for a zip of DICOM images
-                    if (stripos($_FILES['file']['type'][$key], 'zip') !== false) {
+                    if (stripos((string) $_FILES['file']['type'][$key], 'zip') !== false) {
                         $za = new ZipArchive();
                         $handler = $za->open($_FILES['file']['tmp_name'][$key]);
                         if ($handler) {
@@ -248,7 +257,7 @@ class C_Document extends Controller
                                 if ($fp) {
                                     $head = fread($fp, 256);
                                     fclose($fp);
-                                    if (strpos($head, 'DICM') === false) { // Fixed at offset 128. even one non DICOM makes zip invalid.
+                                    if (substr((string) $head, 128, 4) !== 'DICM') { // Fixed at offset 128. even one non DICOM makes zip invalid.
                                         $mimetype = "application/zip";
                                         break;
                                     }
@@ -267,7 +276,6 @@ class C_Document extends Controller
                             }
                             $za->close();
                             if ($mimetype == "application/dicom+zip") {
-                                $_FILES['file']['type'][$key] = $mimetype;
                                 sleep(1); // Timing insurance in case of re-compression. Only acted on index so...!
                                 $_FILES['file']['size'][$key] = filesize($_FILES['file']['tmp_name'][$key]); // file may have grown.
                             }
@@ -277,23 +285,34 @@ class C_Document extends Controller
                     $filetext = fread($tmpfile, $_FILES['file']['size'][$key]);
                     fclose($tmpfile);
                     if ($doDecryption) {
-                        $filetext = $this->cryptoGen->decryptStandard($filetext, $passphrase);
-                        if ($filetext === false) {
+                        $passwordCrypto = new PasswordBasedCrypto(KeyVersion::CURRENT);
+                        try {
+                            $filetext = $passwordCrypto->decrypt((string) $filetext, (string) $passphrase);
+                        } catch (\OpenEMR\Common\Crypto\CryptoGenException) {
                             error_log("OpenEMR Error: Unable to decrypt a document since decryption failed.");
                             $filetext = "";
                         }
                     }
                     if ($_POST['destination'] != '') {
-                        $fname = $_POST['destination'];
+                        // Strip directory components to prevent path traversal.
+                        $fname = basename((string) $_POST['destination']);
                     }
-                    // set mime, test for single DICOM and assign extension if missing.
-                    $mimetype = $_FILES['file']['type'][$key];
-                    if (strpos($filetext, 'DICM') !== false) {
+                    // test for single DICOM and assign extension if missing.
+                    if (substr((string) $filetext, 128, 4) === 'DICM') { // the DICOM marker is only valid at offset 128, not anywhere in the file (a stored zip can contain it)
                         $mimetype = 'application/dicom';
-                        $parts = pathinfo($fname);
+                        $parts = pathinfo((string) $fname);
                         if (!$parts['extension']) {
                             $fname .= '.dcm';
                         }
+                    }
+                    // set mimetype (if not already set above)
+                    if (empty($mimetype)) {
+                        $mimetype = mime_content_type($_FILES['file']['tmp_name'][$key]);
+                    }
+                    // if mimetype still empty, then do not upload the file
+                    if (empty($mimetype)) {
+                        $error = xl("Unable to discover mimetype, so did not upload " . $_FILES['file']['tmp_name'][$key]) . ".\n";
+                        continue;
                     }
                     $d = new Document();
                     $rc = $d->createDocument(
@@ -318,48 +337,45 @@ class C_Document extends Controller
 
                 // Option to run a custom plugin for each file upload.
                 // This was initially created to delete the original source file in a custom setting.
-                $upload_plugin = $GLOBALS['OE_SITE_DIR'] . "/documentUpload.plugin.php";
+                $upload_plugin = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documentUpload.plugin.php";
                 if (file_exists($upload_plugin)) {
                     include_once($upload_plugin);
                 }
                 $upload_plugin_pp = 'documentUploadPostProcess';
                 if (function_exists($upload_plugin_pp)) {
-                    $tmp = call_user_func($upload_plugin_pp, $value, $d);
+                    $tmp = $upload_plugin_pp($value, $d);
                     if ($tmp) {
                         $error = $tmp;
                     }
                 }
-                // Following is just an example of code in such a plugin file.
-                /*****************************************************
-                function documentUploadPostProcess($filename, &$d) {
-                  $userid = $_SESSION['authUserID'];
-                  $row = sqlQuery("SELECT username FROM users WHERE id = ?", array($userid));
-                  $owner = strtolower($row['username']);
-                  $dn = '1_' . ucfirst($owner);
-                  $filepath = "/shared_network_directory/$dn/$filename";
-                  if (@unlink($filepath)) return '';
-                  return "Failed to delete '$filepath'.";
-                }
-                *****************************************************/
             }
         }
 
-        $this->assign("error", nl2br($error));
-        //$this->_state = false;
+        $this->assign("error", $error);
         $_POST['process'] = "";
-        //return $this->fetch($GLOBALS['template_dir'] . "documents/" . $this->template_mod . "_upload.html");
     }
 
-    function note_action_process($patient_id)
+    public function note_action_process($patient_id)
     {
-        // this function is a dual function that will set up a note associated with a document or send a document via email.
+        // this public function is a dual public function that will set up a note associated with a document or send a document via email.
 
         if ($_POST['process'] != "true") {
             return;
         }
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+
+        // Anti-IDOR: a note association or document email always targets a
+        // document via foreign_id; restrict it to a document the caller can
+        // access in the current patient context so an arbitrary document cannot
+        // be emailed out or annotated.
+        $documentForeignId = filter_input(INPUT_POST, 'foreign_id');
+        if (is_string($documentForeignId) && $documentForeignId !== '') {
+            $patientContext = is_scalar($patient_id) ? (string) $patient_id : null;
+            $this->authorizeDocumentWrite($patientContext, $documentForeignId);
+        }
 
         $n = new Note();
-        $n->set_owner($_SESSION['authUserID']);
+        $n->set_owner($session->get('authUserID'));
         parent::populate_object($n);
         if ($_POST['identifier'] == "no") {
             // associate a note with a document
@@ -375,7 +391,7 @@ class C_Document extends Controller
                 $couch = new CouchDB();
                 $resp = $couch->retrieve_doc($couch_docid);
                 $content = $resp->data;
-                if ($content == '' && $GLOBALS['couchdb_log'] == 1) {
+                if ($content == '' && OEGlobalsBag::getInstance()->getBoolean('couchdb_log')) {
                     $log_content = date('Y-m-d H:i:s') . " ==> Retrieving document\r\n";
                     $log_content = date('Y-m-d H:i:s') . " ==> URL: " . $url . "\r\n";
                     $log_content .= date('Y-m-d H:i:s') . " ==> CouchDB Document Id: " . $couch_docid . "\r\n";
@@ -386,26 +402,26 @@ class C_Document extends Controller
                     die(xlt("File retrieval from CouchDB failed"));
                 }
                 // place it in a temporary file and will remove the file below after emailed
-                $temp_couchdb_url = $GLOBALS['OE_SITE_DIR'] . '/documents/temp/couch_' . date("YmdHis") . $d->get_url_file();
+                $temp_couchdb_url = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/temp/couch_' . date("YmdHis") . $d->get_url_file();
                 $fh = fopen($temp_couchdb_url, "w");
-                fwrite($fh, base64_decode($content));
+                fwrite($fh, base64_decode((string) $content));
                 fclose($fh);
                 $temp_url = $temp_couchdb_url; // doing this ensure hard drive file never deleted in case something weird happens
             } else {
-                $url = preg_replace("|^(.*)://|", "", $url);
+                $url = preg_replace("|^(.*)://|", "", (string) $url);
         // Collect filename and path
-                $from_all = explode("/", $url);
+                $from_all = explode("/", (string) $url);
                 $from_filename = array_pop($from_all);
-                $from_pathname_array = array();
+                $from_pathname_array = [];
                 for ($i = 0; $i < $d->get_path_depth(); $i++) {
                     $from_pathname_array[] = array_pop($from_all);
                 }
                 $from_pathname_array = array_reverse($from_pathname_array);
                 $from_pathname = implode("/", $from_pathname_array);
-                $temp_url = $GLOBALS['OE_SITE_DIR'] . '/documents/' . $from_pathname . '/' . $from_filename;
+                $temp_url = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/' . $from_pathname . '/' . $from_filename;
             }
             if (!file_exists($temp_url)) {
-                echo xl('The requested document is not present at the expected location on the filesystem or there are not sufficient permissions to access it.', '', '', ' ') . $temp_url;
+                echo xlt('The requested document is not present at the expected location on the filesystem or there are not sufficient permissions to access it.') . ' ' . text($temp_url);
             }
             $url = $temp_url;
             $pdetails = getPatientData($patient_id);
@@ -421,33 +437,56 @@ class C_Document extends Controller
         return $this->view_action($patient_id, $n->get_foreign_id());
     }
 
-    function default_action()
+    public function default_action(): string
     {
         return $this->list_action();
     }
 
-    function view_action(string $patient_id = null, $doc_id)
+    public function view_action(?string $patient_id, $doc_id): string
     {
-        global $ISSUE_TYPES;
+        $ISSUE_TYPES = IssueTypeRegistry::issueTypes();
 
-        require_once(dirname(__FILE__) . "/../library/lists.inc");
-
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $d = new Document($doc_id);
+
+        // Verify the document belongs to the requested patient to prevent IDOR.
+        $doc_pid = $d->get_foreign_id();
+        if ($patient_id !== null && (int)$doc_pid !== (int)$patient_id) {
+            ServiceContainer::getLogger()->warning(
+                "An attempt was made to view a document belonging to a different patient",
+                ['user-id' => $session->get('authUserID'), 'requested-patient-id' => $patient_id, 'document-patient-id' => $doc_pid, 'document-id' => $doc_id]
+            );
+            EventAuditLogger::getInstance()->newEvent(
+                "security-access",
+                $session->get('authUser') ?? '',
+                $session->get('authProvider') ?? '',
+                0,
+                "Unauthorized attempt to view document " . $doc_id . " belonging to pid " . $doc_pid
+            );
+            http_response_code(403);
+            die(xlt("Not authorized to view requested file"));
+        }
+
         $notes = $d->get_notes();
 
-        $this->assign("csrf_token_form", CsrfUtils::collectCsrfToken());
+        // The delete link sends this as document_pid; deleter.php refuses a document filed under another patient.
+        $documentPid = $patient_id === null ? 0 : (int) $patient_id;
+        $this->assign("document_pid", $documentPid);
+        $this->assign("csrf_token_form", CsrfUtils::collectCsrfToken(session: $session));
 
         $this->assign("file", $d);
-        $this->assign("web_path", $this->_link("retrieve") . "document_id=" . urlencode($d->get_id()) . "&");
+        $this->assign("web_path", $this->_link("retrieve") . "document_id=" . urlencode((string) $d->get_id()) . "&");
         $this->assign("NOTE_ACTION", $this->_link("note"));
-        $this->assign("MOVE_ACTION", $this->_link("move") . "document_id=" . urlencode($d->get_id()) . "&process=true");
-        $this->assign("hide_encryption", $GLOBALS['hide_document_encryption']);
-        $this->assign("assets_static_relative", $GLOBALS['assets_static_relative']);
-        $this->assign("webroot", $GLOBALS['webroot']);
+        $this->assign("MOVE_ACTION", $this->_link("move") . "document_id=" . urlencode((string) $d->get_id()) . "&process=true");
+        $this->assign("hide_encryption", OEGlobalsBag::getInstance()->getBoolean('hide_document_encryption'));
+        $this->assign("assets_static_relative", OEGlobalsBag::getInstance()->get('assets_static_relative'));
+        $this->assign("webroot", OEGlobalsBag::getInstance()->get('webroot'));
 
         // Added by Rod to support document delete:
         $delete_string = '';
-        if (AclMain::aclCheckCore('patients', 'docs_rm')) {
+        // Without the document's own patient as context deleter.php refuses the delete, so offer no link.
+        $deleteAllowed = is_numeric($doc_pid) && (int) $doc_pid === $documentPid;
+        if ($deleteAllowed && AclMain::aclCheckCore('patients', 'docs_rm')) {
             $delete_string = "<a href='' class='btn btn-danger' onclick='return deleteme(" . attr_js($d->get_id()) .
                 ")'>" . xlt('Delete') . "</a>";
         }
@@ -466,13 +505,13 @@ class C_Document extends Controller
         $issues_options = "<option value='0'>-- " . xlt('Select Issue') . " --</option>";
         $ires = sqlStatement("SELECT id, type, title, begdate FROM lists WHERE " .
             "pid = ? " . // AND enddate IS NULL " .
-            "ORDER BY type, begdate", array($patient_id));
+            "ORDER BY type, begdate", [$patient_id]);
         while ($irow = sqlFetchArray($ires)) {
             $desc = $irow['type'];
             if ($ISSUE_TYPES[$desc]) {
                 $desc = $ISSUE_TYPES[$desc][2];
             }
-            $desc .= ": " . text($irow['begdate']) . " " . text(substr($irow['title'], 0, 40));
+            $desc .= ": " . text($irow['begdate']) . " " . text(substr((string) $irow['title'], 0, 40));
             $sel = ($irow['id'] == $d->get_list_id()) ? ' selected' : '';
             $issues_options .= "<option value='" . attr($irow['id']) . "'$sel>$desc</option>";
         }
@@ -480,21 +519,21 @@ class C_Document extends Controller
 
         // For tagging to encounter
         // Populate the dropdown with patient's encounter list
-        $this->assign("TAG_ACTION", $this->_link("tag") . "document_id=" . urlencode($d->get_id()) . "&process=true");
+        $this->assign("TAG_ACTION", $this->_link("tag") . "document_id=" . urlencode((string) $d->get_id()) . "&process=true");
         $encOptions = "<option value='0'>-- " . xlt('Select Encounter') . " --</option>";
         $result_docs = sqlStatement("SELECT fe.encounter,fe.date,openemr_postcalendar_categories.pc_catname FROM form_encounter AS fe " .
-            "LEFT JOIN openemr_postcalendar_categories ON fe.pc_catid=openemr_postcalendar_categories.pc_catid  WHERE fe.pid = ? ORDER BY fe.date desc", array($patient_id));
+            "LEFT JOIN openemr_postcalendar_categories ON fe.pc_catid=openemr_postcalendar_categories.pc_catid  WHERE fe.pid = ? ORDER BY fe.date desc", [$patient_id]);
         if (sqlNumRows($result_docs) > 0) {
             while ($row_result_docs = sqlFetchArray($result_docs)) {
                 $sel_enc = ($row_result_docs['encounter'] == $d->get_encounter_id()) ? ' selected' : '';
-                $encOptions .= "<option value='" . attr($row_result_docs['encounter']) . "' $sel_enc>" . text(oeFormatShortDate(date('Y-m-d', strtotime($row_result_docs['date'])))) . "-" . text(xl_appt_category($row_result_docs['pc_catname'])) . "</option>";
+                $encOptions .= "<option value='" . attr($row_result_docs['encounter']) . "' $sel_enc>" . text(oeFormatShortDate(date('Y-m-d', strtotime((string) $row_result_docs['date'])))) . "-" . text(xl_appt_category($row_result_docs['pc_catname'])) . "</option>";
             }
         }
         $this->assign("ENC_LIST", $encOptions);
 
         //clear encounter tag
         if ($d->get_encounter_id() != 0) {
-            $this->assign('clear_encounter_tag', $this->_link('clear_encounter_tag') . "document_id=" . urlencode($d->get_id()));
+            $this->assign('clear_encounter_tag', $this->_link('clear_encounter_tag') . "document_id=" . urlencode((string) $d->get_id()));
         } else {
             $this->assign('clear_encounter_tag', 'javascript:void(0)');
         }
@@ -513,10 +552,10 @@ class C_Document extends Controller
 
         $this->assign("notes", $notes);
 
-        $this->assign("IMG_PROCEDURE_TAG_ACTION", $this->_link("image_procedure") . "document_id=" . urlencode($d->get_id()));
-            // Populate the dropdown with image procedure order list
-        $imgOptions = "<option value='0'>-- " . xlt('Select Image Procedure') . " --</option>";
-        $imgOrders  = sqlStatement("select procedure_name,po.procedure_order_id,procedure_code from procedure_order po inner join procedure_order_code poc on poc.procedure_order_id = po.procedure_order_id where po.patient_id = ?  and poc.procedure_order_title = 'imaging'", array($patient_id));
+        $this->assign("PROCEDURE_TAG_ACTION", $this->_link("image_procedure") . "document_id=" . urlencode((string) $d->get_id()));
+        // Populate the dropdown with procedure order list
+        $imgOptions = "<option value='0'>-- " . xlt('Select Procedure') . " --</option>";
+        $imgOrders  = sqlStatement("select procedure_name,po.procedure_order_id,procedure_code,poc.procedure_order_title from procedure_order po inner join procedure_order_code poc on poc.procedure_order_id = po.procedure_order_id where po.patient_id = ?", [$patient_id]);
         $mapping    = $this->get_mapped_procedure($d->get_id());
         if (sqlNumRows($imgOrders) > 0) {
             while ($row = sqlFetchArray($imgOrders)) {
@@ -524,51 +563,67 @@ class C_Document extends Controller
                 if ((isset($mapping['procedure_code']) && $mapping['procedure_code'] == $row['procedure_code']) && (isset($mapping['procedure_code']) && $mapping['procedure_order_id'] == $row['procedure_order_id'])) {
                     $sel_proc = 'selected';
                 }
-                $imgOptions .= "<option value='" . attr($row['procedure_order_id']) . "' data-code='" . attr($row['procedure_code']) . "' $sel_proc>" . text($row['procedure_name'] . ' - ' . $row['procedure_code']) . "</option>";
+                $imgOptions .= "<option value='" . attr($row['procedure_order_id']) . "' data-code='" . attr($row['procedure_code']) . "' $sel_proc>" . text($row['procedure_name'] . ' - ' . $row['procedure_code'] . ' : ' . ucfirst((string) $row['procedure_order_title'])) . "</option>";
             }
         }
 
-        $this->assign('IMAGE_PROCEDURE_LIST', $imgOptions);
+        $this->assign('TAG_PROCEDURE_LIST', $imgOptions);
 
-        $this->assign('clear_procedure_tag', $this->_link('clear_procedure_tag') . "document_id=" . urlencode($d->get_id()));
+        $this->assign('clear_procedure_tag', $this->_link('clear_procedure_tag') . "document_id=" . urlencode((string) $d->get_id()));
 
         $this->_last_node = null;
 
         $menu  = new HTML_TreeMenu();
 
         //pass an empty array because we don't want the documents for each category showing up in this list box
-        $rnode = $this->_array_recurse($this->tree->tree, array());
+        $rnode = $this->array_recurse($this->tree->tree, $patient_id, []);
         $menu->addItem($rnode);
-        $treeMenu_listbox  = new HTML_TreeMenu_Listbox($menu, array("promoText" => xl('Move Document to Category:')));
+        $treeMenu_listbox  = new HTML_TreeMenu_Listbox($menu, ["promoText" => xl('Move Document to Category:')]);
 
         $this->assign("tree_html_listbox", $treeMenu_listbox->toHTML());
 
-        $activity = $this->fetch($GLOBALS['template_dir'] . "documents/" . $this->template_mod . "_view.html");
+        $activity = $this->fetch(OEGlobalsBag::getInstance()->get('template_dir') . "documents/" . $this->template_mod . "_view.html");
         $this->assign("activity", $activity);
 
         return $this->list_action($patient_id);
     }
 
+    public function onReturnRetrieveKey()
+    {
+        $this->returnRetrieveKey = true;
+    }
+
+    public function offReturnRetrieveKey()
+    {
+        $this->returnRetrieveKey = false;
+    }
+
+    public function isReturnRetrieveKey()
+    {
+        return $this->returnRetrieveKey;
+    }
+
     /**
      * Retrieve file from hard disk / CouchDB.
-     * In case that file isn't download this function will return thumbnail image (if exist).
-     * @param (boolean) $show_original - enable to show the original image (not thumbnail) in inline status.
-     * @param (string) $context - given a special document scenario (e.g.: patient avatar, custom image viewer document, etc), the context can be set so that a switch statement can execute a custom strategy.
+     * In case that file isn't download this public function will return thumbnail image (if exist).
+     * @param bool $show_original - enable to show the original image (not thumbnail) in inline status.
+     * @param string $context - given a special document scenario (e.g.: patient avatar, custom image viewer document, etc), the context can be set so that a switch statement can execute a custom strategy.
      * */
-    function retrieve_action(string $patient_id = null, $document_id, $as_file = true, $original_file = true, $disable_exit = false, $show_original = false, $context = "normal")
+    public function retrieve_action(?string $patient_id, $document_id, $as_file = true, $original_file = true, $disable_exit = false, $show_original = false, $context = "normal")
     {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $encrypted = $_POST['encrypted'] ?? false;
         $passphrase = $_POST['passphrase'] ?? '';
         $doEncryption = false;
         if (
-            !$GLOBALS['hide_document_encryption'] &&
+            !OEGlobalsBag::getInstance()->getBoolean('hide_document_encryption') &&
             $encrypted == "true" &&
             $passphrase
         ) {
             $doEncryption = true;
         }
 
-            //controller function ruins booleans, so need to manually re-convert to booleans
+            //controller public function ruins booleans, so need to manually re-convert to booleans
         if ($as_file == "true") {
                 $as_file = true;
         } elseif ($as_file == "false") {
@@ -590,13 +645,65 @@ class C_Document extends Controller
             $show_original = false;
         }
 
+        // Note this is necessary to not allow the controller the ability to return the raw file
+        //  which could introduce xss vulnerabilities.
+        if ($disable_exit == true) {
+            if (!$this->isReturnRetrieveKey()) {
+                // Access to return the raw file has not been granted. Very likely bad actor, so deny.
+                AccessDeniedHelper::deny('Attempt to return raw file without retrieve key');
+            }
+        }
+
+        // For patient_picture context, non-portal users may only request the session's active patient.
+        // Runs before the missing-photo branch so 403 vs 404 does not leak whether the patient has a photo.
+        if ($context === 'patient_picture') {
+            if (!($session->has('patient_portal_onsite_two') && $session->has('pid'))) {
+                $allowed_pid = OEGlobalsBag::getInstance()->get('pid') ?? 0;
+                if ($allowed_pid === 0 || $patient_id === null || $patient_id !== (string)$allowed_pid) {
+                    AccessDeniedHelper::deny("Attempt to retrieve patient picture for pid $patient_id");
+                }
+            }
+        }
+
         switch ($context) {
             case "patient_picture":
                 $document_id = $this->patientService->getPatientPictureDocumentId($patient_id);
+                if ($document_id === null) {
+                    if ($disable_exit == true) {
+                        return null;
+                    }
+                    (new RequestTerminator())->error(404, '');
+                }
                 break;
         }
 
         $d = new Document($document_id);
+
+        // ensure user/patient has access
+        if ($session->has('patient_portal_onsite_two') && $session->has('pid')) {
+            // ensure patient has access (called from patient portal)
+            if (!$d->can_patient_access($session->get('pid'))) {
+                AccessDeniedHelper::deny("Patient unauthorized to access document $document_id category");
+            }
+        } else {
+            // ensure user has access
+            if (!$d->can_access()) {
+                AccessDeniedHelper::deny("Unauthorized attempt to access document $document_id from restricted category");
+            }
+
+            // Verify the document belongs to the requested patient to prevent IDOR.
+            // Internal callers that pre-validate context set returnRetrieveKey and may
+            // omit patient_id; everyone else must pass a matching non-empty numeric pid.
+            $doc_pid = $d->get_foreign_id();
+            $hasPid = $patient_id !== null && $patient_id !== '' && ctype_digit($patient_id);
+            if (!$hasPid && !$this->isReturnRetrieveKey()) {
+                AccessDeniedHelper::deny("Missing or invalid patient_id for document retrieve");
+            }
+            if ($hasPid && (int)$doc_pid !== (int)$patient_id) {
+                AccessDeniedHelper::deny("Unauthorized attempt to retrieve document $document_id belonging to pid $doc_pid");
+            }
+        }
+
         $url =  $d->get_url();
         $th_url = $d->get_thumb_url();
 
@@ -609,12 +716,8 @@ class C_Document extends Controller
             $couch = new CouchDB();
             $resp = $couch->retrieve_doc($couch_docid);
             //Take thumbnail file when is not null and file is presented online
-            if (!$as_file && !is_null($th_url) && !$show_original) {
-                $content = $resp->th_data;
-            } else {
-                $content = $resp->data;
-            }
-            if ($content == '' && $GLOBALS['couchdb_log'] == 1) {
+            $content = !$as_file && !is_null($th_url) && !$show_original ? $resp->th_data : $resp->data;
+            if ($content == '' && OEGlobalsBag::getInstance()->getBoolean('couchdb_log')) {
                 $log_content = date('Y-m-d H:i:s') . " ==> Retrieving document\r\n";
                 $log_content = date('Y-m-d H:i:s') . " ==> URL: " . $url . "\r\n";
                 $log_content .= date('Y-m-d H:i:s') . " ==> CouchDB Document Id: " . $couch_docid . "\r\n";
@@ -624,11 +727,7 @@ class C_Document extends Controller
                 $this->document_upload_download_log($d->get_foreign_id(), $log_content);
                 die(xlt("File retrieval from CouchDB failed"));
             }
-            if ($d->get_encrypted() == 1) {
-                $filetext = $this->cryptoGen->decryptStandard($content, null, 'database');
-            } else {
-                $filetext = base64_decode($content);
-            }
+            $filetext = $d->is_encrypted() ? $this->cryptoGen->decryptFromFilesystem($content) : base64_decode((string) $content);
             if ($disable_exit == true) {
                 return $filetext;
             }
@@ -638,7 +737,8 @@ class C_Document extends Controller
             header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
             header('Pragma: public');
             if ($doEncryption) {
-                $ciphertext = $this->cryptoGen->encryptStandard($filetext, $passphrase);
+                $passwordCrypto = new PasswordBasedCrypto(KeyVersion::CURRENT);
+                $ciphertext = $passwordCrypto->encrypt((string) $filetext, (string) $passphrase);
                 header('Content-Disposition: attachment; filename="' . "/encrypted_aes_" . $d->get_name() . '"');
                 header("Content-Type: application/octet-stream");
                 header("Content-Length: " . strlen($ciphertext));
@@ -649,7 +749,7 @@ class C_Document extends Controller
                 header("Content-Length: " . strlen($filetext));
                 echo $filetext;
             }
-            exit;//exits only if file download from CouchDB is successfull.
+            exit; // exits only if file download from CouchDB is successful.
         }
         if ($couch_docid && $couch_revid) {
             //special case when retrieving a document from couchdb that has been converted to a jpg and not directly referenced in openemr documents table
@@ -662,12 +762,12 @@ class C_Document extends Controller
                 //create the converted jpg
                 $couchM = new CouchDB();
                 $respM = $couchM->retrieve_doc($couch_docid);
-                if ($d->get_encrypted() == 1) {
-                    $contentM = $this->cryptoGen->decryptStandard($respM->data, null, 'database');
+                if ($d->is_encrypted()) {
+                    $contentM = $this->cryptoGen->decryptFromFilesystem($respM->data);
                 } else {
-                    $contentM = base64_decode($respM->data);
+                    $contentM = base64_decode((string) $respM->data);
                 }
-                if ($contentM == '' && $GLOBALS['couchdb_log'] == 1) {
+                if ($contentM == '' && OEGlobalsBag::getInstance()->getBoolean('couchdb_log')) {
                     $log_content = date('Y-m-d H:i:s') . " ==> Retrieving document\r\n";
                     $log_content = date('Y-m-d H:i:s') . " ==> URL: " . $url . "\r\n";
                     $log_content .= date('Y-m-d H:i:s') . " ==> CouchDB Document Id: " . $couch_docid . "\r\n";
@@ -678,10 +778,10 @@ class C_Document extends Controller
                     die(xlt("File retrieval from CouchDB failed"));
                 }
                 // place the from-file into a temporary file
-                $from_file_tmp_name = tempnam($GLOBALS['temporary_files_dir'], "oer");
+                $from_file_tmp_name = tempnam(OEGlobalsBag::getInstance()->getString('temporary_files_dir'), "oer");
                 file_put_contents($from_file_tmp_name, $contentM);
                 // prepare a temporary file for the to-file
-                $to_file_tmp = tempnam($GLOBALS['temporary_files_dir'], "oer");
+                $to_file_tmp = tempnam(OEGlobalsBag::getInstance()->getString('temporary_files_dir'), "oer");
                 $to_file_tmp_name = $to_file_tmp . ".jpg";
                 // convert file to jpg
                 exec("convert -density 200 " . escapeshellarg($from_file_tmp_name) . " -append -resize 850 " . escapeshellarg($to_file_tmp_name));
@@ -690,8 +790,8 @@ class C_Document extends Controller
                 // save the to-file if a to-file was created in above convert call
                 if (is_file($to_file_tmp_name)) {
                     $couchI = new CouchDB();
-                    if ($d->get_encrypted() == 1) {
-                        $document = $this->cryptoGen->encryptStandard(file_get_contents($to_file_tmp_name), null, 'database');
+                    if ($d->is_encrypted()) {
+                        $document = $this->cryptoGen->encryptForFilesystem(file_get_contents($to_file_tmp_name));
                     } else {
                         $document = base64_encode(file_get_contents($to_file_tmp_name));
                     }
@@ -705,17 +805,17 @@ class C_Document extends Controller
                 // now collect the newly created converted jpg
                 $couchF = new CouchDB();
                 $respF = $couchF->retrieve_doc("converted_" . $couch_docid);
-                if ($d->get_encrypted() == 1) {
-                    $content = $this->cryptoGen->decryptStandard($respF->data, null, 'database');
+                if ($d->is_encrypted()) {
+                    $content = $this->cryptoGen->decryptFromFilesystem($respF->data);
                 } else {
-                    $content = base64_decode($respF->data);
+                    $content = base64_decode((string) $respF->data);
                 }
             } else {
                 // decrypt/decode when converted jpg already exists
-                if ($d->get_encrypted() == 1) {
-                    $content = $this->cryptoGen->decryptStandard($resp->data, null, 'database');
+                if ($d->is_encrypted()) {
+                    $content = $this->cryptoGen->decryptFromFilesystem($resp->data);
                 } else {
-                    $content = base64_decode($resp->data);
+                    $content = base64_decode((string) $resp->data);
                 }
             }
             $filetext = $content;
@@ -738,133 +838,267 @@ class C_Document extends Controller
         }
 
         //strip url of protocol handler
-        $url = preg_replace("|^(.*)://|", "", $url);
+        $url = preg_replace("|^(.*)://|", "", (string) $url);
 
-        //change full path to current webroot.  this is for documents that may have
-        //been moved from a different filesystem and the full path in the database
-        //is not current.  this is also for documents that may of been moved to
-        //different patients. Note that the path_depth is used to see how far down
-                //the path to go. For example, originally the path_depth was always 1, which
-                //only allowed things like documents/1/<file>, but now can have more structured
-                //directories. For example a path_depth of 2 can give documents/encounters/1/<file>
-                // etc.
+        // change full path to current webroot.  this is for documents that may have
+        // been moved from a different filesystem and the full path in the database
+        // is not current.  this is also for documents that may of been moved to
+        // different patients. Note that the path_depth is used to see how far down
+        // the path to go. For example, originally the path_depth was always 1, which
+        // only allowed things like documents/1/<file>, but now can have more structured
+        // directories. For example a path_depth of 2 can give documents/encounters/1/<file>
+        // etc.
         // NOTE that $from_filename and basename($url) are the same thing
-        $from_all = explode("/", $url);
+        $from_all = explode("/", (string) $url);
         $from_filename = array_pop($from_all);
-        $from_pathname_array = array();
-        for ($i = 0; $i < $d->get_path_depth(); $i++) {
-            $from_pathname_array[] = array_pop($from_all);
-        }
-        $from_pathname_array = array_reverse($from_pathname_array);
-        $from_pathname = implode("/", $from_pathname_array);
-        if ($couch_docid && $couch_revid) {
-            //for couchDB no URL is available in the table, hence using the foreign_id which is patientID
-            $temp_url = $GLOBALS['OE_SITE_DIR'] . '/documents/temp/' . $d->get_foreign_id() . '_' . $from_filename;
-        } else {
-            $temp_url = $GLOBALS['OE_SITE_DIR'] . '/documents/' . $from_pathname . '/' . $from_filename;
-        }
-
-        if (file_exists($temp_url)) {
-            $url = $temp_url;
-        }
-
-        if (!file_exists($url)) {
-            echo xl('The requested document is not present at the expected location on the filesystem or there are not sufficient permissions to access it.', '', '', ' ') . $url;
-        } else {
-            if ($original_file) {
-                //normal case when serving the file referenced in database
-                if ($d->get_encrypted() == 1) {
-                    $filetext = $this->cryptoGen->decryptStandard(file_get_contents($url), null, 'database');
-                } else {
-                    $filetext = file_get_contents($url);
-                }
-                if ($disable_exit == true) {
-                    return $filetext;
-                }
-                header('Content-Description: File Transfer');
-                header('Content-Transfer-Encoding: binary');
-                header('Expires: 0');
-                header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
-                header('Pragma: public');
-                if ($doEncryption) {
-                    $ciphertext = $this->cryptoGen->encryptStandard($filetext, $passphrase);
-                    header('Content-Disposition: attachment; filename="' . "/encrypted_aes_" . $d->get_name() . '"');
-                    header("Content-Type: application/octet-stream");
-                    header("Content-Length: " . strlen($ciphertext));
-                    echo $ciphertext;
-                } else {
-                    header("Content-Disposition: " . ($as_file ? "attachment" : "inline") . "; filename=\"" . $d->get_name() . "\"");
-                    header("Content-Type: " . $d->get_mimetype());
-                    header("Content-Length: " . strlen($filetext));
-                    echo $filetext;
-                }
-                exit;
+        // no point in doing any of these checks if $from_filename is empty which can lead to false positives on file_exists
+        if (!empty($from_filename)) {
+            $from_pathname_array = [];
+            for ($i = 0; $i < $d->get_path_depth(); $i++) {
+                $from_pathname_array[] = array_pop($from_all);
+            }
+            $from_pathname_array = array_reverse($from_pathname_array);
+            $from_pathname = implode("/", $from_pathname_array);
+            if ($couch_docid && $couch_revid) {
+                //for couchDB no URL is available in the table, hence using the foreign_id which is patientID
+                $temp_url = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/temp/' . $d->get_foreign_id() . '_' . $from_filename;
             } else {
-                //special case when retrieving a document that has been converted to a jpg and not directly referenced in database
-                //try to convert it if it has not yet been converted
-                $originalUrl = $url;
-                if (strrpos(basename_international($url), '.') === false) {
-                    $convertedFile = basename_international($url) . '_converted.jpg';
-                } else {
-                    $convertedFile = substr(basename_international($url), 0, strrpos(basename_international($url), '.')) . '_converted.jpg';
-                }
-                $url = $GLOBALS['OE_SITE_DIR'] . '/documents/' . $from_pathname . '/' . $convertedFile;
-                if (!is_file($url)) {
-                    if ($d->get_encrypted() == 1) {
-                        // decrypt the from-file into a temporary file
-                        $from_file_unencrypted = $this->cryptoGen->decryptStandard(file_get_contents($originalUrl), null, 'database');
-                        $from_file_tmp_name = tempnam($GLOBALS['temporary_files_dir'], "oer");
-                        file_put_contents($from_file_tmp_name, $from_file_unencrypted);
-                        // prepare a temporary file for the unencrypted to-file
-                        $to_file_tmp = tempnam($GLOBALS['temporary_files_dir'], "oer");
-                        $to_file_tmp_name = $to_file_tmp . ".jpg";
-                        // convert file to jpg
-                        exec("convert -density 200 " . escapeshellarg($from_file_tmp_name) . " -append -resize 850 " . escapeshellarg($to_file_tmp_name));
-                        // remove unencrypted tmp file
-                        unlink($from_file_tmp_name);
-                        // make the encrypted to-file if a to-file was created in above convert call
-                        if (is_file($to_file_tmp_name)) {
-                            $to_file_encrypted = $this->cryptoGen->encryptStandard(file_get_contents($to_file_tmp_name), null, 'database');
-                            file_put_contents($url, $to_file_encrypted);
-                            // remove unencrypted tmp files
-                            unlink($to_file_tmp);
-                            unlink($to_file_tmp_name);
-                        }
-                    } else {
-                        // convert file to jpg
-                        exec("convert -density 200 " . escapeshellarg($originalUrl) . " -append -resize 850 " . escapeshellarg($url));
-                    }
-                }
-                if (is_file($url)) {
-                    if ($d->get_encrypted() == 1) {
-                        $filetext = $this->cryptoGen->decryptStandard(file_get_contents($url), null, 'database');
-                    } else {
-                        $filetext = file_get_contents($url);
-                    }
-                } else {
-                    $filetext = '';
-                    error_log("ERROR: Document '" . errorLogEscape(basename_international($url)) . "' cannot be converted to JPEG. Perhaps ImageMagick is not installed?");
-                }
-                if ($disable_exit == true) {
-                    return $filetext;
-                }
-                header("Pragma: public");
-                header("Expires: 0");
-                header("Cache-Control: must-revalidate, post-check=0, pre-check=0");
-                header("Content-Disposition: " . ($as_file ? "attachment" : "inline") . "; filename=\"" . $d->get_name() . "\"");
-                header("Content-Type: image/jpeg");
-                header("Content-Length: " . strlen($filetext));
-                echo $filetext;
+                $temp_url = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/' . $from_pathname . '/' . $from_filename;
+            }
+
+            if (file_exists($temp_url)) {
+                $url = $temp_url;
+            }
+
+            $retrieveOffsiteDocument = new PatientRetrieveOffsiteDocument($d->get_url(), $d);
+            $updatedOffsiteDocumentEvent = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher()->dispatch(
+                $retrieveOffsiteDocument,
+                PatientRetrieveOffsiteDocument::REMOTE_DOCUMENT_LOCATION
+            );
+            // if a module writer has an independent offsite storage mechanism used this accomdoates that.
+            // If the file is not found locally, it will be found remotely.  Systems like s3, blob stores, etc, can
+            // be tied and and use those urls.  Note NO security is handled here so any kind of security mechanism must
+            // be handled on the receiving end's URL (s3/azure for example use signed urls with signature verification)
+            if ($updatedOffsiteDocumentEvent->getOffsiteUrl() !== null) {
+                header('Content-Description: File Transfer');
+                header("Location: " . $updatedOffsiteDocumentEvent->getOffsiteUrl());
                 exit;
             }
         }
+
+        if (!file_exists($url)) {
+            ServiceContainer::getLogger()->error(
+                "Document file not found or insufficient permissions",
+                ['url' => $url, 'document_id' => $document_id, 'patient_id' => $patient_id]
+            );
+            return '';
+        }
+        if ($original_file) {
+            //normal case when serving the file referenced in database
+            if ($d->is_encrypted()) {
+                $filetext = $this->cryptoGen->decryptFromFilesystem(file_get_contents($url));
+            } else {
+                if (!is_dir($url)) {
+                    $filetext = file_get_contents($url);
+                }
+            }
+            if ($disable_exit == true) {
+                return $filetext ?? '';
+            }
+            header('Content-Description: File Transfer');
+            header('Content-Transfer-Encoding: binary');
+            header('Expires: 0');
+            header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
+            header('Pragma: public');
+            if ($doEncryption) {
+                $passwordCrypto = new PasswordBasedCrypto(KeyVersion::CURRENT);
+                $ciphertext = $passwordCrypto->encrypt((string) $filetext, (string) $passphrase);
+                header('Content-Disposition: attachment; filename="' . "/encrypted_aes_" . $d->get_name() . '"');
+                header("Content-Type: application/octet-stream");
+                header("Content-Length: " . strlen($ciphertext));
+                echo $ciphertext;
+            } else {
+                header("Content-Disposition: " . ($as_file ? "attachment" : "inline") . "; filename=\"" . $d->get_name() . "\"");
+                header("Content-Type: " . $d->get_mimetype());
+                header("Content-Length: " . strlen($filetext ?? ''));
+                echo $filetext ?? '';
+            }
+            exit;
+        } else {
+            //special case when retrieving a document that has been converted to a jpg and not directly referenced in database
+            //try to convert it if it has not yet been converted
+            $originalUrl = $url;
+            if (strrpos(basename_international($url), '.') === false) {
+                $convertedFile = basename_international($url) . '_converted.jpg';
+            } else {
+                $convertedFile = substr(basename_international($url), 0, strrpos(basename_international($url), '.')) . '_converted.jpg';
+            }
+            $url = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/' . $from_pathname . '/' . $convertedFile;
+            if (!is_file($url)) {
+                if ($d->is_encrypted()) {
+                    // decrypt the from-file into a temporary file
+                    $from_file_unencrypted = $this->cryptoGen->decryptFromFilesystem(file_get_contents($originalUrl));
+                    $from_file_tmp_name = tempnam(OEGlobalsBag::getInstance()->getString('temporary_files_dir'), "oer");
+                    file_put_contents($from_file_tmp_name, $from_file_unencrypted);
+                    // prepare a temporary file for the unencrypted to-file
+                    $to_file_tmp = tempnam(OEGlobalsBag::getInstance()->getString('temporary_files_dir'), "oer");
+                    $to_file_tmp_name = $to_file_tmp . ".jpg";
+                    // convert file to jpg
+                    exec("convert -density 200 " . escapeshellarg($from_file_tmp_name) . " -append -resize 850 " . escapeshellarg($to_file_tmp_name));
+                    // remove unencrypted tmp file
+                    unlink($from_file_tmp_name);
+                    // make the encrypted to-file if a to-file was created in above convert call
+                    if (is_file($to_file_tmp_name)) {
+                        $to_file_encrypted = $this->cryptoGen->encryptForFilesystem(file_get_contents($to_file_tmp_name));
+                        file_put_contents($url, $to_file_encrypted);
+                        // remove unencrypted tmp files
+                        unlink($to_file_tmp);
+                        unlink($to_file_tmp_name);
+                    }
+                } else {
+                    // convert file to jpg
+                    exec("convert -density 200 " . escapeshellarg((string) $originalUrl) . " -append -resize 850 " . escapeshellarg($url));
+                }
+            }
+            if (is_file($url)) {
+                if ($d->is_encrypted()) {
+                    $filetext = $this->cryptoGen->decryptFromFilesystem(file_get_contents($url));
+                } else {
+                    $filetext = file_get_contents($url);
+                }
+            } else {
+                $filetext = '';
+                error_log("ERROR: Document '" . errorLogEscape(basename_international($url)) . "' cannot be converted to JPEG. Perhaps ImageMagick is not installed?");
+            }
+            if ($disable_exit == true) {
+                return $filetext;
+            }
+            header("Pragma: public");
+            header("Expires: 0");
+            header("Cache-Control: must-revalidate, post-check=0, pre-check=0");
+            header("Content-Disposition: " . ($as_file ? "attachment" : "inline") . "; filename=\"" . $d->get_name() . "\"");
+            header("Content-Type: image/jpeg");
+            header("Content-Length: " . strlen($filetext));
+            echo $filetext;
+            exit;
+        }
     }
 
-    function move_action_process(string $patient_id = null, $document_id)
+    /**
+     * Authorize a mutating action against an existing document (anti-IDOR guard).
+     *
+     * The document read path (retrieve_action()/view_action()) is deliberately
+     * hardened against IDOR, but the write path historically was not: any
+     * authenticated user could reassign or otherwise mutate an arbitrary
+     * document by id - for example move it to a patient/category they legitimately
+     * have access to - and then read it back through the ACL-checked download
+     * path, bypassing document access controls entirely.
+     *
+     * This guard mirrors the read-path checks so a caller may only mutate a
+     * document they can already access in its current state:
+     *   1. The caller must satisfy the ACL (aco_spec) of every category the
+     *      document currently belongs to (Document::can_access()).
+     *   2. The document must belong to the patient context supplied with the
+     *      request (foreign_id === patient_id), matching the read-path check.
+     *
+     * Denials are logged and audited, then the request is terminated with a
+     * 403 through the standard controller exception path.
+     *
+     * Service/CLI callers that have explicitly opted out of ACL enforcement
+     * (see skipAclCheck(), used by background/import processes) are exempt.
+     *
+     * @param ?string $patient_id  Patient context (pid) from the request
+     * @param mixed   $document_id documents.id being mutated
+     * @return Document The loaded, access-checked document
+     */
+    private function authorizeDocumentWrite(?string $patient_id, $document_id): Document
+    {
+        $d = new Document($document_id);
+
+        if ($this->isSkipAclCheck()) {
+            return $d;
+        }
+
+        $docPid = $d->get_foreign_id();
+        // The document must belong to the requested patient context. Fail closed:
+        // a null/absent patient context, or a missing/non-numeric document
+        // foreign_id, can never establish that the caller is operating on this
+        // document within the patient it belongs to, so all three are treated as
+        // a mismatch. Note that empty request parameters (e.g. "patient_id=")
+        // arrive here as null via Controller::dispatch(), so a permissive null
+        // would let a caller drop the patient context and bypass this check while
+        // still passing the category ACL below.
+        $patientMismatch = $patient_id === null
+            || !is_numeric($docPid)
+            || (int) $docPid !== (int) $patient_id;
+
+        if (!$d->can_access() || $patientMismatch) {
+            $session = SessionWrapperFactory::getInstance()->getActiveSession();
+            $documentIdLabel = is_scalar($document_id) ? (string) $document_id : '';
+            $docPidLabel = is_scalar($docPid) ? (string) $docPid : '';
+            ServiceContainer::getLogger()->warning(
+                "An attempt was made to modify a document without authorization",
+                [
+                    'user-id' => $session->get('authUserID'),
+                    'requested-patient-id' => $patient_id,
+                    'document-patient-id' => $docPid,
+                    'document-id' => $document_id,
+                ]
+            );
+            $this->throwAccessDenied(
+                "Unauthorized attempt to modify document " . $documentIdLabel . " belonging to pid " . $docPidLabel,
+                xl("Not authorized to modify the requested document")
+            );
+        }
+
+        return $d;
+    }
+
+    /**
+     * Verify the caller may file a document into the given destination category.
+     *
+     * Mirrors the destination-category ACL check performed on upload
+     * (upload_action_process()) so a move cannot place a document into a
+     * category the caller is not permitted to write to.
+     *
+     * @param mixed $category_id categories.id being targeted
+     */
+    private function canAccessDestinationCategory($category_id): bool
+    {
+        if ($this->isSkipAclCheck()) {
+            return true;
+        }
+        $category = QueryUtils::querySingleRow("SELECT `aco_spec` FROM `categories` WHERE `id` = ?", [$category_id]);
+        $acoSpec = is_array($category) ? ($category['aco_spec'] ?? null) : null;
+        return AclMain::aclCheckAcoSpec($acoSpec) !== false;
+    }
+
+    public function move_action_process(?string $patient_id, $document_id)
     {
         if ($_POST['process'] != "true") {
             return;
         }
+
+        if (!is_numeric($document_id)) {
+            $this->throwAccessDenied("Invalid document id for move", xl("Documents"));
+        }
+
+        // Require the blanket document-write ACL before mutating any state
+        // (upstream #13353). CONTROLLER_ACL_MAP has no 'document' entry, so this
+        // is the coarse gate; the per-document guard below adds the fine-grained,
+        // context-bound check.
+        if (!AclMain::aclCheckCore('patients', 'docs', '', ['write', 'addonly'])) {
+            $this->throwAccessDenied("ACL check failed for patients/docs write|addonly: Documents", xl("Documents"));
+        }
+
+        // Anti-IDOR: the caller must be able to access the document in its
+        // current state before they may move it. Without this a low-privilege
+        // user could reassign a document out of a restricted category/patient
+        // and then read it via the ACL-checked download path.
+        // authorizeDocumentWrite() subsumes the per-document existence/can_access()
+        // check and additionally binds the mutation to the request's patient
+        // context, and returns the loaded document for reuse below.
+        $d = $this->authorizeDocumentWrite($patient_id, $document_id);
 
         $messages = '';
 
@@ -872,31 +1106,34 @@ class C_Document extends Controller
         $new_patient_id = $_POST['new_patient_id'];
 
         //move to new category
-        if (is_numeric($new_category_id) && is_numeric($document_id)) {
+        if (is_numeric($new_category_id)) {
+            // caller must also be permitted to file into the destination category
+            if (!$this->canAccessDestinationCategory($new_category_id)) {
+                $this->throwAccessDenied(
+                    "Unauthorized attempt to move document " . $document_id . " to category " . $new_category_id,
+                    xl("Not authorized to move the document to the selected category")
+                );
+            }
             $sql = "UPDATE categories_to_documents set category_id = ? where document_id = ?";
-            $messages .= xl('Document moved to new category', '', '', ' \'') . $this->tree->_id_name[$new_category_id]['name']  . xl('successfully.', '', '\' ') . "\n";
+            $messages .= sprintf("%s '%s' %s\n", xl('Document moved to new category'), $this->tree->_id_name[$new_category_id]['name'], xl('successfully.'));
             //echo $sql;
             $this->tree->_db->Execute($sql, [$new_category_id, $document_id]);
         }
 
         //move to new patient
-        if (is_numeric($new_patient_id) && is_numeric($document_id)) {
-            $d = new Document($document_id);
+        if (is_numeric($new_patient_id)) {
+            // $d was already loaded and access-checked by authorizeDocumentWrite() above
             $sql = "SELECT pid from patient_data where pid = ?";
-            $result = $d->_db->Execute($sql, [$new_patient_id]);
+            $result = QueryUtils::querySingleRow($sql, [$new_patient_id]);
 
-            if (!$result || $result->EOF) {
+            if ($result === false) {
                 //patient id does not exist
-                $messages .= xl('Document could not be moved to patient id', '', '', ' \'') . $new_patient_id  . xl('because that id does not exist.', '', '\' ') . "\n";
+                $messages .= sprintf("%s '%s' %s\n", xl('Document could not be moved to patient id'), $new_patient_id, xl('because that id does not exist.'));
             } else {
                 $changefailed = !$d->change_patient($new_patient_id);
 
                 $this->_state = false;
-                if (!$changefailed) {
-                    $messages .= xl('Document moved to patient id', '', '', ' \'') . $new_patient_id  . xl('successfully.', '', '\' ') . "\n";
-                } else {
-                    $messages .= xl('Document moved to patient id', '', '', ' \'') . $new_patient_id  . xl('Failed.', '', '\' ') . "\n";
-                }
+                $messages .= sprintf("%s '%s' %s\n", xl('Document moved to patient id'), $new_patient_id, xl($changefailed ? 'Failed.' : 'successfully.'));
                 $this->assign("messages", $messages);
                 return $this->list_action($patient_id);
             }
@@ -907,25 +1144,26 @@ class C_Document extends Controller
         return $this->view_action($patient_id, $document_id);
     }
 
-    function validate_action_process(string $patient_id = null, $document_id)
+    public function validate_action_process(?string $patient_id, $document_id)
     {
-
-        $d = new Document($document_id);
+        // Anti-IDOR: validation reads the document's file content and may
+        // persist a hash, so restrict it to a document the caller can access.
+        $d = $this->authorizeDocumentWrite($patient_id, $document_id);
         if ($d->couch_docid && $d->couch_revid) {
-            $file_path = $GLOBALS['OE_SITE_DIR'] . '/documents/temp/';
+            $file_path = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/temp/';
             $url = $file_path . $d->get_url();
             $couch = new CouchDB();
             $resp = $couch->retrieve_doc($d->couch_docid);
-            if ($d->get_encrypted() == 1) {
-                $content = $this->cryptoGen->decryptStandard($resp->data, null, 'database');
+            if ($d->is_encrypted()) {
+                $content = $this->cryptoGen->decryptFromFilesystem($resp->data);
             } else {
-                $content = base64_decode($resp->data);
+                $content = base64_decode((string) $resp->data);
             }
         } else {
                 $url =  $d->get_url();
 
                 //strip url of protocol handler
-                $url = preg_replace("|^(.*)://|", "", $url);
+                $url = preg_replace("|^(.*)://|", "", (string) $url);
 
                 //change full path to current webroot.  this is for documents that may have
                 //been moved from a different filesystem and the full path in the database
@@ -936,15 +1174,15 @@ class C_Document extends Controller
                 //directories. For example a path_depth of 2 can give documents/encounters/1/<file>
                 // etc.
                 // NOTE that $from_filename and basename($url) are the same thing
-                $from_all = explode("/", $url);
+                $from_all = explode("/", (string) $url);
                 $from_filename = array_pop($from_all);
-                $from_pathname_array = array();
+                $from_pathname_array = [];
             for ($i = 0; $i < $d->get_path_depth(); $i++) {
                 $from_pathname_array[] = array_pop($from_all);
             }
                 $from_pathname_array = array_reverse($from_pathname_array);
                 $from_pathname = implode("/", $from_pathname_array);
-                $temp_url = $GLOBALS['OE_SITE_DIR'] . '/documents/' . $from_pathname . '/' . $from_filename;
+                $temp_url = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . '/documents/' . $from_pathname . '/' . $from_filename;
             if (file_exists($temp_url)) {
                 $url = $temp_url;
             }
@@ -954,14 +1192,14 @@ class C_Document extends Controller
                 return;
             }
 
-            if ($d->get_encrypted() == 1) {
-                $content = $this->cryptoGen->decryptStandard(file_get_contents($url), null, 'database');
+            if ($d->is_encrypted()) {
+                $content = $this->cryptoGen->decryptFromFilesystem(file_get_contents($url));
             } else {
                 $content = file_get_contents($url);
             }
         }
 
-        if (!empty($d->get_hash()) && (strlen($d->get_hash()) < 50)) {
+        if (!empty($d->get_hash()) && (strlen((string) $d->get_hash()) < 50)) {
             // backward compatibility for documents that were hashed prior to OpenEMR 6.0.0
             $current_hash = sha1($content);
         } else {
@@ -986,7 +1224,7 @@ class C_Document extends Controller
 
     // Added by Rod for metadata update.
     //
-    function update_action_process(string $patient_id = null, $document_id)
+    public function update_action_process(?string $patient_id, $document_id)
     {
 
         if ($_POST['process'] != "true") {
@@ -994,13 +1232,16 @@ class C_Document extends Controller
             return;
         }
 
+        // Anti-IDOR: only permit metadata updates on a document the caller can
+        // already access in its current patient/category context.
+        $d = $this->authorizeDocumentWrite($patient_id, $document_id);
+
         $docdate = $_POST['docdate'];
         $docname = $_POST['docname'];
         $issue_id = $_POST['issue_id'];
 
         if (is_numeric($document_id)) {
             $messages = '';
-            $d = new Document($document_id);
             $file_name = $d->get_name();
             if (
                 $docname != '' &&
@@ -1010,14 +1251,10 @@ class C_Document extends Controller
                 $d->set_name($docname);
                 $d->persist();
                 $d->populate();
-                $messages .= xl('Document successfully renamed.') . "<br />";
+                $messages .= xl('Document successfully renamed.') . "\n";
             }
 
-            if (preg_match('/^\d\d\d\d-\d+-\d+$/', $docdate)) {
-                $docdate = "$docdate";
-            } else {
-                $docdate = "NULL";
-            }
+            $docdate = preg_match('/^\d\d\d\d-\d+-\d+$/', (string) $docdate) ? "$docdate" : "NULL";
             if (!is_numeric($issue_id)) {
                 $issue_id = 0;
             }
@@ -1030,7 +1267,7 @@ class C_Document extends Controller
                 $sql = "UPDATE documents SET docdate = ?, list_id = ? WHERE id = ?";
                 $this->tree->_db->Execute($sql, [$docdate, $issue_id, $document_id]);
             }
-            $messages .= xl('Document date and issue updated successfully') . "<br />";
+            $messages .= xl('Document date and issue updated successfully') . "\n";
         }
 
         $this->_state = false;
@@ -1038,40 +1275,62 @@ class C_Document extends Controller
         return $this->view_action($patient_id, $document_id);
     }
 
-    function list_action($patient_id = "")
+    public function list_action($patient_id = ""): string
     {
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
         $this->_last_node = null;
         $categories_list = $this->tree->_get_categories_array($patient_id);
         //print_r($categories_list);
 
         $menu  = new HTML_TreeMenu();
-        $rnode = $this->_array_recurse($this->tree->tree, $categories_list);
+        $rnode = $this->array_recurse($this->tree->tree, $patient_id, $categories_list);
         $menu->addItem($rnode);
-        $treeMenu = new HTML_TreeMenu_DHTML($menu, array('images' => 'public/images', 'defaultClass' => 'treeMenuDefault'));
-        $treeMenu_listbox  = new HTML_TreeMenu_Listbox($menu, array('linkTarget' => '_self'));
+        $treeMenu = new HTML_TreeMenu_DHTML($menu, ['images' => 'public/images', 'defaultClass' => 'treeMenuDefault']);
+        $treeMenu_listbox  = new HTML_TreeMenu_Listbox($menu, ['linkTarget' => '_self']);
         $this->assign("tree_html", $treeMenu->toHTML());
 
+        $is_new_referer = !empty($_GET['referer_flag']) ? 1 : 0;
         $is_new = isset($_GET['patient_name']) ? 1 : false;
-        $place_hld = isset($_GET['patient_name']) ? filter_input(INPUT_GET, 'patient_name') : xl("Patient search or select.");
-        $cur_pid = isset($_GET['patient_id']) ? filter_input(INPUT_GET, 'patient_id') : '';
+        $place_hld = isset($_GET['patient_name']) ? filter_input(INPUT_GET, 'patient_name') : false;
+        $cur_pid = isset($_GET['patient_id']) ? filter_input(INPUT_GET, 'patient_id') : $patient_id;
         $used_msg = xl('Current patient unavailable here. Use Patient Documents');
         if ($cur_pid == '00') {
+            if (!AclMain::aclCheckCore('patients', 'docs', '', ['write', 'addonly'])) {
+                $this->throwAccessDenied("ACL check failed for patients/docs write|addonly: Documents", xl("Documents"));
+            }
             $cur_pid = '0';
             $is_new = 1;
+        }
+        if ((int)$cur_pid == 0) {
+            $place_hld = xl('New Document Uploads.');
+        }
+        if (!$place_hld) {
+            if ((int)$cur_pid > 0) {
+                $query = "select fname, lname from patient_data WHERE pid = ?";
+                $name = sqlQuery($query, [$cur_pid]);
+                if (is_array($name)) {
+                    $place_hld = $name['fname'] . ' ' . $name['lname'];
+                }
+            }
+        }
+        if (!AclMain::aclCheckCore('patients', 'docs')) {
+            $this->throwAccessDenied("ACL check failed for patients/docs: Documents", xl("Documents"));
         }
         $this->assign('is_new', $is_new);
         $this->assign('place_hld', $place_hld);
         $this->assign('cur_pid', $cur_pid);
         $this->assign('used_msg', $used_msg);
-        $this->assign('demo_pid', ($_SESSION['pid'] ?? null));
+        $this->assign('demo_pid', $session->get('pid'));
+        $this->assign('is_new_referer', $is_new_referer);
+        $this->assign('new_title', xlt("New Documents"));
 
-        return $this->fetch($GLOBALS['template_dir'] . "documents/" . $this->template_mod . "_list.html");
+        return $this->fetch(OEGlobalsBag::getInstance()->get('template_dir') . "documents/" . $this->template_mod . "_list.html");
     }
 
-    function &_array_recurse($array, $categories = array())
+    public function &array_recurse($array, $patient_id, $categories = [])
     {
         if (!is_array($array)) {
-            $array = array();
+            $array = [];
         }
         $node = &$this->_last_node;
         $current_node = &$node;
@@ -1081,28 +1340,28 @@ class C_Document extends Controller
             if (is_array($ar)  || !empty($id)) {
                 if ($node == null) {
                     //echo "r:" . $this->tree->get_node_name($id) . "<br />";
-                    $rnode = new HTML_TreeNode(array("id" => $id, 'text' => $this->tree->get_node_name($id), 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon, 'expanded' => false));
+                    $rnode = new HTML_TreeNode(["id" => $id, 'text' => $this->tree->get_node_name($id), 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon, 'expanded' => false]);
                     $this->_last_node = &$rnode;
                     $node = &$rnode;
                     $current_node = &$rnode;
                 } else {
                     //echo "p:" . $this->tree->get_node_name($id) . "<br />";
-                    $this->_last_node = &$node->addItem(new HTML_TreeNode(array("id" => $id, 'text' => $this->tree->get_node_name($id), 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon)));
+                    $this->_last_node = &$node->addItem(new HTML_TreeNode(["id" => $id, 'text' => $this->tree->get_node_name($id), 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon]));
                     $current_node = &$this->_last_node;
                 }
 
-                $this->_array_recurse($ar, $categories);
+                $this->array_recurse($ar, $patient_id, $categories);
             } else {
                 if ($id === 0 && !empty($ar)) {
                     $info = $this->tree->get_node_info($id);
                   //echo "b:" . $this->tree->get_node_name($id) . "<br />";
-                    $current_node = &$node->addItem(new HTML_TreeNode(array("id" => $id, 'text' => $info['value'], 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon)));
+                    $current_node = &$node->addItem(new HTML_TreeNode(["id" => $id, 'text' => $info['value'], 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon]));
                 } else {
                     //there is a third case that is implicit here when title === 0 and $ar is empty, in that case we do not want to do anything
                     //this conditional tree could be more efficient but working with recursive trees makes my head hurt, TODO
                     if ($id !== 0 && is_object($node)) {
                       //echo "n:" . $this->tree->get_node_name($id) . "<br />";
-                        $current_node = &$node->addItem(new HTML_TreeNode(array("id" => $id, 'text' => $this->tree->get_node_name($id), 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon)));
+                        $current_node = &$node->addItem(new HTML_TreeNode(["id" => $id, 'text' => $this->tree->get_node_name($id), 'link' => $this->_link("upload") . "parent_id=" . $id . "&", 'icon' => $icon, 'expandedIcon' => $expandedIcon]));
                     }
                 }
             }
@@ -1112,34 +1371,35 @@ class C_Document extends Controller
             $icon = "file3.png";
             if (!empty($categories[$id]) && is_array($categories[$id])) {
                 foreach ($categories[$id] as $doc) {
-                    $link = $this->_link("view") . "doc_id=" . urlencode($doc['document_id']) . "&";
+                    $link = $this->_link("view") . "doc_id=" . urlencode((string) $doc['document_id']) . "&";
           // If user has no access then there will be no link.
                     if (!AclMain::aclCheckAcoSpec($doc['aco_spec'])) {
                         $link = '';
                     }
-                    if ($this->tree->get_node_name($id) == "CCR") {
-                        $current_node->addItem(new HTML_TreeNode(array(
-                            'text' => oeFormatShortDate($doc['docdate']) . ' ' . $doc['document_name'] . '-' . $doc['document_id'],
-                            'link' => $link,
-                            'icon' => $icon,
-                            'expandedIcon' => $expandedIcon,
-                            'events' => array('Onclick' => "javascript:newwindow=window.open('ccr/display.php?type=CCR&doc_id=" . attr_url($doc['document_id']) . "','_blank');")
-                        )));
-                    } elseif ($this->tree->get_node_name($id) == "CCD") {
-                        $current_node->addItem(new HTML_TreeNode(array(
-                            'text' => oeFormatShortDate($doc['docdate']) . ' ' . $doc['document_name'] . '-' . $doc['document_id'],
-                            'link' => $link,
-                            'icon' => $icon,
-                            'expandedIcon' => $expandedIcon,
-                            'events' => array('Onclick' => "javascript:newwindow=window.open('ccr/display.php?type=CCD&doc_id=" . attr_url($doc['document_id']) . "','_blank');")
-                        )));
+                    // CCD view
+                    $nodeInfo = $this->tree->get_node_info($id);
+                    $treeViewFilterEvent = new PatientDocumentTreeViewFilterEvent();
+                    $treeViewFilterEvent->setCategoryTreeNode($this->tree);
+                    $treeViewFilterEvent->setDocumentId($doc['document_id']);
+                    $treeViewFilterEvent->setDocumentName($doc['document_name']);
+                    $treeViewFilterEvent->setCategoryId($id);
+                    $treeViewFilterEvent->setCategoryInfo($nodeInfo);
+                    $treeViewFilterEvent->setPid($patient_id);
+
+                    $htmlNode = new HTML_TreeNode([
+                        'text' => oeFormatShortDate($doc['docdate']) . ' ' . $doc['document_name'] . '-' . $doc['document_id'],
+                        'link' => $link,
+                        'icon' => $icon,
+                        'expandedIcon' => $expandedIcon
+                    ]);
+
+                    $treeViewFilterEvent->setHtmlTreeNode($htmlNode);
+                    $filteredEvent = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher()->dispatch($treeViewFilterEvent, PatientDocumentTreeViewFilterEvent::EVENT_NAME);
+                    if ($filteredEvent->getHtmlTreeNode() != null) {
+                        $current_node->addItem($filteredEvent->getHtmlTreeNode());
                     } else {
-                        $current_node->addItem(new HTML_TreeNode(array(
-                            'text' => oeFormatShortDate($doc['docdate']) . ' ' . $doc['document_name'] . '-' . $doc['document_id'],
-                            'link' => $link,
-                            'icon' => $icon,
-                            'expandedIcon' => $expandedIcon
-                        )));
+                        // add the original node if we got back nothing from the server
+                        $current_node->addItem($htmlNode);
                     }
                 }
             }
@@ -1147,10 +1407,10 @@ class C_Document extends Controller
         return $node;
     }
 
-    //function for logging  the errors in writing file to CouchDB/Hard Disk
-    function document_upload_download_log($patientid, $content)
+    //public function for logging  the errors in writing file to CouchDB/Hard Disk
+    public function document_upload_download_log($patientid, $content)
     {
-        $log_path = $GLOBALS['OE_SITE_DIR'] . "/documents/couchdb/";
+        $log_path = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/couchdb/";
         $log_file = 'log.txt';
         if (!is_dir($log_path)) {
             mkdir($log_path, 0777, true);
@@ -1158,21 +1418,17 @@ class C_Document extends Controller
 
         $LOG = file_get_contents($log_path . $log_file);
 
-        if ($this->cryptoGen->cryptCheckStandard($LOG)) {
-            $LOG = $this->cryptoGen->decryptStandard($LOG, null, 'database');
-        }
+        $LOG = $this->cryptoGen->decryptFromFilesystem($LOG);
 
         $LOG .= $content;
 
         if (!empty($LOG)) {
-            if ($GLOBALS['drive_encryption']) {
-                $LOG = $this->cryptoGen->encryptStandard($LOG, null, 'database');
-            }
+            $LOG = $this->cryptoGen->encryptForFilesystem($LOG);
             file_put_contents($log_path . $log_file, $LOG);
         }
     }
 
-    function document_send($email, $body, $attfile, $pname)
+    public function document_send($email, $body, $attfile, $pname)
     {
         if (empty($email)) {
             $this->assign("process_result", "Email could not be sent, the address supplied: '$email' was empty or invalid.");
@@ -1181,8 +1437,8 @@ class C_Document extends Controller
 
           $desc = "Please check the attached patient document.\n Content:" . $body;
           $mail = new MyMailer();
-          $from_name = $GLOBALS["practice_return_email_path"];
-          $from =  $GLOBALS["practice_return_email_path"];
+          $from_name = OEGlobalsBag::getInstance()->getString("practice_return_email_path");
+          $from =  OEGlobalsBag::getInstance()->getString("practice_return_email_path");
           $mail->AddReplyTo($from, $from_name);
           $mail->SetFrom($from, $from);
           $to = $email ;
@@ -1208,14 +1464,17 @@ class C_Document extends Controller
 
         //$this->_last_node = &$node1;
 
-// Function to tag a document to an encounter.
-    function tag_action_process(string $patient_id = null, $document_id)
+// public function to tag a document to an encounter.
+    public function tag_action_process(?string $patient_id, $document_id)
     {
         if ($_POST['process'] != "true") {
             die("process is '" . text($_POST['process']) . "', expected 'true'");
             return;
         }
-
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+        // Anti-IDOR: only permit tagging a document the caller can already
+        // access in its current patient/category context.
+        $d = $this->authorizeDocumentWrite($patient_id, $document_id);
         // Create Encounter and Tag it.
         $event_date = date('Y-m-d H:i:s');
         $encounter_id = $_POST['encounter_id'];
@@ -1224,7 +1483,6 @@ class C_Document extends Controller
 
         if (is_numeric($document_id)) {
             $messages = '';
-            $d = new Document($document_id);
             $file_name = $d->get_url_file();
             if (!is_numeric($encounter_id)) {
                 $encounter_id = 0;
@@ -1232,19 +1490,18 @@ class C_Document extends Controller
 
             $encounter_check = ( $encounter_check == 'on') ? 1 : 0;
             if ($encounter_check) {
-                $provider_id = $_SESSION['authUserID'] ;
+                $provider_id = $session->get('authUserID');
 
                 // Get the logged in user's facility
-                $facilityRow = sqlQuery("SELECT username, facility, facility_id FROM users WHERE id = ?", array("$provider_id"));
+                $facilityRow = sqlQuery("SELECT username, facility, facility_id FROM users WHERE id = ?", ["$provider_id"]);
                 $username = $facilityRow['username'];
                 $facility = $facilityRow['facility'];
                 $facility_id = $facilityRow['facility_id'];
                 // Get the primary Business Entity facility to set as billing facility, if null take user's facility as billing facility
                 $billingFacility = $this->facilityService->getPrimaryBusinessEntity();
-                $billingFacilityID = ( $billingFacility['id'] ) ? $billingFacility['id'] : $facility_id;
+                $billingFacilityID = $billingFacility['id'] ?: $facility_id;
 
-                $conn = $GLOBALS['adodb']['db'];
-                $encounter = $conn->GenID("sequences");
+                $encounter = QueryUtils::generateId();
                 $query = "INSERT INTO form_encounter SET
 						date = ?,
 						reason = ?,
@@ -1256,7 +1513,7 @@ class C_Document extends Controller
 						provider_id = ?,
 						pid = ?,
 						encounter = ?";
-                $bindArray = array($event_date,$file_name,$facility,$_POST['visit_category_id'],(int)$facility_id,(int)$billingFacilityID,(int)$provider_id,$patient_id,$encounter);
+                $bindArray = [$event_date,$file_name,$facility,$_POST['visit_category_id'],(int)$facility_id,(int)$billingFacilityID,(int)$provider_id,$patient_id,$encounter];
                 $formID = sqlInsert($query, $bindArray);
                 addForm($encounter, "New Patient Encounter", $formID, "newpatient", $patient_id, "1", date("Y-m-d H:i:s"), $username);
                 $d->set_encounter_id($encounter);
@@ -1268,7 +1525,7 @@ class C_Document extends Controller
             $d->set_encounter_check($encounter_check);
             $d->persist();
 
-            $messages .= xlt('Document tagged to Encounter successfully') . "<br />";
+            $messages .= xlt('Document tagged to Encounter successfully') . "\n";
         }
 
         $this->_state = false;
@@ -1277,24 +1534,26 @@ class C_Document extends Controller
         return $this->view_action($patient_id, $document_id);
     }
 
-    function image_procedure_action(string $patient_id = null, $document_id)
+    public function image_procedure_action(?string $patient_id, $document_id): string
     {
+        // Anti-IDOR: only permit tagging a document the caller can already access.
+        $this->authorizeDocumentWrite($patient_id, $document_id);
 
         $img_procedure_id = $_POST['image_procedure_id'];
         $proc_code = $_POST['procedure_code'];
 
         if (is_numeric($document_id)) {
-            $img_order  = sqlQuery("select * from procedure_order_code where procedure_order_id = ? and procedure_code = ? ", array($img_procedure_id,$proc_code));
-            $img_report = sqlQuery("select * from procedure_report where procedure_order_id = ? and procedure_order_seq = ? ", array($img_procedure_id,$img_order['procedure_order_seq']));
+            $img_order  = sqlQuery("select * from procedure_order_code where procedure_order_id = ? and procedure_code = ? ", [$img_procedure_id,$proc_code]);
+            $img_report = sqlQuery("select * from procedure_report where procedure_order_id = ? and procedure_order_seq = ? ", [$img_procedure_id,$img_order['procedure_order_seq']]);
             $img_report_id = !empty($img_report['procedure_report_id']) ? $img_report['procedure_report_id'] : 0;
             if ($img_report_id == 0) {
                 $report_date = date('Y-m-d H:i:s');
-                $img_report_id = sqlInsert("INSERT INTO procedure_report(procedure_order_id,procedure_order_seq,date_collected,date_report,report_status) values(?,?,?,?,'final')", array($img_procedure_id,$img_order['procedure_order_seq'],$img_order['date_collected'],$report_date));
+                $img_report_id = sqlInsert("INSERT INTO procedure_report(procedure_order_id,procedure_order_seq,date_collected,date_report,report_status) values(?,?,?,?,'final')", [$img_procedure_id,$img_order['procedure_order_seq'],$img_order['date_collected'],$report_date]);
             }
 
-            $img_result = sqlQuery("select * from procedure_result where procedure_report_id = ? and document_id = ?", array($img_report_id,$document_id));
+            $img_result = sqlQuery("select * from procedure_result where procedure_report_id = ? and document_id = ?", [$img_report_id,$document_id]);
             if (empty($img_result)) {
-                sqlStatement("INSERT INTO procedure_result(procedure_report_id,date,document_id,result_status) values(?,?,?,'final')", array($img_report_id,date('Y-m-d H:i:s'),$document_id));
+                sqlStatement("INSERT INTO procedure_result(procedure_report_id,date,document_id,result_status) values(?,?,?,'final')", [$img_report_id,date('Y-m-d H:i:s'),$document_id]);
             }
 
             $this->image_result_indication($document_id, 0, $img_procedure_id);
@@ -1302,51 +1561,72 @@ class C_Document extends Controller
         return $this->view_action($patient_id, $document_id);
     }
 
-    function clear_procedure_tag_action(string $patient_id = null, $document_id)
+    public function clear_procedure_tag_action(?string $patient_id, $document_id): string
     {
+        // Anti-IDOR: only permit clearing tags on a document the caller can access.
+        $this->authorizeDocumentWrite($patient_id, $document_id);
         if (is_numeric($document_id)) {
-            sqlStatement("delete from procedure_result where document_id = ?", $document_id);
+            sqlStatement("delete from procedure_result where document_id = ?", [$document_id]);
         }
         return $this->view_action($patient_id, $document_id);
     }
 
-    function get_mapped_procedure($document_id)
+    public function get_mapped_procedure($document_id)
     {
-        $map = array();
+        $map = [];
         if (is_numeric($document_id)) {
             $map = sqlQuery("select poc.procedure_order_id,poc.procedure_code from procedure_result pres
 						   inner join procedure_report pr on pr.procedure_report_id = pres.procedure_report_id
 						   inner join procedure_order_code poc on (poc.procedure_order_id = pr.procedure_order_id and poc.procedure_order_seq = pr.procedure_order_seq)
 						   inner join procedure_order po on po.procedure_order_id = poc.procedure_order_id
-						   where pres.document_id = ?", array($document_id));
+						   where pres.document_id = ?", [$document_id]);
         }
         return $map;
     }
 
-    function image_result_indication($doc_id, $encounter, $image_procedure_id = 0)
+    public function image_result_indication($doc_id, $encounter, $image_procedure_id = 0)
     {
-        $doc_notes = sqlQuery("select note from notes where foreign_id = ?", array($doc_id));
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+        $doc_notes = sqlQuery("select note from notes where foreign_id = ?", [$doc_id]);
         $narration = isset($doc_notes['note']) ? 'With Narration' : 'Without Narration';
 
+        // TODO: This should be moved into a service so we can handle things such as uuid generation....
         if ($encounter != 0) {
-            $ep = sqlQuery("select u.username as assigned_to from form_encounter inner join users u on u.id = provider_id where encounter = ?", array($encounter));
+            $ep = sqlQuery("select u.username as assigned_to from form_encounter inner join users u on u.id = provider_id where encounter = ?", [$encounter]);
         } elseif ($image_procedure_id != 0) {
-            $ep = sqlQuery("select u.username as assigned_to from procedure_order inner join users u on u.id = provider_id where procedure_order_id = ?", array($image_procedure_id));
+            $ep = sqlQuery("select u.username as assigned_to from procedure_order inner join users u on u.id = provider_id where procedure_order_id = ?", [$image_procedure_id]);
         } else {
-            $ep = array('assigned_to' => $_SESSION['authUser']);
+            $ep = ['assigned_to' => $session->get('authUser')];
         }
 
-        $encounter_provider = isset($ep['assigned_to']) ? $ep['assigned_to'] : $_SESSION['authUser'];
-        $noteid = addPnote($_SESSION['pid'], 'New Image Report received ' . $narration, 0, 1, 'Image Results', $encounter_provider, '', 'New', '');
+        $encounter_provider = $ep['assigned_to'] ?? $session->get('authUser');
+        $noteid = addPnote($session->get('pid'), 'New Image Report received ' . $narration, 0, 1, 'Image Results', $encounter_provider, '', 'New', '');
         setGpRelation(1, $doc_id, 6, $noteid);
     }
 
-//clear encounter tag function
-    function clear_encounter_tag_action(string $patient_id = null, $document_id)
+//clear encounter tag public function
+    public function clear_encounter_tag_action(?string $patient_id, $document_id): string
     {
+        // Anti-IDOR: only permit clearing the encounter tag on a document the
+        // caller can already access.
+        $this->authorizeDocumentWrite($patient_id, $document_id);
         if (is_numeric($document_id)) {
-            sqlStatement("update documents set encounter_id='0' where foreign_id=? and id = ?", array($patient_id,$document_id));
+            sqlStatement("update documents set encounter_id='0' where foreign_id=? and id = ?", [$patient_id,$document_id]);
         }
         return $this->view_action($patient_id, $document_id);
+    }
+
+    // this will set flag to skip acl check
+    // this is needed for when uploading via services that piggyback on any user (ie. the background services) or via cron/cli
+    public function skipAclCheck(): void
+    {
+        $this->skip_acl_check = true;
+    }
+
+    // this will check if flag has been set to skip the acl check
+    // this is needed for when uploading via services that piggyback on any user (ie. the background services) or via cron/cli
+    public function isSkipAclCheck(): bool
+    {
+        return $this->skip_acl_check;
     }
 }

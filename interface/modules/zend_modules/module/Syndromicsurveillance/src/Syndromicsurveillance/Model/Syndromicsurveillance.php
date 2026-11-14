@@ -12,11 +12,11 @@
 
 namespace Syndromicsurveillance\Model;
 
+use Laminas\Form\Form;
 use Laminas\InputFilter\Factory as InputFactory;
 use Laminas\InputFilter\InputFilter;
 use Laminas\InputFilter\InputFilterAwareInterface;
 use Laminas\InputFilter\InputFilterInterface;
-use Laminas\Form\Form;
 
 class Syndromicsurveillance extends Form implements InputFilterAwareInterface
 {
@@ -36,7 +36,7 @@ class Syndromicsurveillance extends Form implements InputFilterAwareInterface
         throw new \Exception("Not used");
     }
 
-    public function getInputFilter()
+    public function getInputFilter(): InputFilterInterface
     {
         if (!$this->inputFilter) {
             $inputFilter = new InputFilter();

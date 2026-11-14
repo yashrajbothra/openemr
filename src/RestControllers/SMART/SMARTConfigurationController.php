@@ -6,7 +6,7 @@
  * @see http://hl7.org/fhir/smart-app-launch/conformance/index.html
  *
  * @package OpenEMR\RestControllers\SMART
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Stephen Nielson <stephen@nielson.org>
  * @copyright Copyright (c) 2020 Stephen Nielson <stephen@nielson.org>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -14,59 +14,64 @@
 
 namespace OpenEMR\RestControllers\SMART;
 
+use OpenApi\Attributes as OA;
 use OpenEMR\Common\Auth\OpenIDConnect\Repositories\ScopeRepository;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\FHIR\Config\ServerConfig;
 use OpenEMR\FHIR\SMART\Capability;
 
 class SMARTConfigurationController
 {
     /**
-     * @var \OpenEMR\RestControllers\AuthorizationController
+     * @param OEGlobalsBag $globalsBag source of the oauth_password_grant setting
+     * @param ScopeRepository $scopeRepository source of the scopes the server supports
+     * @param ServerConfig $serverConfig source of the endpoint URLs
      */
-    private $authServer;
-
-    public function __construct(\OpenEMR\RestControllers\AuthorizationController $authServer)
-    {
-        $this->authServer = $authServer;
+    public function __construct(
+        private readonly OEGlobalsBag $globalsBag,
+        private readonly ScopeRepository $scopeRepository,
+        private readonly ServerConfig $serverConfig
+    ) {
+        // Without this, a freshly-constructed ScopeRepository lazy-creates a
+        // ServerScopeListEntity with systemScopesEnabled=false, so system/* scopes never
+        // reach .well-known/smart-configuration even when rest_system_scopes_api is on.
+        $this->scopeRepository->setServerConfig($this->serverConfig);
     }
 
     /**
-     * Needed for OpenEMR\FHIR\SMART\Capability::CONTEXT_STYLE support
-     * TODO: adunsulag do we want to try and read from the scss files and generate some kind of styles...
-     * Reading the SMART FHIR spec author forums so few app writers are actually using this at all, it seems like we
-     * can just use defaults without getting into our skins... so that we can be spec compliant with ONC.
+     * Builds the SMART on FHIR configuration document.
+     *
+     * @return array<string, mixed>
      */
-    public function getStyles()
-    {
-        $styles = [
-            // copied from light theme background color
-            "color_background" => "#f8f9fa",
-            "color_error" => "#9e2d2d",
-            "color_highlight" => "#69b5ce",
-            "color_modal_backdrop" => "",
-            "color_success" => "#498e49",
-            // set text to black
-            "color_text" => "#000",
-            "dim_border_radius" => "6px",
-            "dim_font_size" => "13px",
-            "dim_spacing_size" => "20px",
-            // copied from our light theme font families
-            "font_family_body" => '"Lato","Helvetica",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"',
-            "font_family_heading" => '"Lato","Helvetica",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"'
-        ];
-        return $styles;
-    }
-
+    #[OA\Get(
+        path: '/fhir/.well-known/smart-configuration',
+        description: 'Returns smart configuration of the fhir server.',
+        tags: ['fhir'],
+        responses: [
+            new OA\Response(
+                response: '200',
+                description: 'Return smart configuration of the fhir server'
+            ),
+        ]
+    )]
     public function getConfig(): array
     {
-        $authServer = $this->authServer;
         // combine all possible supported scopes(OIDC & SMART on FHIR)
         // and reduce to only scopes supported by existing FHIR api resources.
-        $scopeRepository = new ScopeRepository(\RestConfig::GetInstance());
-        $scopesSupported = $scopeRepository->getCurrentSmartScopes();
+        $scopesSupported = $this->scopeRepository->getCurrentSmartScopes();
+
+        // the same setting the token endpoint and the OpenID discovery document read
+        $grantTypesSupported = ['client_credentials', 'authorization_code'];
+        if ($this->globalsBag->getInt('oauth_password_grant') > 0) {
+            $grantTypesSupported[] = 'password';
+        }
 
         /**
-         * @see http://www.hl7.org/fhir/smart-app-launch/conformance/index.html#using-well-known
-         * authorization_endpoint: REQUIRED, URL to the OAuth2 authorization endpoint.
+         * US Core Version 3.1.0 / SMART ON FHIR 1.0.0 @see https://hl7.org/fhir/smart-app-launch/1.0.0/conformance/index.html#using-well-known
+         * US Core Version 7.0.0 / SMART ON FHIR Version 2.2.0 @see https://hl7.org/fhir/smart-app-launch/STU2/conformance.html
+         *
+         * issuer ()
+         * authorization_endpoint: REQUIRED (3.1.0/7.0.0), URL to the OAuth2 authorization endpoint.
          * token_endpoint: REQUIRED, URL to the OAuth2 token endpoint.
          * token_endpoint_auth_methods: OPTIONAL, array of client authentication methods supported by the token endpoint. The options are “client_secret_post” and “client_secret_basic”.
          * registration_endpoint: OPTIONAL, if available, URL to the OAuth2 dynamic registration endpoint for this FHIR server.
@@ -79,11 +84,24 @@ class SMARTConfigurationController
          */
 
         $config = [
-            "authorization_endpoint" => $authServer->getAuthorizeUrl(),
-            "token_endpoint" => $authServer->getTokenUrl(),
-            "registration_endpoint" => $authServer->getRegistrationUrl(),
-            "scopes_supported" => [
-                $scopesSupported
+            // required fields for SMART v2
+            "issuer" => $this->serverConfig->getFhirUrl(),
+             "jwks_uri" => $this->serverConfig->getJsonWebKeySetUrl(),
+            "authorization_endpoint" => $this->serverConfig->getAuthorizeUrl(),
+            "grant_types_supported" => $grantTypesSupported,
+            "token_endpoint" => $this->serverConfig->getTokenUrl(),
+            "capabilities" => Capability::SUPPORTED_CAPABILITIES,
+            // added for PKCE support.
+            "code_challenge_methods_supported" => ['S256'],
+            "scopes_supported" => $scopesSupported,
+            "introspection_endpoint" => $this->serverConfig->getIntrospectionUrl(),
+            // end required fields for SMART v2
+
+
+            "token_endpoint_auth_methods_supported" => [
+                "client_secret_basic",
+                "client_secret_post",
+                "private_key_jwt"
             ],
             "response_types_supported" => [
                 "code",
@@ -96,10 +114,10 @@ class SMARTConfigurationController
             ],
             // we don't support a management endpoint right now
             //    "management_endpoint" => "https://ehr.example.com/user/manage",
-            "introspection_endpoint" => $authServer->getIntrospectionUrl(),
-            // we don't revoke tokens right now
+
+            // we don't support API revocation of tokens right now
             //    "revocation_endpoint" => "https://ehr.example.com/user/revoke",
-            "capabilities" => Capability::SUPPORTED_CAPABILITIES
+
         ];
 
         return $config;

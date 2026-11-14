@@ -3,7 +3,7 @@
 /**
  * This is a report of receipts by payer or payment method.
  *
- * The payer option means an insurance company name or "Patient".
+ * The payer option means an insurance company name or "Personal pay".
  *
  * The payment method option is most useful for sites using
  * pos_checkout.php (e.g. weight loss clinics) because this plugs
@@ -11,56 +11,69 @@
  * column of the SQL-Ledger acc_trans table or ar_session table.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Stephen Waite <stephen.waite@cmsvt.com>
  * @copyright Copyright (c) 2006-2020 Rod Roark <rod@sunsetsystems.com>
  * @copyright Copyright (c) 2017-2018 Brady Miller <brady.g.miller@gmail.com>
- * @copyright Copyright (c) 2019 Stephen Waite <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2019-2022 Stephen Waite <stephen.waite@cmsvt.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 require_once("../globals.php");
-require_once("$srcdir/patient.inc");
-require_once("$srcdir/options.inc.php");
+require_once(\OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . "/options.inc.php");
 require_once("../../custom/code_types.inc.php");
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Common\Utils\FormatMoney;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Services\InsuranceCompanyService;
 use OpenEMR\Services\InsuranceService;
 
+if (!AclMain::aclCheckCore('acct', 'rep_a')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for acct/rep_a: Receipts Summary", xl("Receipts Summary"));
+}
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 if (!empty($_POST)) {
-    if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-        CsrfUtils::csrfNotVerified();
-    }
+    CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 }
 
 // This controls whether we show pt name, policy number and DOS.
 $showing_ppd = true;
 
-$insarray = array();
+$insarray = [];
 
-function bucks($amount)
-{
-    if ($amount) {
-        return oeFormatMoney($amount);
-    }
-}
-
-function thisLineItem(
-    $patient_id,
-    $encounter_id,
-    $memo,
-    $transdate,
-    $rowmethod,
-    $rowpayamount,
-    $rowadjamount,
-    $payer_type = 0,
-    $irnumber = ''
-) {
+/**
+ * Render a line item for the receipts by method html table.
+ *
+ * @param int $patient_id
+ * @param int $encounter_id
+ * @param string $memo
+ * @param string $transdate
+ * @param string $rowmethod
+ * @param float $rowpayamount
+ * @param float $rowadjamount
+ * @param int $payer_type
+ * @param string $irnumber
+ * @return void
+ */
+function receiptsByMethodLineItem(
+    int $patient_id,
+    int $encounter_id,
+    string $memo,
+    string $transdate,
+    string $rowmethod,
+    float $rowpayamount,
+    float $rowadjamount,
+    int $payer_type = 0,
+    string $irnumber = ''
+): void {
 
     global $form_report_by, $insarray, $grandpaytotal, $grandadjtotal;
 
@@ -83,11 +96,20 @@ function thisLineItem(
   //
     if (!empty($_POST['form_details'])) { // details are wanted
         // Save everything for later sorting.
-        $insarray[] = array($patient_id, $encounter_id, $memo, $transdate,
-        $rowmethod, $rowpayamount, $rowadjamount, $payer_type, $irnumber);
+        $insarray[] = [
+            $patient_id,
+            $encounter_id,
+            $memo,
+            $transdate,
+            $rowmethod,
+            $rowpayamount,
+            $rowadjamount,
+            $payer_type,
+            $irnumber
+        ];
     } else { // details not wanted
         if (empty($insarray[$rowmethod])) {
-            $insarray[$rowmethod] = array(0, 0);
+            $insarray[$rowmethod] = [0, 0];
         }
 
         $insarray[$rowmethod][0] += $rowpayamount;
@@ -107,7 +129,7 @@ function showLineItem(
     $rowadjamount,
     $payer_type = 0,
     $irnumber = ''
-) {
+): void {
 
     global $paymethod, $paymethodleft, $methodpaytotal, $methodadjtotal,
     $grandpaytotal, $grandadjtotal, $showing_ppd;
@@ -116,24 +138,22 @@ function showLineItem(
         $rowmethod = 'Unknown';
     }
 
-    $invnumber = $irnumber ? $irnumber : "$patient_id.$encounter_id";
-
     if ($paymethod != $rowmethod) {
         if ($paymethod) {
             // Print method total.
             ?>
 
-     <tr bgcolor="#ddddff">
-        <td class="detail" colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
-            <?php echo xlt('Total for ') . text($paymethod); ?>
-  </td>
-  <td align="right">
-            <?php echo text(bucks($methodadjtotal)); ?>
-  </td>
-  <td align="right">
-            <?php echo text(bucks($methodpaytotal)); ?>
-  </td>
- </tr>
+            <tr class="table-secondary">
+                <td colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
+                    <?php echo xlt('Total for ') . text($paymethod); ?>
+                </td>
+                <td class="text-right">
+                    <?php echo text(FormatMoney::getBucks($methodadjtotal)); ?>
+                </td>
+                <td class="text-right">
+                    <?php echo text(FormatMoney::getBucks($methodpaytotal)); ?>
+                </td>
+            </tr>
             <?php
         }
 
@@ -146,35 +166,42 @@ function showLineItem(
     if ($_POST['form_details']) {
         ?>
 
-   <tr>
-   <td class="detail">
-        <?php echo text($paymethodleft); $paymethodleft = " " ?>
-   </td>
-   <td class="detail">
-        <?php echo text($memo); $memo = " " ?>
-   </td>
-   <td>
-        <?php echo text(oeFormatShortDate($transdate)); ?>
-   </td>
-   <td class="detail">
-        <?php echo text($invnumber); ?>
-   </td>
-
+    <tr>
+        <td>
+            <?php echo text($paymethodleft); $paymethodleft = " " ?>
+        </td>
+        <td>
+            <?php echo text($memo); $memo = " " ?>
+        </td>
+        <td>
+            <?php echo text(oeFormatShortDate($transdate)); ?>
+        </td>
+        <td>
+            <?php
+                $pferow = sqlQuery("SELECT p.fname, p.mname, p.lname, fe.date, fe.id " .
+                "FROM patient_data AS p, form_encounter AS fe WHERE " .
+                "p.pid = ? AND fe.pid = p.pid AND " .
+                "fe.encounter = ? LIMIT 1", [$patient_id, $encounter_id]);
+            if (!empty($irnumber)) {
+                echo text($irnumber);
+            } else {
+                echo "<input type='button' class='btn btn-sm btn-secondary' value='" .
+                      attr($patient_id) . "-" . attr($encounter_id) .
+                      "' onclick='editInvoice(event, " . attr_js($pferow['id']) . ")' />";
+            }
+            ?>
+        </td>
         <?php
         if ($showing_ppd) {
-            $pferow = sqlQuery("SELECT p.fname, p.mname, p.lname, fe.date " .
-            "FROM patient_data AS p, form_encounter AS fe WHERE " .
-            "p.pid = ? AND fe.pid = p.pid AND " .
-            "fe.encounter = ? LIMIT 1", array($patient_id, $encounter_id));
-            $dos = substr($pferow['date'], 0, 10);
+            $dos = substr((string) $pferow['date'], 0, 10);
 
-            echo "  <td class='dehead'>\n";
+            echo "  <td class='font-weight-bold'>\n";
             echo "   " . text($pferow['lname']) . ", " . text($pferow['fname']) . " " . text($pferow['mname']);
             echo "  </td>\n";
 
-            echo "  <td class='dehead'>\n";
+            echo "  <td class='font-weight-bold'>\n";
             if ($payer_type) {
-                $ptarr = array(1 => 'primary', 2 => 'secondary', 3 => 'tertiary');
+                $ptarr = [1 => 'primary', 2 => 'secondary', 3 => 'tertiary'];
                 $insrow = getInsuranceDataByDate(
                     $patient_id,
                     $dos,
@@ -186,7 +213,7 @@ function showLineItem(
 
             echo "  </td>\n";
 
-            echo "  <td class='dehead'>\n";
+            echo "  <td class='font-weight-bold'>\n";
             echo "   " . text(oeFormatShortDate($dos)) . "\n";
             echo "  </td>\n";
         }
@@ -196,10 +223,10 @@ function showLineItem(
         <?php echo text($memo); ?>
   </td>
   <td align="right">
-        <?php echo text(bucks($rowadjamount)); ?>
+        <?php echo text(FormatMoney::getBucks($rowadjamount)); ?>
   </td>
   <td align="right">
-        <?php echo text(bucks($rowpayamount)); ?>
+        <?php echo text(FormatMoney::getBucks($rowpayamount)); ?>
   </td>
  </tr>
         <?php
@@ -213,9 +240,9 @@ function showLineItem(
 
 // This is called by usort() when reporting by payer with details.
 // Sorts by payer/date/patient/encounter/memo.
-function payerCmp($a, $b)
+function payerCmp($a, $b): int
 {
-    foreach (array(4,3,0,1,2,7) as $i) {
+    foreach ([4,3,0,1,2,7] as $i) {
         if ($a[$i] < $b[$i]) {
             return -1;
         }
@@ -226,10 +253,6 @@ function payerCmp($a, $b)
     }
 
     return 0;
-}
-
-if (! AclMain::aclCheckCore('acct', 'rep')) {
-    die(xlt("Unauthorized access."));
 }
 
 $form_from_date = (isset($_POST['form_from_date'])) ? DateToYYYYMMDD($_POST['form_from_date']) : date('Y-m-d');
@@ -244,8 +267,10 @@ $form_proc_codetype = $tmp_code_array[0];
 $form_proc_code = $tmp_code_array[1] ?? null;
 
 ?>
+<!DOCTYPE html>
 <html>
 <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 
     <title><?php echo xlt('Receipts Summary')?></title>
 
@@ -275,12 +300,6 @@ $form_proc_code = $tmp_code_array[1] ?? null;
             }
         }
 
-        table.mymaintable, table.mymaintable td {
-            border-collapse: collapse;
-        }
-        table.mymaintable td {
-            padding: 1px 5px 1px 5px;
-        }
     </style>
 
     <script>
@@ -293,7 +312,7 @@ $form_proc_code = $tmp_code_array[1] ?? null;
                 <?php $datetimepicker_timepicker = false; ?>
                 <?php $datetimepicker_showseconds = false; ?>
                 <?php $datetimepicker_formatInput = true; ?>
-                <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+                <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
                 <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
             });
         });
@@ -315,6 +334,20 @@ $form_proc_code = $tmp_code_array[1] ?? null;
         function sel_procedure() {
             dlgopen('../patient_file/encounter/find_code_popup.php?codetype=<?php echo attr_url(collect_codetypes("procedure", "csv")) ?>', '_blank', 500, 400);
         }
+
+        function editInvoice(e, id) {
+            e.preventDefault();
+            let url = '../billing/sl_eob_invoice.php?id=' + encodeURIComponent(id);
+            <?php if (isset($_FILES['form_erafile']['size']) && !$_FILES['form_erafile']['size']) { ?>
+                dlgopen(url,'','modal-full',700,false,'', {
+                sizeHeight: 'full',
+                onClosed: 'reSubmit'
+            }); <?php } else { // keep era page up so can check on other remits ?>
+                dlgopen(url,'','modal-full',700,false,'', {
+                sizeHeight: 'full',
+                onClosed: ''
+            }); <?php } ?>
+        }
     </script>
 </head>
 
@@ -323,106 +356,125 @@ $form_proc_code = $tmp_code_array[1] ?? null;
 <span class='title'><?php echo xlt('Report'); ?> - <?php echo xlt('Receipts Summary'); ?></span>
 
 <form method='post' action='receipts_by_method_report.php' id='theform' onsubmit='return top.restoreSession()'>
-<input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
-
+<input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
 <div id="report_parameters">
-
-<input type='hidden' name='form_refresh' id='form_refresh' value=''/>
-
-<table>
- <tr>
-  <td width='630px'>
-    <div style='float:left'>
-
-    <table class='text'>
-        <tr>
-            <td class='col-form-label'>
-                <?php echo xlt('Report by'); ?>
-            </td>
-            <td>
-                <?php
-                echo "   <select name='form_report_by' class='form-control'>\n";
-                foreach (array(1 => 'Payer', 2 => 'Payment Method', 3 => 'Check Number') as $key => $value) {
-                    echo "    <option value='" . attr($key) . "'";
-                    if ($key == $form_report_by) {
-                        echo ' selected';
-                    }
-
-                    echo ">" . xlt($value) . "</option>\n";
+    <div class="form-row col-md-6">
+        <input type='hidden' name='form_refresh' id='form_refresh' value=''/>
+        <div class="form-group auto">
+            <label for='form_report_by'><?php echo xlt('Report by'); ?></label>
+            <?php echo " <select name='form_report_by' id='form_report_by' class='form-control'>\n";
+            foreach (
+                    [
+                        1 => 'Payer',
+                        2 => 'Payment Method',
+                        3 => 'Check Number'
+                    ] as $key => $value
+            ) {
+                echo "    <option value='" . attr($key) . "'";
+                if ($key == $form_report_by) {
+                    echo ' selected';
                 }
 
-                echo "   </select>&nbsp;\n"; ?>
-            </td>
+                echo ">" . xlt($value) . "</option>\n";
+            }
 
-            <td>
+                echo "   </select>&nbsp;\n";
+            ?>
+        </div>
+        <div class="form-group col-auto">
+            <label for='form_facility'><?php echo xlt('Facility'); ?></label>
             <?php dropdown_facility($form_facility, 'form_facility', false); ?>
-            </td>
-
-            <td class='col-form-label'>
-                <?php
-                if (!$GLOBALS['simplified_demographics']) {
-                    echo '&nbsp;' . xlt('Procedure/Service') . ':';
-                } ?>
-            </td>
-            <td>
-               <input type='text' name='form_proc_codefull' class='form-control' size='12' value='<?php echo attr($form_proc_codefull); ?>' onclick='sel_procedure()'
-                title='<?php echo xla('Click to select optional procedure code'); ?>'
-                <?php
-                if ($GLOBALS['simplified_demographics']) {
-                    echo "style='display:none'";
-                } ?> />
-                                <br />
-          <div class="checkbox">
-                  <label><input type='checkbox' name='form_details' value='1'<?php echo (!empty($_POST['form_details'])) ? " checked" : ""; ?> /><?php echo xlt('Details')?></label>
-          </div>
-            </td>
-        </tr>
-        <tr>
-            <td>&nbsp;</td>
-            <td>
-               <select name='form_use_edate' class='form-control'>
-                <option value='0'><?php echo xlt('Payment Date'); ?></option>
-                <option value='1'<?php echo ($form_use_edate) ? ' selected' : ''; ?>><?php echo xlt('Invoice Date'); ?></option>
-               </select>
-            </td>
-            <td>
-               <input type='text' class='datepicker form-control' name='form_from_date' id="form_from_date" size='10' value='<?php echo attr(oeFormatShortDate($form_from_date)); ?>'>
-            </td>
-            <td class='col-form-label'>
-                <?php echo xlt('To{{Range}}'); ?>:
-            </td>
-            <td>
-               <input type='text' class='datepicker form-control' name='form_to_date' id="form_to_date" size='10' value='<?php echo attr(oeFormatShortDate($form_to_date)); ?>'>
-            </td>
-        </tr>
-    </table>
-
+        </div>
     </div>
+    <div class="form-row col-md-6">
+        <div class="form-group col-auto">
+            <label for='form_provider'><?php echo xlt('Provider'); ?></label>
+            <?php echo xlt('Provider'); ?>:
+                <td>
+                    <?php
+                    if (AclMain::aclCheckCore('acct', 'rep_a')) {
+                        // Build a drop-down list of providers.
+                        //
+                        $query = "select id, lname, fname from users where " .
+                            "authorized = 1 order by lname, fname";
+                        $res = sqlStatement($query);
+                        echo "<select name='form_provider' class='form-control'>\n";
+                        echo "    <option value=''>-- " . xlt('All Providers') . " --\n";
+                        while ($row = sqlFetchArray($res)) {
+                            $provid = $row['id'];
+                            echo "    <option value='" . attr($provid) . "'";
+                            if (!empty($_POST['form_provider']) && ($provid == $_POST['form_provider'])) {
+                                echo " selected";
+                            }
 
-  </td>
-  <td class='h-100' align='left' valign='middle'>
-    <table class='w-100 h-100' style='border-left:1px solid;'>
-        <tr>
-            <td>
-                <div class="text-center">
-          <div class="btn-group" role="group">
-                      <a href='#' class='btn btn-secondary btn-save' onclick='$("#form_refresh").attr("value","true"); $("#theform").submit();'>
-                            <?php echo xlt('Submit'); ?>
-                      </a>
-                        <?php if (!empty($_POST['form_refresh'])) { ?>
-                        <a href='#' class='btn btn-secondary btn-print' id='printbutton'>
-                                <?php echo xlt('Print'); ?>
-                        </a>
-                        <?php } ?>
-          </div>
-                </div>
-            </td>
-        </tr>
-    </table>
-  </td>
- </tr>
-</table>
+                            echo ">" . text($row['lname']) . ", " . text($row['fname']) . "\n";
+                        }
 
+                        echo "   </select>\n";
+                    } else {
+                        echo "<input type='hidden' name='form_provider' value='" . attr($session->get('authUserID')) . "'>";
+                    }
+                    ?>
+                </td>
+        </div>
+        <div class="form-group col-auto">
+            <label for="form_proc_codefull">
+            <?php
+            if (!OEGlobalsBag::getInstance()->getBoolean('simplified_demographics')) {
+                echo xlt('Procedure/Service');
+            }
+            ?>
+            </label>
+            <input type='text' name='form_proc_codefull' id='form_proc_codefull' class='form-control' size='12' value='<?php echo attr($form_proc_codefull); ?>' onclick='sel_procedure()'
+                title='<?php echo xla('Click to select optional procedure code'); ?>'
+            <?php
+            if (OEGlobalsBag::getInstance()->getBoolean('simplified_demographics')) {
+                echo "style='display:none'";
+            } ?> />
+        </div>
+    </div>
+    <div class="form-row col-md-6">
+        <div class="form-group col-auto">
+            <label for='form_use_edate'>
+                <select name='form_use_edate' class='form-control'>
+                    <option value='0'><?php echo xlt('Payment Date'); ?></option>
+                    <option value='1'<?php echo ($form_use_edate) ? ' selected' : ''; ?>><?php echo xlt('Invoice Date'); ?></option>
+                </select>
+            </label>
+        </div>
+        <div class="form-group col-auto">
+            <div class="form-check">
+                <input class="form-check-input" type='checkbox' name='form_details' value='1'<?php echo (!empty($_POST['form_details'])) ? " checked" : ""; ?> />
+                <label class="form-check-label">
+                    <?php echo xlt('Details')?>
+                </label>
+            </div>
+        </div>
+        <div class="form-group col-auto">
+            <label for="form_from_date">
+                <?php echo xlt('From'); ?>
+            </label>
+            <input type='text' class='datepicker form-control' name='form_from_date' id="form_from_date" size='10' value='<?php echo attr(oeFormatShortDate($form_from_date)); ?>'>
+        </div>
+        <div class="form-group col-auto">
+            <label for="form_to_date">
+                <?php echo xlt('To{{Range}}'); ?>
+            </label>
+            <input type='text' class='datepicker form-control' name='form_to_date' id="form_to_date" size='10' value='<?php echo attr(oeFormatShortDate($form_to_date)); ?>'>
+        </div>
+    </div>
+    <div class="form-row col-md-2 mb-2">
+        <div class="btn-group col-auto" role="group">
+            <a href='#' class='btn btn-secondary btn-save' onclick='$("#form_refresh").attr("value","true"); $("#theform").submit();'>
+                <?php echo xlt('Submit'); ?>
+            </a>
+            <?php if (!empty($_POST['form_refresh'])) { ?>
+            <a href='#' class='btn btn-secondary btn-print' id='printbutton'>
+                    <?php echo xlt('Print'); ?>
+            </a>
+            <?php } ?>
+        </div>
+    </div>
 </div> <!-- end of parameters -->
 
 <?php
@@ -430,42 +482,42 @@ if (!empty($_POST['form_refresh'])) {
     ?>
 <div id="report_results">
 
-<table width='98%' id='mymaintable' class='table mymaintable'>
+<table id='mymaintable' class='table table-hover'>
 
-<thead class='thead-light'>
-<tr bgcolor="#dddddd">
- <th>
-    <?php echo xlt('Method') ?>
- </th>
- <th><?php echo xlt('Reference') ?>
- </th>
- <th>
-    <?php echo xlt('Date') ?>
- </th>
- <th>
-    <?php echo xlt('Invoice') ?>
- </th>
-    <?php if ($showing_ppd) { ?>
-  <th>
-        <?php echo xlt('Patient')?>
-  </th>
-  <th>
-        <?php echo xlt('Policy')?>
-  </th>
-  <th>
-        <?php echo xlt('DOS')?>
-  </th>
-    <?php } ?>
- <th>
-    <?php echo xlt('Procedure')?>
- </th>
- <th align="right">
-    <?php echo xlt('Adjustments')?>
- </th>
- <th align="right">
-    <?php echo xlt('Payments')?>
- </th>
-</tr>
+<thead class="thead-light">
+    <tr>
+        <th scope="col">
+            <?php echo xlt('Method') ?>
+        </th>
+        <th scope ="col"><?php echo xlt('Reference') ?>
+        </th>
+        <th scope="col">
+            <?php echo xlt('Date') ?>
+        </th>
+        <th scope="col">
+            <?php echo xlt('Invoice') ?>
+        </th>
+            <?php if ($showing_ppd) { ?>
+        <th scope="col">
+                <?php echo xlt('Patient')?>
+        </th>
+        <th scope="col">
+                <?php echo xlt('Policy')?>
+        </th>
+        <th scope="col">
+                <?php echo xlt('DOS')?>
+        </th>
+            <?php } ?>
+        <th scope="col">
+            <?php echo xlt('Procedure')?>
+        </th>
+        <th class="text-right" scope="col">
+            <?php echo xlt('Adjustments')?>
+        </th>
+        <th class="text-right" scope="col"">
+            <?php echo xlt('Payments')?>
+        </th>
+    </tr>
 </thead>
 <tbody>
     <?php
@@ -478,15 +530,21 @@ if (!empty($_POST['form_refresh'])) {
         $methodadjtotal  = 0;
         $grandadjtotal  = 0;
 
+        $form_provider = $_POST['form_provider'];
+        if (!AclMain::aclCheckCore('acct', 'rep_a')) {
+            // only allow user to see their encounter information
+            $form_provider = $session->get('authUserID');
+        }
+
 
         // Get co-pays using the encounter date as the pay date.  These will
         // always be considered patient payments.  Ignored if selecting by
         // billing code.
         //
         if (!$form_proc_code || !$form_proc_codetype) {
-            $sqlBindArray = array();
+            $sqlBindArray = [];
             $query = "SELECT b.fee, b.pid, b.encounter, b.code_type, " .
-            "fe.date, fe.facility_id, fe.invoice_refno " .
+            "fe.date, fe.facility_id, fe.invoice_refno, fe.provider_id " .
             "FROM billing AS b " .
             "JOIN form_encounter AS fe ON fe.pid = b.pid AND fe.encounter = b.encounter " .
             "WHERE b.code_type = 'COPAY' AND b.activity = 1 AND b.fee != 0 AND " .
@@ -498,17 +556,23 @@ if (!empty($_POST['form_refresh'])) {
                 array_push($sqlBindArray, $form_facility);
             }
 
+            // If a provider was specified.
+            if ($form_provider) {
+                $query .= " AND fe.provider_id = ?";
+                array_push($sqlBindArray, $form_provider);
+            }
+
             $query .= " ORDER BY fe.date, b.pid, b.encounter, fe.id";
 
             $res = sqlStatement($query, $sqlBindArray);
 
             while ($row = sqlFetchArray($res)) {
                 $rowmethod = $form_report_by == 1 ? 'Patient' : 'Co-Pay';
-                thisLineItem(
+                receiptsByMethodLineItem(
                     $row['pid'],
                     $row['encounter'],
-                    $row['code_text'],
-                    substr($row['date'], 0, 10),
+                    '', // Reference column: a co-pay's billing row holds none
+                    substr((string) $row['date'], 0, 10),
                     $rowmethod,
                     0 - $row['fee'],
                     0,
@@ -521,15 +585,18 @@ if (!empty($_POST['form_refresh'])) {
         // Get all other payments and adjustments and their dates, corresponding
         // payers and check reference data, and the encounter dates separately.
         //
-        $sqlBindArray = array();
+        $sqlBindArray = [];
         $query = "SELECT a.pid, a.encounter, a.post_time, a.pay_amount, " .
-          "a.adj_amount, a.memo, a.session_id, a.code, a.payer_type, fe.id, fe.date, " .
+          "a.adj_amount, a.memo, a.session_id, a.code, a.payer_type, fe.id, fe.date, fe.provider_id, fe.id, " .
           "fe.invoice_refno, s.deposit_date, s.payer_id, s.reference, s.payment_method, i.name " .
           "FROM ar_activity AS a " .
           "JOIN form_encounter AS fe ON fe.pid = a.pid AND fe.encounter = a.encounter " .
           "JOIN forms AS f ON f.pid = a.pid AND f.encounter = a.encounter AND f.formdir = 'newpatient' " .
           "LEFT JOIN ar_session AS s ON s.session_id = a.session_id " .
           "LEFT JOIN insurance_companies AS i ON i.id = s.payer_id " .
+          "LEFT OUTER JOIN billing AS b ON b.pid = a.pid AND b.encounter = a.encounter AND " .
+          "b.code = a.code AND b.modifier = a.modifier AND b.activity = 1 AND " .
+          "b.code_type != 'COPAY' AND b.code_type != 'TAX' " .
           "WHERE a.deleted IS NULL AND (a.pay_amount != 0 OR a.adj_amount != 0)";
         //
         if ($form_use_edate) {
@@ -556,6 +623,14 @@ if (!empty($_POST['form_refresh'])) {
             array_push($sqlBindArray, $form_facility);
         }
 
+        // If a provider was specified.
+        if ($form_provider) {
+            $query .= " AND ( b.provider_id = ? OR " .
+            "( ( b.provider_id IS NULL OR b.provider_id = 0 ) AND " .
+            "fe.provider_id = ? ) )";
+            array_push($sqlBindArray, $form_provider, $form_provider);
+        }
+
         //
         if ($form_use_edate) {
             $query .= " ORDER BY s.reference, fe.date, a.pid, a.encounter, fe.id";
@@ -567,14 +642,15 @@ if (!empty($_POST['form_refresh'])) {
         $res = sqlStatement($query, $sqlBindArray);
         while ($row = sqlFetchArray($res)) {
             if ($form_use_edate) {
-                $thedate = substr($row['date'], 0, 10);
+                $thedate = substr((string) $row['date'], 0, 10);
             } elseif (!empty($row['deposit_date'])) {
                 $thedate = $row['deposit_date'];
             } else {
-                $thedate = substr($row['post_time'], 0, 10);
+                $thedate = substr((string) $row['post_time'], 0, 10);
             }
 
           // Compute reporting key: insurance company name or payment method.
+            $rowmethod = '';
             if ($form_report_by == '1') {
                 if (empty($row['payer_id'])) {
                     // 'ar_session' is not capturing payer_id when entering payments through invoice or era posting
@@ -584,26 +660,42 @@ if (!empty($_POST['form_refresh'])) {
                         $insurance_id = (new InsuranceService())->getOneByPid($row['pid'], "secondary");
                     } elseif ($row['payer_type'] == '3') {
                         $insurance_id = (new InsuranceService())->getOneByPid($row['pid'], "tertiary");
+                    } elseif ($row['payer_type'] == '0') {
+                        $rowmethod = xl('Personal pay');
+                        $rowreference = trim((string) $row['reference']);
                     } else {
                         $rowmethod = xl('Unnamed insurance company');
                     }
                     if (!empty($insurance_id['provider'])) {
-                        $insurance_company = (new InsuranceCompanyService())->getOneById($insurance_id['provider']) ?? '';
-                        $rowmethod = xl($insurance_company['name']);
+                        // getOneById delegates to sqlQuery which can return
+                        // array|false|null. Normalize to [] so the ['name']
+                        // lookup below can't trip on a non-array value.
+                        $insurance_company = (new InsuranceCompanyService())->getOneById($insurance_id['provider']) ?: [];
+                        $insurance_company_name = $insurance_company['name'] ?? null;
+                        if (is_string($insurance_company_name) && trim($insurance_company_name) !== '') {
+                            $rowmethod = $insurance_company_name;
+                        } else {
+                            // Fall back to the same label the missing-provider
+                            // branch below uses, so empty payer keys don't get
+                            // bucketed as "Patient"/"Unknown" downstream.
+                            $rowmethod = xl('Unnamed insurance company');
+                        }
+                    } elseif (!($row['payer_type'] == '0')) {
+                        $rowmethod = xl('Unnamed insurance company');
                     }
                 } else {
                     $rowmethod = $row['name'];
                 }
             } else {
                 if (empty($row['session_id'])) {
-                    $rowmethod = trim($row['memo']);
+                    $rowmethod = trim((string) $row['memo']);
                 } else {
-                    $rowmethod = trim(getListItemTitle('payment_method', $row['payment_method']));
-                    $rowreference = trim($row['reference']);
+                    $rowmethod = trim((string) getListItemTitle('payment_method', $row['payment_method']));
+                    $rowreference = trim((string) $row['reference']);
                 }
             }
 
-            thisLineItem(
+            receiptsByMethodLineItem(
                 $row['pid'],
                 $row['encounter'],
                 ($rowreference ?? ''),
@@ -621,8 +713,8 @@ if (!empty($_POST['form_refresh'])) {
             if ($form_report_by == '1') { // by payer with details
                 // Sort and dump saved info, and consolidate items with all key
                 // fields being the same.
-                usort($insarray, 'payerCmp');
-                $b = array();
+                usort($insarray, payerCmp(...));
+                $b = [];
                 foreach ($insarray as $a) {
                     if (empty($a[4])) {
                         $a[4] = xl('Patient');
@@ -632,7 +724,7 @@ if (!empty($_POST['form_refresh'])) {
                         $b = $a;
                     } else {
                         $match = true;
-                        foreach (array(4,3,0,1,2,7) as $i) {
+                        foreach ([4,3,0,1,2,7] as $i) {
                             if ($a[$i] != $b[$i]) {
                                 $match = false;
                             }
@@ -655,17 +747,17 @@ if (!empty($_POST['form_refresh'])) {
 
             // Print last method total.
             ?>
-   <tr bgcolor="#ddddff">
-    <td class="detail" colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
-            <?php echo xlt('Total for ') . text($paymethod); ?>
-  </td>
-  <td align="right">
-            <?php echo text(bucks($methodadjtotal)); ?>
-  </td>
-  <td align="right">
-            <?php echo text(bucks($methodpaytotal)); ?>
-  </td>
- </tr>
+            <tr class="table-secondary" scope="row">
+                <td colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
+                    <?php echo xlt('Total for ') . text($paymethod); ?>
+                </td>
+                <td class="text-right">
+                    <?php echo text(FormatMoney::getBucks($methodadjtotal)); ?>
+                </td>
+                <td class="text-right">
+                    <?php echo text(FormatMoney::getBucks($methodpaytotal)); ?>
+                </td>
+            </tr>
             <?php
         } else { // Payer summary: need to sort and then print it all.
             ksort($insarray);
@@ -674,32 +766,32 @@ if (!empty($_POST['form_refresh'])) {
                     $key = xl('Patient');
                 }
                 ?>
-     <tr bgcolor="#ddddff">
-        <td class="detail" colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
-                <?php echo text($key); ?>
-  </td>
-  <td align="right">
-                <?php echo text(bucks($value[1])); ?>
-  </td>
-  <td align="right">
-                <?php echo text(bucks($value[0])); ?>
-  </td>
- </tr>
+                <tr>
+                    <td colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
+                        <?php echo text($key); ?>
+                    </td>
+                    <td class="text-right">
+                        <?php echo text(FormatMoney::getBucks($value[1])); ?>
+                    </td>
+                    <td class="text-right">
+                        <?php echo text(FormatMoney::getBucks($value[0])); ?>
+                    </td>
+                </tr>
                 <?php
             } // end foreach
         } // end payer summary
         ?>
- <tr bgcolor="#ffdddd">
-  <td class="detail" colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
-        <?php echo xlt('Grand Total') ?>
-  </td>
-  <td align="right">
-        <?php echo text(bucks($grandadjtotal)); ?>
-  </td>
-  <td align="right">
-        <?php echo text(bucks($grandpaytotal)); ?>
-  </td>
- </tr>
+        <tr class="table-info">
+            <td colspan="<?php echo $showing_ppd ? 8 : 4; ?>">
+                <?php echo xlt('Grand Total') ?>
+            </td>
+            <td class="text-right">
+                <?php echo text(FormatMoney::getBucks($grandadjtotal)); ?>
+            </td>
+            <td class="text-right">
+                <?php echo text(FormatMoney::getBucks($grandpaytotal)); ?>
+            </td>
+        </tr>
 
         <?php
     } // end form refresh

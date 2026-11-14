@@ -124,7 +124,7 @@ class FHIRFHIRVersion extends FHIRElement implements \JsonSerializable
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return (string)$this->getValue();
     }
@@ -132,21 +132,19 @@ class FHIRFHIRVersion extends FHIRElement implements \JsonSerializable
     /**
      * @return mixed
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         return $this->value;
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<FHIRVersion xmlns="http://hl7.org/fhir"></FHIRVersion>');
-        }
+        $sxe ??= new \SimpleXMLElement('<FHIRVersion xmlns="http://hl7.org/fhir"></FHIRVersion>');
         $sxe->addAttribute('value', $this->value);
         if ($returnSXE) {
             return $sxe;

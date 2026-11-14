@@ -24,8 +24,11 @@
  *  3. Using use_strict_mode, use_cookies, and use_only_cookies to optimize security.
  *  4. Using sid_bits_per_character of 6 to optimize security. This does allow comma to
  *     be used in the session id, so need to ensure properly escape it when modify it in
- *     cookie.
- *  5. Using sid_length of 48 to optimize security.
+ *     cookie. Note that this setting is not used in PHP 8.4 and higher since has been deprecated and is forced to
+ *     be set to 4 as of this writing (guessing PHP may increase over time to maintain security standards).
+ *  5. Using sid_length of 48 to optimize security. Note that this setting is not used in PHP 8.4 and higher since
+ *     has been deprecated and is forced to be set to 32 as of this writing (guessing PHP will increase over time to
+ *     maintain security standards).
  *  6. Setting gc_maxlifetime to 14400 since defaults for session.gc_maxlifetime is
  *     often too small.
  *  7. For core OpenEMR and oauth2, setting cookie_path to improve security when using different OpenEMR instances
@@ -38,6 +41,9 @@
  *     is to use the standard php session locking on code that works on critical session variables during
  *     authorization related scripts and in cases of single process use (such as with command line scripts
  *     and non-local api calls) since there is no performance benefit in single process use.
+ *     This no-lock mechanism (via read_and_close) works for both the native file session handler and
+ *     the predis-sentinel session handler — the read_and_close option causes PHP to call open/read/close
+ *     on the handler immediately, releasing any lock the handler holds.
  *  10. For OpenEMR 6.0.0 added a oauth2 session, which requires following settings:
  *      cookie_samesite = None (In theory, should just need Lax (since just GET requests), however, need None for Smart Apps used
  *                              within OpenEMR to work)
@@ -45,185 +51,186 @@
  *                            cookie_samesite is set to None)
  *  11. For OpenEMR 6.0.0 added a api session, which requires following settings:
  *      cookie_secure = true (oauth needs to be https, so makes sense to support this setting)
+ *  13. For OpenEMR 7.0.4:
+ *      a. Supported early calls to class with the standard class loader, so can use other classes. Note that this class can be
+ *         used prior to database connection, so beware of that.
+ *      b. Incorporated debug/error logging.
+ *      c. Added support for predis redis sentinel mode for session storage.
  *
  *
  * @package   OpenEMR
  * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
- * @copyright Copyright (c) 2019-2020 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2019-2025 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Common\Session;
 
-use OpenEMR\Common\Logging\SystemLogger;
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Session\Predis\SentinelUtil;
+use OpenEMR\Common\Session\Storage\ReadAndCloseNativeSessionStorage;
+use SessionHandlerInterface;
+use Symfony\Component\HttpFoundation\Cookie;
+use Symfony\Component\HttpFoundation\Session\Session;
+use Symfony\Component\HttpFoundation\Session\SessionInterface;
+use Symfony\Component\HttpFoundation\Session\Storage\NativeSessionStorage;
 
 class SessionUtil
 {
-    private static $gc_maxlifetime = 14400;
-    private static $sid_bits_per_character = 6;
-    private static $sid_length = 48;
-    private static $use_strict_mode = true;
-    private static $use_cookies = true;
-    private static $use_only_cookies = true;
-    private static $use_cookie_samesite = "Strict";
-    private static $use_cookie_httponly = true;
-    private static $use_cookie_secure = false;
+    public const CORE_SESSION_ID = "OpenEMR";
+    public const OAUTH_SESSION_ID = 'authserverOpenEMR';
 
-    public static function coreSessionStart($web_root, $read_only = true): void
+    public const API_SESSION_ID = 'apiOpenEMR';
+
+    public const PORTAL_SESSION_ID = 'PortalOpenEMR';
+
+    public const SETUP_SESSION_ID = 'setupOpenEMR';
+
+    public const APP_COOKIE_NAME = 'App';
+
+    public const API_WEBROOT = '/apis/';
+
+    public const OAUTH_WEBROOT = '/oauth2/';
+
+    public const DEFAULT_GC_MAXLIFETIME = 14400; // 4 hours
+
+    private static ?SessionHandlerInterface $sessionHandler;
+
+    /**
+     * @param string|array<string, mixed> $session_key_or_array
+     */
+    public static function setSession(string|array $session_key_or_array, $session_value = null): void
     {
-        // Note there is no system logger here since that class does not
-        //  yet exist in this context.
-        session_start([
-            'read_and_close' => $read_only,
-            'cookie_samesite' => self::$use_cookie_samesite,
-            'cookie_secure' => self::$use_cookie_secure,
-            'name' => 'OpenEMR',
-            'cookie_httponly' => false,
-            'cookie_path' => ((!empty($web_root)) ? $web_root . '/' : '/'),
-            'gc_maxlifetime' => self::$gc_maxlifetime,
-            'sid_bits_per_character' => self::$sid_bits_per_character,
-            'sid_length' => self::$sid_length,
-            'use_strict_mode' => self::$use_strict_mode,
-            'use_cookies' => self::$use_cookies,
-            'use_only_cookies' => self::$use_only_cookies,
+        self::withWritableSession(static function (SessionInterface $session) use ($session_key_or_array, $session_value): void {
+            if (is_array($session_key_or_array)) {
+                foreach ($session_key_or_array as $key => $value) {
+                    $session->set($key, $value);
+                }
+            } else {
+                $session->set($session_key_or_array, $session_value);
+            }
+        });
+
+        ServiceContainer::getLogger()->debug("SessionUtil: set session value", [
+            'session_key_or_array' => $session_key_or_array,
+            'session_value' => $session_value
         ]);
     }
 
-    public static function setSession($session_key_or_array, $session_value = null): void
+    /**
+     * @param string|array<int, string> $session_key_or_array
+     */
+    public static function unsetSession(string|array $session_key_or_array): void
     {
-        self::coreSessionStart($GLOBALS['webroot'], false);
-        if (is_array($session_key_or_array)) {
-            foreach ($session_key_or_array as $key => $value) {
-                $_SESSION[$key] = $value;
+        self::withWritableSession(static function (SessionInterface $session) use ($session_key_or_array): void {
+            if (is_array($session_key_or_array)) {
+                foreach ($session_key_or_array as $value) {
+                    $session->remove($value);
+                }
+            } else {
+                $session->remove($session_key_or_array);
             }
-        } else {
-            $_SESSION[$session_key_or_array] = $session_value;
-        }
-        session_write_close();
-    }
+        });
 
-    public static function unsetSession($session_key_or_array): void
-    {
-        self::coreSessionStart($GLOBALS['webroot'], false);
-        if (is_array($session_key_or_array)) {
-            foreach ($session_key_or_array as $value) {
-                unset($_SESSION[$value]);
-            }
-        } else {
-            unset($_SESSION[$session_key_or_array]);
-        }
-        session_write_close();
-    }
-
-    public static function setUnsetSession($setArray, $unsetArray): void
-    {
-        self::coreSessionStart($GLOBALS['webroot'], false);
-        foreach ($setArray as $key => $value) {
-            $_SESSION[$key] = $value;
-        }
-        foreach ($unsetArray as $value) {
-            unset($_SESSION[$value]);
-        }
-        session_write_close();
-    }
-
-    public static function coreSessionDestroy(): void
-    {
-        (new SystemLogger())->debug(
-            "Destroying core session cookie",
-            ['name' => session_name(), 'cookieParams' => session_get_cookie_params()]
-        );
-        self::standardSessionCookieDestroy();
-    }
-
-    public static function portalSessionStart(): void
-    {
-        // Note there is no system logger here since that class does not
-        //  yet exist in this context.
-        session_start([
-            'cookie_samesite' => self::$use_cookie_samesite,
-            'cookie_secure' => self::$use_cookie_secure,
-            'name' => 'PortalOpenEMR',
-            'cookie_httponly' => self::$use_cookie_httponly,
-            'gc_maxlifetime' => self::$gc_maxlifetime,
-            'sid_bits_per_character' => self::$sid_bits_per_character,
-            'sid_length' => self::$sid_length,
-            'use_strict_mode' => self::$use_strict_mode,
-            'use_cookies' => self::$use_cookies,
-            'use_only_cookies' => self::$use_only_cookies
+        ServiceContainer::getLogger()->debug("SessionUtil: unset session value", [
+            'session_key_or_array' => $session_key_or_array
         ]);
+    }
+
+    /**
+     * @param array<string, mixed> $setArray
+     * @param array<int, string> $unsetArray
+     */
+    public static function setUnsetSession(array $setArray = [], array $unsetArray = []): void
+    {
+        self::withWritableSession(static function (SessionInterface $session) use ($setArray, $unsetArray): void {
+            foreach ($setArray as $key => $value) {
+                $session->set($key, $value);
+            }
+
+            foreach ($unsetArray as $value) {
+                $session->remove($value);
+            }
+        });
+
+        ServiceContainer::getLogger()->debug("SessionUtil: set numerous session values", $setArray);
+        ServiceContainer::getLogger()->debug("SessionUtil: unset numerous session values", $unsetArray);
+    }
+
+    /**
+     * Clears all session variables without destroying the session.
+     * Safe with read_and_close — reopens for writing if needed.
+     */
+    public static function clearSession(): void
+    {
+        self::withWritableSession(static function (SessionInterface $session): void {
+            $session->clear();
+        });
+
+        ServiceContainer::getLogger()->debug("SessionUtil: cleared all session variables");
+    }
+
+    /**
+     * Executes the given callback with a writable session. If the session was
+     * opened with read_and_close, it is reopened for writing before the callback
+     * and closed (lock released) immediately after.
+     */
+    private static function withWritableSession(callable $fn): void
+    {
+        $factory = SessionWrapperFactory::getInstance();
+        $session = $factory->getActiveSession();
+        $storage = $factory->getActiveStorage();
+
+        $needsClose = false;
+        if ($storage instanceof ReadAndCloseNativeSessionStorage && $storage->isClosedByReadAndClose()) {
+            $storage->reopenForWriting();
+            $needsClose = true;
+        }
+
+        try {
+            $fn($session);
+        } finally {
+            if ($needsClose) {
+                $session->save();
+            }
+        }
     }
 
     public static function portalSessionCookieDestroy(): void
     {
-        // Note there is no system logger here since that class does not
-        //  yet exist in this context.
-        self::standardSessionCookieDestroy();
-    }
+        SessionWrapperFactory::getInstance()->destroyPortalSession();
 
-    public static function apiSessionStart($web_root): void
-    {
-        (new SystemLogger())->debug(
-            "Creating apiSessionStart cookie",
-            ['cookie.name' => 'apiOpenEMR']
-        );
-        session_start([
-            'cookie_samesite' => self::$use_cookie_samesite,
-            'cookie_secure' => true,
-            'name' => 'apiOpenEMR',
-            'cookie_httponly' => self::$use_cookie_httponly,
-            'cookie_path' => ((!empty($web_root)) ? $web_root . '/apis/' : '/apis/'),
-            'gc_maxlifetime' => self::$gc_maxlifetime,
-            'sid_bits_per_character' => self::$sid_bits_per_character,
-            'sid_length' => self::$sid_length,
-            'use_strict_mode' => self::$use_strict_mode,
-            'use_cookies' => self::$use_cookies,
-            'use_only_cookies' => self::$use_only_cookies
-        ]);
-    }
-
-    public static function apiSessionCookieDestroy(): void
-    {
-        (new SystemLogger())->debug(
-            "Destroying api session cookie",
-            ['name' => session_name(), 'cookieParams' => session_get_cookie_params()]
-        );
-        self::standardSessionCookieDestroy();
-    }
-
-    public static function oauthSessionStart($web_root): void
-    {
-        (new SystemLogger())->debug(
-            "Creating oauthSessionStart cookie",
-            ['cookie.name' => 'authserverOpenEMR']
-        );
-        session_start([
-            'cookie_samesite' => "None",
-            'cookie_secure' => true,
-            'name' => 'authserverOpenEMR',
-            'cookie_httponly' => self::$use_cookie_httponly,
-            'cookie_path' => ((!empty($web_root)) ? $web_root . '/oauth2/' : '/oauth2/'),
-            'gc_maxlifetime' => self::$gc_maxlifetime,
-            'sid_bits_per_character' => self::$sid_bits_per_character,
-            'sid_length' => self::$sid_length,
-            'use_strict_mode' => self::$use_strict_mode,
-            'use_cookies' => self::$use_cookies,
-            'use_only_cookies' => self::$use_only_cookies
-        ]);
+        ServiceContainer::getLogger()->debug("SessionUtil: destroyed portal session");
     }
 
     public static function oauthSessionCookieDestroy(): void
     {
-        (new SystemLogger())->debug(
-            "Destroying oauth session cookie",
-            ['name' => session_name(), 'cookieParams' => session_get_cookie_params()]
-        );
         self::standardSessionCookieDestroy();
+        ServiceContainer::getLogger()->debug("SessionUtil: destroyed oauth session");
+    }
+
+    public static function setupScriptSessionStart(): void
+    {
+        $settings = SessionConfigurationBuilder::forSetup();
+        $handler = self::getSessionHandler();
+        $storage = new NativeSessionStorage($settings->toSessionStartOptions(), $handler);
+        $session = new Session($storage);
+        $session->start();
+        SessionWrapperFactory::getInstance()->setActiveSession($session);
+        ServiceContainer::getLogger()->debug("SessionUtil: started setup script session");
+    }
+
+    public static function setupScriptSessionCookieDestroy(): void
+    {
+        SessionWrapperFactory::getInstance()->destroySetupSession();
+        ServiceContainer::getLogger()->debug("SessionUtil: destroyed setup script session");
     }
 
     private static function standardSessionCookieDestroy(): void
     {
+        $sessionName = session_name();
+
         // Destroy the cookie
         $params = session_get_cookie_params();
         setcookie(
@@ -239,7 +246,50 @@ class SessionUtil
             ]
         );
 
-        // Destroy the session.
-        session_destroy();
+        // Destroy the session if active.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_destroy();
+        }
+        ServiceContainer::getLogger()->debug("SessionUtil: destroyed session and cookie", [
+            'session_name' => $sessionName,
+        ]);
+    }
+
+    public static function setAppCookie(string $appType): void
+    {
+        setcookie(
+            self::APP_COOKIE_NAME,
+            $appType,
+            [
+                'expires' => time() + 31536000, // 1 year
+                'path' => '/',
+                // This permits the app cookie to work in non-https dev environments. It's not a sensitive value.
+                'secure' => false,
+                'httponly' => true,
+                'samesite' => Cookie::SAMESITE_STRICT
+            ]
+        );
+    }
+
+    public static function getAppCookie(): string
+    {
+        return $_COOKIE['App'] ?? '';
+    }
+
+    /**
+     * Get the session handler based on environment settings.
+     * @return SessionHandlerInterface|null
+     */
+    public static function getSessionHandler(): ?SessionHandlerInterface {
+        if (!isset(self::$sessionHandler)) {
+            // handler defaults to symfony default handler, but if using predis sentinel, then get that handler
+            $handler = null;
+            if (!empty(getenv('SESSION_STORAGE_MODE', true)) && getenv('SESSION_STORAGE_MODE', true) === "predis-sentinel") {
+                ServiceContainer::getLogger()->debug("SessionUtil: using predis sentinel session storage mode");
+                $handler = (new SentinelUtil())->configure(self::DEFAULT_GC_MAXLIFETIME);
+            }
+            self::$sessionHandler = $handler;
+        }
+        return self::$sessionHandler;
     }
 }

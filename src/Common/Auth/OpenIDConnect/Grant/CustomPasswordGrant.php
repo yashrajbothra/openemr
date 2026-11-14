@@ -4,7 +4,7 @@
  * Custom Password Grant
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2020 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -12,7 +12,6 @@
 
 namespace OpenEMR\Common\Auth\OpenIDConnect\Grant;
 
-use DateInterval;
 use League\OAuth2\Server\Entities\ClientEntityInterface;
 use League\OAuth2\Server\Entities\UserEntityInterface;
 use League\OAuth2\Server\Exception\OAuthServerException;
@@ -20,11 +19,29 @@ use League\OAuth2\Server\Grant\PasswordGrant;
 use League\OAuth2\Server\Repositories\RefreshTokenRepositoryInterface;
 use League\OAuth2\Server\Repositories\UserRepositoryInterface;
 use League\OAuth2\Server\RequestEvent;
-use League\OAuth2\Server\ResponseTypes\ResponseTypeInterface;
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Auth\OpenIDConnect\Entities\ClientEntity;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\Session\SessionInterface;
 
 class CustomPasswordGrant extends PasswordGrant
 {
+    use ClientGrantTypeGuardTrait;
+
+    private readonly LoggerInterface $logger;
+
+    public function __construct(
+        private readonly SessionInterface $session,
+        UserRepositoryInterface $userRepository,
+        RefreshTokenRepositoryInterface $refreshTokenRepository,
+        ?LoggerInterface $logger = null,
+    )
+    {
+        $this->logger = $logger ?? ServiceContainer::getLogger();
+        parent::__construct($userRepository, $refreshTokenRepository);
+    }
+
     /**
      * @param ServerRequestInterface $request
      * @param ClientEntityInterface  $client
@@ -60,25 +77,62 @@ class CustomPasswordGrant extends PasswordGrant
         }
 
 
+        $identifier = $this->getIdentifier();
         $user = $this->userRepository->getCustomUserEntityByUserCredentials(
             $userrole,
             $username,
             $password,
             $email,
-            $this->getIdentifier(),
+            $identifier,
             $client,
         );
 
         if ($user instanceof UserEntityInterface === false) {
             $this->getEmitter()->emit(new RequestEvent(RequestEvent::USER_AUTHENTICATION_FAILED, $request));
+            // Inverted guard: the branch body dereferences $client, so it
+            // must run when $client IS a real ClientEntity, not when
+            // empty. Fall back to "undefined" otherwise.
+            $clientVars = "undefined";
+            if ($client instanceof ClientEntity) {
+                $clientVars = ['id' => $client->getIdentifier(), 'name' => $client->getName(), 'redirectUri' => $client->getRedirectUri()];
+            }
 
+            $this->logger->debug(
+                "CustomPasswordGrant->validateUser() Failed to find user for request",
+                ['userrole' => $userrole,'username' => $username, 'email' => $email, 'identifier' => $identifier
+                ,
+                'client' => $clientVars]
+            );
             throw OAuthServerException::invalidGrant('Failed Authentication');
         }
-        $_SESSION['pass_user_id'] = $user->getIdentifier();
-        $_SESSION['pass_username'] = $username;
-        $_SESSION['pass_user_role'] = $userrole;
-        $_SESSION['pass_user_email'] = $email;
+
+        $this->session->set('pass_user_id', $user->getIdentifier());
+        $this->session->set('pass_username', $username);
+        $this->session->set('pass_user_role', $userrole);
+        $this->session->set('pass_user_email', $email);
 
         return $user;
+    }
+
+    protected function validateClient(ServerRequestInterface $request)
+    {
+        $client = parent::validateClient($request);
+        if (!($client instanceof ClientEntity)) {
+            // $client may be false / null / a non-ClientEntity, so
+            // don't dereference it here. Log the client_id from the
+            // request if we can get it.
+            $this->logger->error(
+                "Client returned was not a valid ClientEntity",
+                ['client' => $this->getRequestParameter('client_id', $request, null)]
+            );
+            throw OAuthServerException::invalidClient($request);
+        }
+
+        if (!$client->isEnabled()) {
+            $this->logger->error("Client {client} returned was not enabled", ['client' => $client->getIdentifier()]);
+            throw OAuthServerException::invalidClient($request);
+        }
+        $this->assertClientMayUseGrant($client, $this->getIdentifier(), $this->logger);
+        return $client;
     }
 }

@@ -9,7 +9,7 @@
 
 namespace OpenEMR\Events\PatientDemographics;
 
-use Symfony\Component\EventDispatcher\Event;
+use Symfony\Contracts\EventDispatcher\Event;
 
 /**
  *  Event object for restricting access to users viewing patients' demographics screen
@@ -17,10 +17,18 @@ use Symfony\Component\EventDispatcher\Event;
  * @package OpenEMR\Events
  * @subpackage PatientDemographics
  * @author Ken Chapple <ken@mi-squared.com>
+ * @author Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2019 Ken Chapple <ken@mi-squared.com>
  */
 class RenderEvent extends Event
 {
+    /**
+     * This event occurs after a patient demographics section list has been rendered
+     * It allows event listeners to render additional functionality at top of section
+     * list.
+     */
+    const EVENT_SECTION_LIST_RENDER_TOP = 'patientDemographics.render.section.top';
+
     /**
      * This event occurs after a patient demographics section list has been rendered
      * It allows event listeners to render additional functionality after a section
@@ -36,20 +44,19 @@ class RenderEvent extends Event
     const EVENT_SECTION_LIST_RENDER_AFTER = 'patientDemographics.render.section.after';
 
     /**
-     * @var null|integer
-     *
-     * Represents the patient we are viewing in the patient demographics
+     * This event occurs after a patient demographics page has been rendered
+     * It allows event listeners to render additional functionality after the page
+     * has loaded.
      */
-    private $pid = null;
+    const EVENT_RENDER_POST_PAGELOAD = 'patientDemographics.render.post_page_load';
 
     /**
      * constructor.
      *
-     * @param integer $pid Patient Identifier
+     * @param int $pid Patient Identifier
      */
-    public function __construct($pid)
+    public function __construct(private $pid)
     {
-        $this->pid = $pid;
     }
 
     /**

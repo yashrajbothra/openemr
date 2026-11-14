@@ -12,15 +12,13 @@
 
 namespace Immunization\Controller;
 
+use Laminas\InputFilter\InputFilter;
+use Laminas\InputFilter\InputFilterInterface;
 use Laminas\Mvc\Controller\AbstractActionController;
-use Laminas\View\Model\ViewModel;
-use Laminas\View\Model\JsonModel;
-use Immunization\Form\ImmunizationForm;
-use Application\Listener\Listener;
 
 class ModuleconfigController extends AbstractActionController
 {
-    protected $inputFilter;
+    protected InputFilterInterface $inputFilter;
 
     public function __construct()
     {
@@ -35,43 +33,42 @@ class ModuleconfigController extends AbstractActionController
         return get_object_vars($this);
     }
 
-    public function setInputFilter(InputFilterInterface $inputFilter)
+    public function setInputFilter(InputFilterInterface $inputFilter): never
     {
         throw new \Exception("Not used");
     }
 
     public function getInputFilter()
     {
-        if (!$this->inputFilter) {
+        if (!isset($this->inputFilter)) {
             $inputFilter = new InputFilter();
-            $factory     = new InputFactory();
             $this->inputFilter = $inputFilter;
         }
 
         return $this->inputFilter;
     }
 
-    public function getHookConfig()
+    public function getHookConfig(): array
     {
-        $hooks  =  array();
+        $hooks  =  [];
         return $hooks;
     }
 
-    public function getAclConfig()
+    public function getAclConfig(): array
     {
-        $acl = array();
+        $acl = [];
         return $acl;
     }
 
-    public function configSettings()
+    public function configSettings(): array
     {
-        $settings = array();
+        $settings = [];
         return $settings;
     }
 
-    public function getDependedModulesConfig()
+    public function getDependedModulesConfig(): array
     {
-        $dependedModules = array();
+        $dependedModules = [];
         return $dependedModules;
     }
 }

@@ -7,39 +7,22 @@
  * @link      https://www.open-emr.org
  * @author    duhlman
  * @author    Stephen Waite <stephen.waite@cmsvt.com>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) duhlman
  * @copyright Copyright (c) 2021 Stephen Waite <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2024 Care Management Solutions, Inc. <stephen.waite@cmsvt.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-define("INS_TYPE_OTHER_HCFA", 1);
-define("INS_TYPE_MEDICARE", 2);
-define("INS_TYPE_MEDICAID", 3);
-define("INS_TYPE_CHAMPUSVA", 4);
-define("INS_TYPE_CHAMPUS", 5);
-define("INS_TYPE_BCBS", 6);
-define("INS_TYPE_FECA", 7);
-define("INS_TYPE_SELF_PAY", 8);
-define("INS_TYPE_CENTRAL_CERTIFICATION", 9);
-define("INS_TYPE_OTHER_NON-FEDERAL_PROGRAMS", 10);
-define("INS_TYPE_PREFERRED_PROVIDER_ORGANIZATION", 11);
-define("INS_TYPE_POINT_OF_SERVICE", 12);
-define("INS_TYPE_EXCLUSIVE_PROVIDER_ORGANIZATION", 13);
-define("INS_TYPE_INDEMNITY_INSURANCE", 14);
-define("INS_TYPE_HMO_MEDICARE_RISK", 15);
-define("INS_TYPE_AUTOMOBILE_MEDICAL", 16);
-define("INS_TYPE_COMMERCIAL_INSURANCE", 17);
-define("INS_TYPE_DISABILITY", 18);
-define("INS_TYPE_HEALTH_MAINTENANCE_ORGANIZATION", 19);
-define("INS_TYPE_LIABILITY", 20);
-define("INS_TYPE_LIABILITY_MEDICAL", 21);
-define("INS_TYPE_OTHER_FEDERAL_PROGRAM", 22);
-define("INS_TYPE_TITLE_V", 23);
-define("INS_TYPE_VETERANS_ADMINISTRATION_PLAN", 24);
-define("INS_TYPE_WORKERS_COMPENSATION_HEALTH_PLAN", 25);
-define("INS_TYPE_MUTUALLY_DEFINED", 26);
-
+use OpenEMR\Common\Database\QueryUtils;
+use OpenEMR\Common\ORDataObject\Address;
 use OpenEMR\Common\ORDataObject\ORDataObject;
+use OpenEMR\Common\ValueObjects\TypedPhoneNumber;
+use OpenEMR\Services\InsuranceCompanyService;
+use OpenEMR\Services\PhoneNumberService;
+use OpenEMR\Services\PhoneType;
 
 /**
  * class Insurance Company
@@ -48,377 +31,383 @@ use OpenEMR\Common\ORDataObject\ORDataObject;
 
 class InsuranceCompany extends ORDataObject
 {
-    var $id;
-    var $name;
-    var $phone_numbers;
-    var $attn;
-    var $cms_id;
-    var $alt_cms_id;
-    var $eligibility_id;
-    //this is now deprecated use new x12 partners instead
-    var $x12_receiver_id;
-    var $x12_default_partner_id;
-    var $x12_default_eligibility_id;
-    var $inactive;
+    public $name;
+    /** @var TypedPhoneNumber[] */
+    public array $phone_numbers = [];
+    public $attn;
+    public $cms_id;
+    public $alt_cms_id;
+    public $eligibility_id;
+    public $x12_receiver_id;
+    public $x12_default_partner_id;
+    public $x12_default_eligibility_id;
+    public $inactive;
+    public $InsuranceCompany;
     /*
-    *   OpenEMR used this value to determine special formatting for the specified type of payer.
-    *   This value is a mutually exclusive choice answering the FB.Payer.isX API calls
-    *   It references a set of constant defined in this file INS_TYPE_XXX
-    *   Defaults to type INS_TYPE_OTHER_HCFA
-    *   @var int Holds constant for type of payer as far as INS is concerned, see FB.Payer.isXXX API calls
+    *   OpenEMR can use this value to determine special formatting for the specified type of payer.
+    *   It is the key to the array returned by the InsuranceCompanyService
+    *   getInsuranceTypes and getInsuranceClaimTypes methods.
+    *   @var int Holds constant for type of payer
     */
-    var $ins_type_code;
+    public $ins_type_code;
 
     /*
-    *   Array used to populate select dropdowns or other form elements, it must coincide with the INS_TYPE_XXX constants
-    *   @var array Values are display strings that match constants for FB.Payer.isXXX payer types, used for populating select dropdowns, etc
+    *   Array used to populate select dropdowns or other form elements
+    *   It is the value of the array returned by the InsuranceCompanyService->getInsuranceTypes() method.
     */
-    var $ins_type_code_array = array('','Other HCFA'
-                                        ,'Medicare Part B'
-                                        ,'Medicaid'
-                                        ,'ChampUSVA'
-                                        ,'ChampUS'
-                                        ,'Blue Cross Blue Shield'
-                                        ,'FECA'
-                                        ,'Self Pay'
-                                        ,'Central Certification'
-                                        ,'Other Non-Federal Programs'
-                                        ,'Preferred Provider Organization (PPO)'
-                                        ,'Point of Service (POS)'
-                                        ,'Exclusive Provider Organization (EPO)'
-                                        ,'Indemnity Insurance'
-                                        ,'Health Maintenance Organization (HMO) Medicare Risk'
-                                        ,'Automobile Medical'
-                                        ,'Commercial Insurance Co.'
-                                        ,'Disability'
-                                        ,'Health Maintenance Organization'
-                                        ,'Liability'
-                                        ,'Liability Medical'
-                                        ,'Other Federal Program'
-                                        ,'Title V'
-                                        ,'Veterans Administration Plan'
-                                        ,'Workers Compensation Health Plan'
-                                        ,'Mutually Defined'
-                                        );
+    public $ins_type_code_array;
 
-    var $ins_claim_type_array = array(''
-                                       ,'16'
-                                       ,'MB'
-                                       ,'MC'
-                                       ,'CH'
-                                       ,'CH'
-                                       ,'BL'
-                                       ,'16'
-                                       ,'09'
-                                       ,'10'
-                                       ,'11'
-                                       ,'12'
-                                       ,'13'
-                                       ,'14'
-                                       ,'15'
-                                       ,'16'
-                                       ,'AM'
-                                       ,'CI'
-                                       ,'DS'
-                                       ,'HM'
-                                       ,'LI'
-                                       ,'LM'
-                                       ,'OF'
-                                       ,'TV'
-                                       ,'VA'
-                                       ,'WC'
-                                       ,'ZZ'
-                                       );
+    /*
+    *   Array used with electronic claim submissions and
+    *   corresponds with $ins_type_code_array
+    *   It is the value of the array returned by the InsuranceCompanyService->getInsuranceClaimTypes() method.
+    */
+    public $ins_claim_type_array;
 
+    public $address;
 
-    var $address;
+    public $X12Partner;
+
+    /**
+     * @var int CQM SOP, Source of Payment, from HL7
+     */
+    public $cqm_sop;
+
+    /**
+     * @var Array contains code and description of above
+     */
+    public $cqm_sop_array;
 
     /**
      * Constructor sets all Insurance Company attributes to their default value
      */
-    function __construct($id = "", $prefix = "")
+    public function __construct(public $id = "", ?InsuranceCompanyService $insuranceCompanyService = null)
     {
-        $this->id = $id;
         $this->name = "";
         $this->_table = "insurance_companies";
-        $phone = new PhoneNumber();
-        $phone->set_type(TYPE_WORK);
-        $fax = new PhoneNumber();
-        $fax->set_type(TYPE_FAX);
         $this->address = new Address();
-        $this->phone_numbers = array($phone, $fax);
-        if ($id != "") {
+        if ($insuranceCompanyService === null) {
+            $this->InsuranceCompany = new InsuranceCompanyService();
+        } else {
+            $this->InsuranceCompany = $insuranceCompanyService;
+        }
+        $this->ins_type_code_array = $this->InsuranceCompany->getInsuranceTypesCached();
+        $this->ins_claim_type_array = $this->InsuranceCompany->getInsuranceClaimTypes();
+        if ($this->id != "") {
             $this->populate();
         }
 
         $this->X12Partner = new X12Partner();
+        $this->cqm_sop_array = $this->InsuranceCompany->getInsuranceCqmSopCached();
     }
 
-    function set_id($id = "")
+    public function set_id($id = "")
     {
         $this->id = $id;
     }
-    function get_id()
+    public function get_id()
     {
         return $this->id;
     }
 
     // special function that the html forms use to prepopulate which allows for partial edits and wizard functionality
-    function set_form_id($id = "")
+    public function set_form_id($id = "")
     {
-        if (!empty($id)) {
-            $this->populate($id);
+        if ($id !== '') {
+            $this->populate();
         }
     }
 
-    function set_address($aobj)
+    public function set_address($aobj)
     {
         $this->address = $aobj;
     }
-    function get_address()
+    public function get_address()
     {
         return $this->address;
     }
-    function set_address_line1($line)
+    public function set_address_line1($line)
     {
         $this->address->set_line1($line);
     }
-    function set_address_line2($line)
+    public function set_address_line2($line)
     {
         $this->address->set_line2($line);
     }
 
-    function set_city($city)
+    public function set_city($city)
     {
         $this->address->set_city($city);
     }
-    function set_state($state)
+    public function set_state($state)
     {
         $this->address->set_state($state);
     }
-    function set_zip($zip)
+    public function set_zip($zip)
     {
         $this->address->set_zip($zip);
     }
-    function set_inactive($inactive)
+    public function set_inactive($inactive)
     {
         $this->inactive = $inactive;
     }
-    function get_inactive()
+    public function get_inactive()
     {
         return $this->inactive;
     }
-    function set_name($name)
+    public function set_name($name)
     {
         $this->name = $name;
     }
-    function get_name()
+    public function get_name()
     {
         return $this->name;
     }
-    function set_attn($attn)
+
+    public function get_display_name(): string
+    {
+        return InsuranceCompanyService::getDisplayNameForInsuranceRecord([
+            'name' => $this->name,
+            'line1' => $this->address->get_line1(),
+            'line2' => $this->address->get_line2(),
+            'city' => $this->address->get_city(),
+            'state' => $this->address->get_state(),
+            'zip' => $this->address->get_zip(),
+            'cms_id' => $this->cms_id
+        ]);
+    }
+    public function set_attn($attn)
     {
         $this->attn = $attn;
     }
-    function get_attn()
+    public function get_attn()
     {
         return $this->attn;
     }
-    function set_cms_id($id)
+    public function set_cms_id($id)
     {
         $this->cms_id = $id;
     }
-    function get_cms_id()
+    public function get_cms_id()
     {
         return $this->cms_id;
     }
-    function set_alt_cms_id($id)
+    public function set_alt_cms_id($id)
     {
         $this->alt_cms_id = $id;
     }
-    function get_alt_cms_id()
+    public function get_alt_cms_id()
     {
         return $this->alt_cms_id;
     }
-    function set_eligibility_id($id)
+    public function set_eligibility_id($id)
     {
         $this->eligibility_id = $id;
     }
-    function get_eligibility_id()
+    public function get_eligibility_id()
     {
         return $this->eligibility_id;
     }
-    function set_ins_type_code($type)
+    public function set_ins_type_code($type)
     {
         $this->ins_type_code = $type;
     }
-    function get_ins_type_code()
+    public function get_ins_type_code()
     {
         return $this->ins_type_code;
     }
-    function get_ins_type_code_display()
+    public function get_ins_type_code_display()
     {
         return $this->ins_type_code_array[$this->ins_type_code];
     }
-    function get_ins_claim_type()
+    public function get_ins_claim_type()
     {
         return $this->ins_claim_type_array[$this->ins_type_code];
     }
-    function get_phone()
+
+    public function set_cqm_sop($code)
+    {
+        $this->cqm_sop = $code;
+    }
+
+    public function get_cqm_sop()
+    {
+        return $this->cqm_sop;
+    }
+
+    public function get_phone()
     {
         foreach ($this->phone_numbers as $phone) {
-            if ($phone->type == TYPE_WORK) {
-                return $phone->get_phone_display();
+            if ($phone->type === PhoneType::WORK) {
+                return $phone->formatLocal();
+            }
+        }
+        return "";
+    }
+
+    public function set_number(string $num, PhoneType $type): void
+    {
+        $typed = TypedPhoneNumber::tryCreate($num, $type);
+        if ($typed === null) {
+            return;
+        }
+
+        // Replace existing phone of same type, or add new
+        foreach ($this->phone_numbers as $i => $phone) {
+            if ($phone->type === $type) {
+                $this->phone_numbers[$i] = $typed;
+                return;
+            }
+        }
+        $this->phone_numbers[] = $typed;
+    }
+
+    public function set_phone($phone)
+    {
+        $this->set_number($phone, PhoneType::WORK);
+    }
+
+    public function set_fax($fax)
+    {
+        $this->set_number($fax, PhoneType::FAX);
+    }
+
+    public function get_fax()
+    {
+        foreach ($this->phone_numbers as $phone) {
+            if ($phone->type === PhoneType::FAX) {
+                return $phone->formatLocal();
             }
         }
 
         return "";
     }
-    function _set_number($num, $type)
-    {
-        $found = false;
-        for ($i = 0; $i < count($this->phone_numbers); $i++) {
-            if ($this->phone_numbers[$i]->type == $type) {
-                $found = true;
-                $this->phone_numbers[$i]->set_phone($num);
-            }
-        }
 
-        if ($found == false) {
-            $p = new PhoneNumber("", $this->id);
-            $p->set_type($type);
-            $p->set_phone($num);
-            $this->phone_numbers[] = $p;
-        }
-    }
-
-    function set_phone($phone)
-    {
-        $this->_set_number($phone, TYPE_WORK);
-    }
-
-    function set_fax($fax)
-    {
-        $this->_set_number($fax, TYPE_FAX);
-    }
-
-    function get_fax()
-    {
-        foreach ($this->phone_numbers as $phone) {
-            if ($phone->type == TYPE_FAX) {
-                return $phone->get_phone_display();
-            }
-        }
-
-        return "";
-    }
-
-    function set_x12_receiver_id($id)
-    {
-        //trigger_error("The set_x12_receiver_id function is now deprecated use the newer x12 partners code instead.",E_USER_NOTICE);
-        $this->x12_receiver_id = $id;
-    }
-
-    function get_x12_receiver_id()
-    {
-        //trigger_error("The get_x12_receiver_id function is now deprecated use the newer x12 partners code instead.",E_USER_NOTICE);
-        return $this->x12_receiver_id;
-    }
-
-    function set_x12_default_partner_id($id)
+    public function set_x12_default_partner_id($id)
     {
         $this->x12_receiver_id = $id;
     }
 
-    function get_x12_default_partner_id()
+    public function get_x12_default_partner_id()
     {
         return $this->x12_receiver_id;
     }
 
-    function get_x12_default_partner_name()
+    public function get_x12_default_partner_name()
     {
         $xa = $this->_utility_array($this->X12Partner->x12_partner_factory());
         return ($xa[$this->get_x12_default_partner_id()] ?? null);
     }
 
-    function set_x12_default_eligibility_id($id)
+    public function set_x12_default_eligibility_id($id)
     {
         $this->x12_default_eligibility_id = $id;
     }
 
-    function get_x12_default_eligibility_id()
+    public function get_x12_default_eligibility_id()
     {
         return $this->x12_default_eligibility_id;
     }
 
-    function get_x12_default_eligibility_name()
+    public function get_x12_default_eligibility_name()
     {
         $xa = $this->_utility_array($this->X12Partner->x12_partner_factory());
         return $xa[$this->get_x12_default_eligibility_id()];
     }
 
-    function populate()
+    public function populate()
     {
         parent::populate();
         $this->address = Address::factory_address($this->id);
-        $this->phone_numbers = PhoneNumber::factory_phone_numbers($this->id);
-    }
-
-    function persist()
-    {
-        parent::persist();
-        $this->address->persist($this->id);
-        foreach ($this->phone_numbers as $phone) {
-            $phone->persist($this->id);
-        }
-    }
-
-    function utility_insurance_companies_array()
-    {
-        $pharmacy_array = array();
-        $sql = "SELECT p.id, p.name, a.line1, a.line2, a.city, a.state FROM " . escape_table_name($this->_table) . " AS p INNER JOIN addresses AS a ON  p.id = a.foreign_id";
-        $res = sqlQ($sql);
-        while ($row = sqlFetchArray($res)) {
-                $d_string = $row['city'];
-            if (!empty($row['city']) && $row['state']) {
-                $d_string .= ", ";
+        $phoneService = new PhoneNumberService();
+        $this->phone_numbers = [];
+        foreach ($phoneService->getPhonesByForeignId($this->id) as $record) {
+            $areaCode = (string) ($record['area_code'] ?? '');
+            $prefix = (string) ($record['prefix'] ?? '');
+            $number = (string) ($record['number'] ?? '');
+            $phoneStr = $areaCode . $prefix . $number;
+            $typeValue = is_int($record['type']) ? $record['type'] : PhoneType::WORK->value;
+            $type = PhoneType::tryFrom($typeValue) ?? PhoneType::WORK;
+            $typed = TypedPhoneNumber::tryCreate($phoneStr, $type);
+            if ($typed !== null) {
+                $this->phone_numbers[] = $typed;
             }
-
-                $d_string .=  $row['state'];
-                $pharmacy_array[strval($row['id'])] = $row['name'] . " " . $d_string;
         }
-
-        return ($pharmacy_array);
     }
 
-    function insurance_companies_factory($city = "", $sort = "ORDER BY name, id")
+    public function persist(): mixed
     {
-        if (empty($city)) {
-             $city = "";
-        } else {
-            $city = " WHERE city = '" . add_escape_custom($foreign_id) . "'";
-        }
+        // Wrap the whole logical save (parent row, address row, phone_numbers
+        // delete + re-insert) in a single transaction. The delete-then-insert
+        // below is what stops the duplicate-phone-row accumulation that PR
+        // #10326 introduced; without the transaction, a connection drop
+        // between the DELETE and the final INSERT would leave the record
+        // with partial or no phone data instead of just the buggy duplicates.
+        return QueryUtils::inTransaction(function (): mixed {
+            $ret = parent::persist();
+            $this->address->persist($this->id);
+            $phoneService = new PhoneNumberService();
+            // Reset phone_numbers rows for this company so the table mirrors
+            // $this->phone_numbers after the loop. PhoneNumberService::insert
+            // is a plain INSERT (contrary to the earlier "handles upsert
+            // logic" comment), so without the clear persist() accumulates a
+            // fresh WORK + FAX row on every save and the list-view LEFT JOINs
+            // on phone_numbers multiply each company across
+            // (work_count * fax_count) result rows.
+            QueryUtils::sqlStatementThrowException(
+                "DELETE FROM phone_numbers WHERE foreign_id = ?",
+                [$this->id]
+            );
+            foreach ($this->phone_numbers as $phone) {
+                $nationalDigits = $phone->phoneNumber->getNationalDigits();
+                if ($nationalDigits === null) {
+                    // The legacy phone_numbers table stores 10-digit NANP parts
+                    // (area_code / prefix / number). Skip numbers we can't
+                    // represent in that schema rather than throwing a TypeError
+                    // from PhoneNumberService::getPhoneParts().
+                    continue;
+                }
+                $phoneData = ['phone' => $nationalDigits];
+                $phoneService->type = $phone->type->value;
+                $phoneService->insert($phoneData, $this->id);
+            }
+            return $ret;
+        });
+    }
 
-        $p = new InsuranceCompany();
-        $icompanies = array();
-        $sql = "SELECT p.id, a.city " .
-            "FROM " . escape_table_name($p->_table) . " AS p " .
-            "INNER JOIN addresses as a on p.id = a.foreign_id " . $city . " " . add_escape_custom($sort);
+    /**
+     * @return InsuranceCompany[]
+     */
+    public function insurance_companies_factory(): array
+    {
+        $insuranceCompanyService = new InsuranceCompanyService();
+        $icompanies = [];
 
-        //echo $sql . "<bR />";
-        $results = sqlQ($sql);
-        //echo "sql: $sql";
-        //print_r($results);
-        while ($row = sqlFetchArray($results)) {
-                $icompanies[] = new InsuranceCompany($row['id']);
+        $listAll = $insuranceCompanyService->search([]);
+        if ($listAll->hasData()) {
+            $data = $listAll->getData();
+            foreach ($data as $record) {
+                // we pass in the service array so we don't recreate it each time
+                $company = new InsuranceCompany("", $insuranceCompanyService);
+                $company->populate_array($record);
+                if (($record['work_id'] ?? null) !== null) {
+                    $company->set_phone($record['work_number']);
+                }
+                if (($record['fax_id'] ?? null) !== null) {
+                    $company->set_fax($record['fax_number']);
+                }
+                $icompanies[] = $company;
+            }
         }
+        // sort by name since we don't know that the sql query will return them in the correct order
+        usort($icompanies, fn($a, $b): int => strcasecmp((string) $a->name, (string) $b->name));
 
         return $icompanies;
     }
 
-    function toString($html = false)
+    public function toString($html = false): string
     {
-        $string .= "\n"
+        $string = "\n"
         . "ID: " . $this->id . "\n"
         . "Name: " . $this->name . "\n"
         . "Attn:" . $this->attn . "\n"
@@ -426,11 +415,6 @@ class InsuranceCompany extends ORDataObject
         . "ALT Payer ID:" . $this->alt_cms_id . "\n"
         //. "Phone: " . $this->phone_numbers[0]->toString($html) . "\n"
         . "Address: " . $this->address->toString($html) . "\n";
-
-        if ($html) {
-            return nl2br($string);
-        } else {
-            return $string;
-        }
+        return $html ? nl2br($string) : $string;
     }
 }

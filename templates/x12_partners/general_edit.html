@@ -2,7 +2,7 @@
  * X12 Partner edit
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2017 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -16,9 +16,11 @@
         </div>
     </div>
     <div class="form-row my-sm-2">
-        <label for="name" class="col-form-label col-sm-2">{xlt t='Submitter Name (3rd Party Submitter Only)'}</label>
+        <label for="x12_submitter_id" class="col-form-label col-sm-2">{xlt t='Submitter Name (3rd Party Submitter Only)'}</label>
         <div class="col-sm-8">
-            <input type="text" id="x12_submitter_name" name="x12_submitter_name" class="form-control" value="{$partner->get_x12_submitter_name()|attr}" onKeyDown="PreventIt(event)">
+            <select id="x12_submitter_id" name="x12_submitter_id" class="form-control">
+                {html_options options=$partner->get_x12_submitter_array() selected=$partner->get_x12_submitter_id()}
+            </select>
         </div>
     </div>
     <div class="form-row my-sm-2">
@@ -36,7 +38,7 @@
     <div class="form-row my-sm-2">
         <label for="x12_isa02" class="col-form-label col-sm-2">{xlt t='User Logon (If 03 above, else leave spaces) (ISA02)'}</label>
         <div class="col-sm-8">
-            <input type="text" id="x12_isa02" name="x12_isa02" class="form-control" value="{$partner->get_x12_isa02()|attr}" onKeyDown="PreventIt(event)">
+            <input type="text" id="x12_isa02" name="x12_isa02" class="form-control" value="{$partner->get_x12_isa02()|attr}" onKeyDown="PreventIt(event)" maxlength="10">
         </div>
     </div>
     <div class="form-row my-sm-2">
@@ -48,7 +50,7 @@
     <div class="form-row my-sm-2">
         <label for="x12_isa04" class="col-form-label col-sm-2">{xlt t='User Password (ISA04~ if 01 above, else leave spaces)'}</label>
         <div class="col-sm-8">
-            <input type="text" id="x12_isa04" name="x12_isa04" class="form-control" value="{$partner->get_x12_isa04()|attr}" onKeyDown="PreventIt(event)">
+            <input type="text" id="x12_isa04" name="x12_isa04" class="form-control" value="{$partner->get_x12_isa04()|attr}" onKeyDown="PreventIt(event)" maxlength="10">
         </div>
     </div>
     <div class="form-row my-sm-2">
@@ -138,13 +140,13 @@
         </div>
     </div>
     <div class="form-row my-sm-2">
-        <label for="x12_sftp_login" class="col-form-label col-sm-2">{xlt t='SFTP Login Credentials'}</label>
+        <label for="x12_sftp_login" class="col-form-label col-sm-2">{xlt t='SFTP or Eligibility Login Credentials'}</label>
         <div class="col-sm-8">
             <input type="text" maxlength="45" id="x12_sftp_login" name="x12_sftp_login" class="form-control" value="{$partner->get_x12_sftp_login()|attr}" onKeyDown="PreventIt(event)">
         </div>
     </div>
     <div class="form-row my-sm-2">
-        <label for="x12_sftp_pass" class="col-form-label col-sm-2">{xlt t='SFTP Pass Credentials'}</label>
+        <label for="x12_sftp_pass" class="col-form-label col-sm-2">{xlt t='SFTP or Eligibility Pass Credentials'}</label>
         <div class="col-sm-8">
             <input type="password" maxlength="45" id="x12_sftp_pass" name="x12_sftp_pass" class="form-control" value="{$partner->get_x12_sftp_pass()|attr}" onKeyDown="PreventIt(event)">
         </div>
@@ -152,7 +154,7 @@
     <div class="form-row my-sm-2">
         <label for="x12_sftp_host" class="col-form-label col-sm-2">{xlt t='SFTP Host'}</label>
         <div class="col-sm-8">
-            <input type="text" maxlength="15" id="x12_sftp_host" name="x12_sftp_host" class="form-control" value="{$partner->get_x12_sftp_host()|attr}" onKeyDown="PreventIt(event)">
+            <input type="text" maxlength="45" id="x12_sftp_host" name="x12_sftp_host" class="form-control" value="{$partner->get_x12_sftp_host()|attr}" onKeyDown="PreventIt(event)">
         </div>
     </div>
     <div class="form-row my-sm-2">
@@ -173,6 +175,72 @@
             <input type="text" maxlength="400" id="x12_sftp_remote_dir" name="x12_sftp_remote_dir" class="form-control" value="{$partner->get_x12_sftp_remote_dir()|attr}" onKeyDown="PreventIt(event)">
         </div>
     </div>
+    <div class="form-row my-sm-2">
+        <label for="x12_sftp_receive_dir_835" class="col-form-label col-sm-2">{xlt t='SFTP Remote Directory for 835 Remittances'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="255" id="x12_sftp_receive_dir_835" name="x12_sftp_receive_dir_835" class="form-control" value="{$partner->get_x12_sftp_receive_dir_835()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+    <div class="form-row my-sm-2">
+        <label for="x12_sftp_receive_dir_277" class="col-form-label col-sm-2">{xlt t='SFTP Remote Directory for 277 Claim Status'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="255" id="x12_sftp_receive_dir_277" name="x12_sftp_receive_dir_277" class="form-control" value="{$partner->get_x12_sftp_receive_dir_277()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+    <div class="form-row my-sm-2">
+        <label for="x12_sftp_receive_dir_999" class="col-form-label col-sm-2">{xlt t='SFTP Remote Directory for 999 Acknowledgments'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="255" id="x12_sftp_receive_dir_999" name="x12_sftp_receive_dir_999" class="form-control" value="{$partner->get_x12_sftp_receive_dir_999()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+    <div class="form-row my-sm-2">
+        <label for="x12_sftp_receive_worked_dir" class="col-form-label col-sm-2">{xlt t='SFTP Remote Directory for Received Files'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="255" id="x12_sftp_receive_worked_dir" name="x12_sftp_receive_worked_dir" class="form-control" value="{$partner->get_x12_sftp_receive_worked_dir()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+
+    <div class="form-row my-sm-2">
+        <label for="x12_client_id" class="col-form-label col-sm-2">{xlt t='Client ID'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="400" id="x12_client_id" name="x12_client_id" class="form-control" value="{$partner->get_x12_client_id()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+
+    <div class="form-row my-sm-2">
+        <label for="x12_client_secret" class="col-form-label col-sm-2">{xlt t='Client Secret'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="400" id="x12_client_secret" name="x12_client_secret" class="form-control" value="{$partner->get_x12_client_secret()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+
+    <div class="form-row my-sm-2">
+        <label for="x12_token_endpoint" class="col-form-label col-sm-2">{xlt t='Token Endpoint'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="400" id="x12_token_endpoint" name="x12_token_endpoint" class="form-control" value="{$partner->get_x12_token_endpoint()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+
+    <div class="form-row my-sm-2">
+        <label for="x12_eligibility_endpoint" class="col-form-label col-sm-2">{xlt t='Eligibility Endpoint'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="400" id="x12_eligibility_endpoint" name="x12_eligibility_endpoint" class="form-control" value="{$partner->get_x12_eligibility_endpoint()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+
+    <div class="form-row my-sm-2">
+        <label for="x12_claim_status_endpoint" class="col-form-label col-sm-2">{xlt t='Claim Status Endpoint'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="400" id="x12_claim_status_endpoint" name="x12_claim_status_endpoint" class="form-control" value="{$partner->get_x12_claim_status_endpoint()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
+
+    <div class="form-row my-sm-2">
+        <label for="x12_attachment_endpoint" class="col-form-label col-sm-2">{xlt t='Attachment Endpoint'}</label>
+        <div class="col-sm-8">
+            <input type="text" maxlength="400" id="x12_attachment_endpoint" name="x12_attachment_endpoint" class="form-control" value="{$partner->get_x12_attachment_endpoint()|attr}" onKeyDown="PreventIt(event)">
+        </div>
+    </div>
 
     <div class="btn-group offset-sm-2">
         <a href="javascript:add_x12();" class="btn btn-secondary btn-save" onclick="top.restoreSession()">
@@ -187,7 +255,7 @@
     <input type="hidden" name="sub" value="no" />
 </form>
 
-{literal}
+
 <script>
 function add_x12()
 {
@@ -212,4 +280,3 @@ document.x12_partner.name.focus();
 
    }
 </script>
-{/literal}

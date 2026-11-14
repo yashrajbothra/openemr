@@ -3,28 +3,43 @@
 /**
  * List procedure orders and reports, and fetch new reports and their results.
  *
- * @package OpenEMR
- * @link    http://www.open-emr.org
- * @author  Rod Roark <rod@sunsetsystems.com>
- * @author  Brady Miller <brady.g.miller@gmail.com>
- * @author  Tyler Wrenn <tyler@tylerwrenn.com>
- * @author  Jerry Padgett <sjpadgett@gmail.com>
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    Rod Roark <rod@sunsetsystems.com>
+ * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Tyler Wrenn <tyler@tylerwrenn.com>
+ * @author    Jerry Padgett <sjpadgett@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2013-2016 Rod Roark <rod@sunsetsystems.com>
  * @copyright Copyright (c) 2017-2019 Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2020 Tyler Wrenn <tyler@tylerwrenn.com>
- * @license https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ * @copyright Copyright (c) 2025-2026 OpenCoreEMR Inc <https://opencoreemr.com/>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 $orphanLog = '';
 
 require_once("../globals.php");
-require_once("$srcdir/patient.inc");
-require_once("$srcdir/options.inc.php");
-if (file_exists("$include_root/procedure_tools/quest/QuestResultClient.php")) {
-    require_once("$include_root/procedure_tools/quest/QuestResultClient.php");
+require_once(\OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . "/options.inc.php");
+$includeRoot = \OpenEMR\Core\OEGlobalsBag::getInstance()->getIncludeRoot();
+if (file_exists("$includeRoot/procedure_tools/quest/QuestResultClient.php")) {
+    require_once("$includeRoot/procedure_tools/quest/QuestResultClient.php");
 }
 require_once("./receive_hl7_results.inc.php");
 require_once("./gen_hl7_order.inc.php");
+
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Orders\Hl7OrderGenerationException;
+use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Check authorization.
+$thisauth = AclMain::aclCheckCore('patients', 'med');
+if (!$thisauth) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for patients/med: Procedure Orders and Reports", xl("Procedure Orders and Reports"));
+}
 
 $form_patient = !empty($_POST['form_patient']);
 $processing_lab = $_REQUEST['form_lab_id'] ?? '';
@@ -33,71 +48,31 @@ if (!isset($_REQUEST['form_refresh']) && !isset($_REQUEST['form_process_labs']) 
     $start_form = true;
 }
 
-use OpenEMR\Common\Acl\AclMain;
-use OpenEMR\Core\Header;
-
-/**
- * Get a list item title, translating if required.
- *
- * @param  string $listid List identifier.
- * @param  string $value List item identifier.
- * @return string  The item's title.
- */
-function getListItem($listid, $value)
-{
-    $lrow = sqlQuery(
-        "SELECT title FROM list_options " .
-        "WHERE list_id = ? AND option_id = ? AND activity = 1",
-        array($listid, $value)
-    );
-    $tmp = xl_list_label($lrow['title']);
-    if (empty($tmp)) {
-        $tmp = (($value === '') ? '' : "($value)");
-    }
-
-    return $tmp;
-}
-
-/**
- * Adapt text to be suitable as the contents of a table cell.
- *
- * @param  string $s Input text.
- * @return string  Output text.
- */
-function myCellText($s)
-{
-    if ($s === '') {
-        return '&nbsp;';
-    }
-
-    return text($s);
-}
-
-// Check authorization.
-$thisauth = AclMain::aclCheckCore('patients', 'med');
-if (!$thisauth) {
-    die(xlt('Not authorized'));
-}
-
 $errmsg = '';
 
 // Send selected unsent orders if requested. This does not support downloading
 // very well as it will only send the first of those.
-if ($_POST['form_xmit']) {
+if (!empty($_POST['form_xmit'])) {
+    CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
+    if (!AclMain::aclCheckCore('patients', 'med', '', 'write')) {
+        AccessDeniedHelper::denyWithTemplate("ACL check failed for patients/med write: transmit orders", xl("Procedure Orders and Reports"));
+    }
     foreach ($_POST['form_cb'] as $formid) {
-        $row = sqlQuery("SELECT lab_id FROM procedure_order WHERE procedure_order_id = ?", array($formid));
+        $row = sqlQuery("SELECT lab_id FROM procedure_order WHERE procedure_order_id = ?", [$formid]);
         $ppid = (int)$row['lab_id'];
-        $hl7 = '';
-        $errmsg = gen_hl7_order($formid, $hl7);
-        if (empty($errmsg)) {
-            $errmsg = send_hl7_order($ppid, $hl7);
+        $errmsg = '';
+        try {
+            $result = default_gen_hl7_order($formid);
+            $errmsg = default_send_hl7_order($ppid, $result->hl7);
+        } catch (Hl7OrderGenerationException $e) {
+            $errmsg = $e->getMessage();
         }
 
         if ($errmsg) {
             break;
         }
 
-        sqlStatement("UPDATE procedure_order SET date_transmitted = NOW() WHERE procedure_order_id = ?", array($formid));
+        sqlStatement("UPDATE procedure_order SET date_transmitted = NOW() WHERE procedure_order_id = ?", [$formid]);
     }
 }
 ?>
@@ -156,7 +131,7 @@ function openResults(orderid) {
 }
 
 // Invokes the patient matching dialog.
-// args is a PHP-serialized array of patient attributes.
+// args is a JSON-encoded array of patient attributes.
 // The dialog script will directly insert the selected pid value, or 0,
 // into the value of the form field named "[select][$key]".
 //
@@ -167,7 +142,8 @@ function openPtMatch(args) {
 
 function openPatient(pid) {
     top.restoreSession();
-    document.location.href = "../patient_file/summary/demographics.php?set_pid=" + encodeURIComponent(pid);
+    const params = new URLSearchParams({set_pid: pid, csrf_token_form: top.csrf_token_js});
+    document.location.href = "../patient_file/summary/demographics.php?" + params;
 }
 
 $(function () {
@@ -175,7 +151,7 @@ $(function () {
         <?php $datetimepicker_timepicker = false; ?>
         <?php $datetimepicker_showseconds = false; ?>
         <?php $datetimepicker_formatInput = false; ?>
-        <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+        <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
         <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
     });
     $("#wait").addClass('d-none');
@@ -193,6 +169,7 @@ function doWait(e){
         <h2><?php echo xlt('Procedure Orders and Reports'); ?></h2>
     </div>
 <form class="form-inline" method='post' action='list_reports.php' enctype='multipart/form-data'>
+    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken(\OpenEMR\Common\Session\SessionWrapperFactory::getInstance()->getActiveSession())); ?>" />
     <div class="container">
     <!-- This might be set by the results window: -->
     <input class="d-none row" type='text' name='form_external_refresh' value='' />
@@ -207,19 +184,14 @@ function doWait(e){
                     <select name='form_lab_id' id='form_lab_id' class='form-control'>
                         <option value="0"><?php echo xlt('All Labs'); ?></option>
                         <?php
-                        $qflag = false;
-                        $ppres = sqlStatement("SELECT ppid, name, npi FROM procedure_providers ORDER BY name, ppid");
+                        $ppres = sqlStatement("SELECT ppid, name, npi FROM procedure_providers WHERE active = 1 ORDER BY name, ppid");
                         while ($pprow = sqlFetchArray($ppres)) {
-                            if ($qflag) {
-                                continue;
-                            }
                             echo "<option value='" . attr($pprow['ppid']) . "'";
                             if ($pprow['ppid'] == $processing_lab) {
                                 echo " selected";
                             }
-                            if (stripos($pprow['npi'], 'QUEST') !== false) {
+                            if (stripos((string) $pprow['npi'], 'QUEST') !== false) {
                                 $pprow['name'] = "Quest Diagnostics";
-                                $qflag = true;
                             }
                             echo ">" . text($pprow['name']) . "</option>";
                         }
@@ -232,7 +204,7 @@ function doWait(e){
                         style="max-width:75px;margin-left:20px;"
                         type="number" title="<?php echo xla('Max number of results to process at a time per Lab') ?>"
                         step="1" min="0" max="50"
-                        value="<?php echo attr($_REQUEST['form_max_results'] ?: 10); ?>" />
+                        value="<?php echo attr($_REQUEST['form_max_results'] ?? 10); ?>" />
                         <span class="input-group-text"><?php echo xlt('Results Per Lab'); ?></span>
                     </div>
                     <div class="form-check form-check-inline ml-2">
@@ -256,20 +228,20 @@ function doWait(e){
     <?php } ?>
 
     <?php
-    $info = array('select' => array());
+    $info = ['select' => []];
     // We skip match/delete processing if this is just a refresh, because that
     // might be a nasty surprise.
     if (empty($_POST['form_external_refresh'])) {
         // Get patient matching selections from this form if there are any.
-        if (is_array($_POST['select'])) {
+        if (!empty($_POST['select']) && is_array($_POST['select'])) {
             foreach ($_POST['select'] as $selkey => $selval) {
-                $info['select'][$selkey] = $selval;
+                $info['select'][urldecode((string) $selkey)] = $selval;
             }
         }
         // Get file delete requests from this form if there are any.
-        if (is_array($_POST['delete'])) {
+        if (!empty($_POST['delete']) && is_array($_POST['delete'])) {
             foreach ($_POST['delete'] as $delkey => $dummy) {
-                $info[$delkey] = array('delete' => true);
+                $info[$delkey] = ['delete' => true];
             }
         }
     }
@@ -279,7 +251,7 @@ function doWait(e){
         $info['orphaned_order'] = "R";
     }
     // Attempt to post any incoming results.
-    if ($_REQUEST['form_process_labs'] || $info['orphaned_order'] == "R") {
+    if (!empty($_REQUEST['form_process_labs']) || (!empty($info['orphaned_order']) && $info['orphaned_order'] == "R")) {
         $errmsg = poll_hl7_results($info, $processing_lab);
     }
     // echo "<!--\n";  // debugging
@@ -293,15 +265,15 @@ function doWait(e){
     $orphan_orders = false;
 
     // Generate HTML to request patient matching.
-    if (is_array($info['match'])) {
+    if (!empty($info['match']) && is_array($info['match'])) {
         foreach ($info['match'] as $matchkey => $matchval) {
             $matchreqs = true;
             $s .= " <tr class='detail'>\n";
             $s .= "  <td>&nbsp;</td>\n";
             $s .= "  <td>&nbsp;</td>\n";
                         $s .= "  <td><a href='javascript:openPtMatch(" . attr_js($matchkey) . ")'>";
-                        $tmp = unserialize($matchkey, ['allowed_classes' => false]);
-            $s .= xlt('Click to match patient') . ' "' . text($tmp['lname']) . ', ' . text($tmp['fname']) . '"';
+                        $tmp = is_array($decoded = json_decode($matchkey, true)) ? $decoded : [];
+            $s .= xlt('Click to match patient') . ' "' . text($tmp['lname'] ?? '') . ', ' . text($tmp['fname'] ?? '') . '"';
             $s .= "</a>";
             $s .= "</td>\n";
             $s .= "  <td style='width:1%'><input type='text' name='select[" .
@@ -317,10 +289,10 @@ function doWait(e){
         }
 
         $count = 0;
-        if (is_array($infoval['mssgs'])) {
+        if (is_array($infoval) && !empty($infoval['mssgs'])) {
             foreach ($infoval['mssgs'] as $message) {
                 $s .= " <tr class='detail'>\n";
-                if (substr($message, 0, 1) == '*') {
+                if (str_starts_with((string) $message, '*')) {
                     $errors = true;
                     // Error message starts with '*'
                     if (!$count++) {
@@ -330,12 +302,12 @@ function doWait(e){
                         $s .= "  <td>&nbsp;</td>\n";
                         $s .= "  <td>&nbsp;</td>\n";
                     }
-                    $s .= "  <td colspan='2' class='bg-danger'>" . text(substr($message, 1)) . "</td>\n";
+                    $s .= "  <td colspan='2' class='bg-danger'>" . text(substr((string) $message, 1)) . "</td>\n";
                 } else {
                     // Informational message starts with '>'
                     $s .= "  <td>&nbsp;</td>\n";
                     $s .= "  <td>" . text($infokey) . "</td>\n";
-                    $s .= "  <td colspan='2' class='bg-success'>" . text(substr($message, 1)) . "</td>\n";
+                    $s .= "  <td colspan='2' class='bg-success'>" . text(substr((string) $message, 1)) . "</td>\n";
                 }
                 $s .= " </tr>\n";
             }
@@ -390,8 +362,8 @@ function doWait(e){
         echo "<span class='text-danger'>" . text($errmsg) . "</span><br />\n";
     }
 
-    $form_from_date = empty($_POST['form_from_date']) ? '' : trim($_POST['form_from_date']);
-    $form_to_date = empty($_POST['form_to_date']) ? '' : trim($_POST['form_to_date']);
+    $form_from_date = empty($_POST['form_from_date']) ? '' : trim((string) $_POST['form_from_date']);
+    $form_to_date = empty($_POST['form_to_date']) ? '' : trim((string) $_POST['form_to_date']);
 
     $form_reviewed = empty($_POST['form_reviewed']) ? 3 : (int)$_POST['form_reviewed'];
     $form_patient = !empty($_POST['form_patient']);
@@ -412,13 +384,13 @@ function doWait(e){
             <select class="col-md form-control" name='form_reviewed'>
                 <?php
                 foreach (
-                    array(
+                    [
                         '1' => xl('All'),
                         '2' => xl('Reviewed'),
                         '3' => xl('Received, unreviewed'),
                         '4' => xl('Sent, not received'),
                         '5' => xl('Not sent'),
-                    ) as $key => $value
+                    ] as $key => $value
                 ) {
                     echo "<option value='" . attr($key) . "'";
                     if ($key == $form_reviewed) {
@@ -431,8 +403,8 @@ function doWait(e){
         </div>
         <div class="col-md">
             <?php
-            generate_form_field(array('data_type' => 10, 'field_id' => 'provider',
-                'empty_title' => '-- All Providers --'), $form_provider);
+            generate_form_field(['data_type' => 10, 'field_id' => 'provider',
+                'empty_title' => '-- All Providers --'], $form_provider);
             ?>
         </div>
         <div class="col-md">
@@ -492,7 +464,7 @@ function doWait(e){
                 "pc.do_not_send, pc.procedure_order_seq, pr.procedure_report_id";
 
             $where = "1 = 1";
-            $sqlBindArray = array();
+            $sqlBindArray = [];
 
             if (!empty($form_from_date)) {
                 $where .= " AND po.date_ordered >= ?";
@@ -506,7 +478,7 @@ function doWait(e){
 
             if ($form_patient) {
                 $where .= " AND po.patient_id = ?";
-                $sqlBindArray[] = $pid;
+                $sqlBindArray[] = \OpenEMR\Common\Session\SessionWrapperFactory::getInstance()->getActiveSession()->get('pid');
             }
 
             if ($form_provider) {
@@ -521,11 +493,11 @@ function doWait(e){
 
             if ($form_reviewed == 2) {
                 $where .= " AND pr.procedure_report_id IS NOT NULL AND pr.review_status = 'reviewed'";
-            } else if ($form_reviewed == 3) {
+            } elseif ($form_reviewed == 3) {
                 $where .= " AND pr.procedure_report_id IS NOT NULL AND pr.review_status != 'reviewed'";
-            } else if ($form_reviewed == 4) {
+            } elseif ($form_reviewed == 4) {
                 $where .= " AND po.date_transmitted IS NOT NULL AND pr.procedure_report_id IS NULL";
-            } else if ($form_reviewed == 5) {
+            } elseif ($form_reviewed == 5) {
                 $where .= " AND po.date_transmitted IS NULL AND pr.procedure_report_id IS NULL";
             }
 
@@ -557,7 +529,7 @@ function doWait(e){
                 $procedure_code = empty($row['procedure_code']) ? '' : $row['procedure_code'];
                 $procedure_name = empty($row['procedure_name']) ? '' : $row['procedure_name'];
                 $report_id = empty($row['procedure_report_id']) ? 0 : ($row['procedure_report_id'] + 0);
-                $date_report = empty($row['date_report']) ? '' : substr($row['date_report'], 0, 16);
+                $date_report = empty($row['date_report']) ? '' : substr((string) $row['date_report'], 0, 16);
                 $date_report_suf = empty($row['date_report_tz']) ? '' : (' ' . $row['date_report_tz']);
                 $report_status = empty($row['report_status']) ? '' : $row['report_status'];
                 $review_status = empty($row['review_status']) ? '' : $row['review_status'];
@@ -610,7 +582,7 @@ function doWait(e){
                     echo "</a></td>\n";
                     echo "  <td>";
                     // Order ID comes with a link to open the manifest in a new window/tab.
-                    echo "<a href='" . $GLOBALS['webroot'];
+                    echo "<a href='" . OEGlobalsBag::getInstance()->getWebRoot();
                     echo "/interface/orders/order_manifest.php?orderid=";
                     echo attr_url($order_id);
                     echo "' target='_blank' onclick='top.restoreSession()' ";
@@ -658,7 +630,7 @@ function doWait(e){
             }
         } ?>
     </table>
-    <?php if ($num_checkboxes) { ?>
+    <?php if (!empty($num_checkboxes)) { ?>
         <button type="submit" class="btn btn-primary btn-transmit" name='form_xmit'
             value='<?php echo xla('Transmit Selected Orders'); ?>'><?php echo xlt('Transmit Selected Orders'); ?>
         </button>

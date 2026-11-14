@@ -4,7 +4,7 @@
  * interface/main/calendar/find_group_popup.php
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Shachar Zilbershlag <shaharzi@matrix.co.il>
  * @author    Amiel Elboim <amielel@matrix.co.il>
@@ -17,25 +17,29 @@
  */
 
 require_once('../../globals.php');
-require_once("$srcdir/group.inc");
-require_once("../../therapy_groups/therapy_groups_controllers/therapy_groups_controller.php");
 
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 
+require_once(OEGlobalsBag::getInstance()->getSrcDir() . "/group.inc.php");
+require_once("../../therapy_groups/therapy_groups_controllers/therapy_groups_controller.php");
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 if (!empty($_POST)) {
-    if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-        CsrfUtils::csrfNotVerified();
-    }
+    CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 }
 
 $info_msg = "";
+$result = [];
 $group_types = TherapyGroupsController::prepareGroupTypesList();
 // If we are searching, search.
 //
-if ($_POST['searchby'] && $_POST['searchparm']) {
-    $searchby = $_POST['searchby'];
-    $searchparm = trim($_POST['searchparm']);
+$searchby = $_POST['searchby'] ?? null;
+$searchparm = $_POST['searchparm'] ?? null;
+if ($searchby && $searchparm) {
+    $searchparm = trim((string) $searchparm);
 
     if ($searchby == "Name") {
         $result = getGroupData("$searchparm", "*", 'group_name');
@@ -163,7 +167,7 @@ if ($_POST['searchby'] && $_POST['searchparm']) {
         }
     </style>
 
-    <script
+    <script>
 
         function selgid(gid, name, end_date) {
             if (opener.closed || !opener.setgroup)
@@ -182,16 +186,16 @@ if ($_POST['searchby'] && $_POST['searchparm']) {
 
 <div id="searchCriteria">
     <form method='post' name='theform' id="theform" action='find_group_popup.php'>
-        <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+        <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
         <?php echo xlt('Search by') . ':'; ?>
         <select name='searchby'>
             <option value="Name"><?php echo xlt('Name'); ?></option>
             <option value="ID"<?php echo ($searchby == 'ID') ? ' selected' : ''; ?>><?php echo xlt('ID'); ?></option>
         </select>
         <?php echo xlt('for') . ':'; ?>
-        <input type='text' id='searchparm' name='searchparm' size='12' value='<?php echo attr($_POST['searchparm']); ?>'>        &nbsp;
+        <input type='text' id='searchparm' name='searchparm' size='12' value='<?php echo attr($searchparam ?? ""); ?>'>        &nbsp;
         <input type='submit' id="submitbtn" value='<?php echo xla('Search'); ?>'>
-        <div id="searchspinner"><img src="<?php echo $GLOBALS['webroot'] ?>/interface/pic/ajax-loader.gif"></div>
+        <div id="searchspinner"><img src="<?php echo OEGlobalsBag::getInstance()->getWebRoot() ?>/interface/pic/ajax-loader.gif"></div>
     </form>
 </div>
 
@@ -243,6 +247,8 @@ if ($_POST['searchby'] && $_POST['searchparm']) {
         ?>
         </table>
     </div>
+<?php else : ?>
+<p><?php echo xlt("No groups found"); ?></p>
 <?php endif; ?>
 
 <script>

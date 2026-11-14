@@ -277,7 +277,7 @@ class FHIRObservationReferenceRange extends FHIRBackboneElement implements \Json
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -285,7 +285,7 @@ class FHIRObservationReferenceRange extends FHIRBackboneElement implements \Json
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->low)) {
@@ -313,15 +313,13 @@ class FHIRObservationReferenceRange extends FHIRBackboneElement implements \Json
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ObservationReferenceRange xmlns="http://hl7.org/fhir"></ObservationReferenceRange>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ObservationReferenceRange xmlns="http://hl7.org/fhir"></ObservationReferenceRange>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->low)) {
             $this->low->xmlSerialize(true, $sxe->addChild('low'));

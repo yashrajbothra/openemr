@@ -6,30 +6,112 @@
  * @package OpenEMR
  * @link    https://www.open-emr.org
  * @author  Jerry Padgett <sjpadgett@gmail.com>
- * @copyright Copyright (c) 2017 Jerry Padgett <sjpadgett@gmail.com>
+ * @author  Simon Quigley <squigley@altispeed.com>
+ * @copyright Copyright (c) 2017-2024 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2026 Simon Quigley <squigley@altispeed.com>
  * @license https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Billing;
 
-use OpenEMR\Billing\Claim;
+use OpenEMR\Billing\BillingProcessor\BillingClaimBatchControlNumber;
 
 class X125010837I
 {
-    public function x12Date($frmdate)
+    /**
+     * An 837 date from an MMDDYY form date, with the century set to 20.
+     */
+    public static function x12Date($frmdate): string
     {
-        return ('20' . substr($frmdate, 4, 2) . substr($frmdate, 0, 2) . substr($frmdate, 2, 2));
+        return ('20' . substr((string) $frmdate, 4, 2) . substr((string) $frmdate, 0, 2) . substr((string) $frmdate, 2, 2));
     }
 
-    public $ub04id = array();
+    /**
+     * Build CLM05 from UB-04 box 4, the type of bill (e.g. 0771, or 771 without the leading zero).
+     * CLM05 is the two-digit facility type code, the qualifier A and the claim frequency code,
+     * so 0771 becomes 77:A:1. The frequency code may be a letter (e.g. 081A). Returns an empty
+     * string when the type of bill is not in that form or the facility type starts with zero.
+     */
+    public static function claimFacilityCode(string $typeOfBill): string
+    {
+        if (preg_match('/^0?([1-9]\d)([0-9A-Z])$/', strtoupper(trim($typeOfBill)), $matches) !== 1) {
+            return '';
+        }
+        return $matches[1] . ':A:' . $matches[2];
+    }
 
-    public function generateX12837I($pid, $encounter, &$log, $ub04id)
+    public $ub04id = [];
+
+
+    /**
+     * Digits for a UB04 physician NPI before it is written to NM109.
+     *
+     * Qualifier fields are not passed here. A value that is not an NPI is blank.
+     * A zero placeholder is blank.
+     */
+    public static function physicianNpi(mixed $value): string
+    {
+        if (is_int($value)) {
+            $value = strval($value);
+        }
+        if (!is_string($value)) {
+            return '';
+        }
+
+        $digits = Claim::npiDigits($value);
+        if ($digits === '0') {
+            return '';
+        }
+
+        return $digits;
+    }
+
+    /**
+     * Qualifier text for a UB04 physician NM108.
+     *
+     * The text is not rewritten. A zero placeholder is absent.
+     */
+    public static function physicianQualifier(mixed $value): string
+    {
+        if (!is_string($value) || $value === '' || $value === '0') {
+            return '';
+        }
+
+        return $value;
+    }
+
+    /**
+     * The 837I text for one encounter. A UB04 physician NPI is digits in NM109.
+     */
+
+    /**
+     * NM108 and NM109 for a physician segment.
+     *
+     * A hyphen in the NPI is not sent. A missing qualifier or NPI leaves both empty.
+     */
+    public static function physicianIdentifier(string $qualifier, mixed $npi): string
+    {
+        $digits = self::physicianNpi($npi);
+        if ($qualifier === '' || $digits === '') {
+            return '**';
+        }
+
+        return '*' . $qualifier . '*' . $digits;
+    }
+
+    public static function generateX12837I($pid, $encounter, $x12_partner, &$log, $ub04id)
     {
         $today = time();
         $out = '';
-        $claim = new Claim($pid, $encounter);
+        $claim = new Claim($pid, $encounter, $x12_partner);
         $edicount = 0;
-
+        // Qualify data array
+        if (!empty($ub04id)) {
+            for ($i = 0; $i < 428; ++$i) {
+                $ub04id[$i] ??= '';
+            }
+        }
+        // This is the start of the 837I claim
         $log .= "Generating 837I claim $pid-$encounter for " .
             $claim->patientFirstName() . ' ' .
             $claim->patientMiddleName() . ' ' .
@@ -41,7 +123,7 @@ class X125010837I
             "*" . $claim->x12gsisa03() .
             "*" . $claim->x12gsisa04() .
             "*" . $claim->x12gsisa05() .
-            "*" . $claim->x12gssenderid() .
+            "*" . $claim->x12_sender_id() .
             "*" . $claim->x12gsisa07() .
             "*" . $claim->x12gsreceiverid() .
             // date of transmission "*030911" .
@@ -50,7 +132,7 @@ class X125010837I
             "*" . date('Hi', $today) .
             "*" . "^" .
             "*" . "00501" .
-            "*" . "000000001" .
+            "*" . BillingClaimBatchControlNumber::getIsa13() .
             "*" . $claim->x12gsisa14() .
             "*" . $claim->x12gsisa15() .
             "*:" .
@@ -58,10 +140,10 @@ class X125010837I
         $out .= "GS" .
             "*HC" .
             "*" . $claim->x12gsgs02() .
-            "*" . trim($claim->x12gs03()) .
+            "*" . trim((string) $claim->x12gs03()) .
             "*" . date('Ymd', $today) .
             "*" . date('Hi', $today) .
-            "*1" .
+            "*" . BillingClaimBatchControlNumber::getGs06() .
             "*X" .
             // "*" . $claim->x12gsversionstring() .
             "*" . "005010X223A2" .
@@ -80,12 +162,12 @@ class X125010837I
             "*" . "0123" .                             // reference identification
             "*" . date('Ymd', $today) .           // transaction creation date
             "*" . date('Hi', $today) .            // transaction creation time
-            ($encounter_claim ? "*RP" : "*CH") .  // RP = reporting, CH = chargeable
+            (($encounter_claim ?? null) ? "*RP" : "*CH") .  // RP = reporting, CH = chargeable
             "~\n";
 
         ++$edicount;
         //Field length is limited to 35. See nucc dataset page 63 www.nucc.org
-        $billingFacilityName = substr($claim->billingFacilityName(), 0, 60);
+        $billingFacilityName = substr((string) $claim->billingFacilityName(), 0, 60);
         if ($billingFacilityName == '') {
             $log .= "*** billing facility name in 1000A loop is empty\n";
         }
@@ -137,7 +219,7 @@ class X125010837I
         // Situational CUR segment (foreign currency information) omitted here.
         ++$edicount;
         //Field length is limited to 35. See nucc dataset page 63 www.nucc.org
-        $billingFacilityName = substr($claim->billingFacilityName(), 0, 60);
+        $billingFacilityName = substr((string) $claim->billingFacilityName(), 0, 60);
         $out .= "NM1" .       // Loop 2010AA Billing Provider stays in the 837I
             "*" . "85" .
             "*" . "2" .
@@ -264,7 +346,7 @@ class X125010837I
         // Segment REF*Y4 (Property and Casualty Claim Number) omitted.
         // Segment PER*IC (Property and Casualty Subscriber Contact Information) omitted.
         ++$edicount;
-        $payerName = substr($claim->payerName(), 0, 60);
+        $payerName = substr((string) $claim->payerName(), 0, 60);
         $out .= "NM1" .       // Loop 2010BB Payer
             "*PR" .
             "*" . "2" .
@@ -274,7 +356,7 @@ class X125010837I
             "*" .
             "*" .
             "*" . "PI" .
-            "*" . ($encounter_claim ? $claim->payerAltID() : $claim->payerID()) .
+            "*" . (($encounter_claim ?? null) ? $claim->payerAltID() : $claim->payerID()) .
             "~\n";
         if (!$claim->payerID()) {
             $log .= "*** Payer ID is missing for payer '" . $claim->payerName() . "'.\n";
@@ -352,10 +434,13 @@ class X125010837I
             "*" . sprintf("%.2f", $clm_total_charges) . // Zirmed computes and replaces this
             "*" .
             "*";
-        // Service location this need to be bill type from ub form type_of_bill
-        if (strlen($ub04id[7]) >= 3) {
-            $out .= "*" . substr($ub04id[7], 1, 1) . ":" . substr($ub04id[7], 2, 1) . ":" . substr($ub04id[7], 3, 1);
+        // CLM05 service location, from the UB-04 type of bill (box 4)
+        $typeOfBill = $ub04id[7] ?? '';
+        $facilityCode = self::claimFacilityCode(is_string($typeOfBill) || is_int($typeOfBill) ? (string) $typeOfBill : '');
+        if ($facilityCode === '') {
+            $log .= "*** Error: Missing or invalid Type of Bill (UB-04 box 4)!\n";
         }
+        $out .= "*" . $facilityCode;
 
         $out .= "*" .
             "*" . "A" .
@@ -363,7 +448,7 @@ class X125010837I
             "*" . "Y" .
             "~\n";
         // discharge hour
-        if ($ub04id[29]) {
+        if ($ub04id[29] ?? null) {
             ++$edicount;
             $out .= "DTP" . // Loop 2300
                 "*" . "096" .
@@ -372,10 +457,10 @@ class X125010837I
                 "~\n";
         }
 
-        // Statment Dates
-        // DTP 434 RD8 (Statment from OR to date)
+        // Statement Dates
+        // DTP 434 RD8 (Statement from OR to date)
 
-        if ($ub04id[13]) {
+        if ($ub04id[13] ?? null) {
             ++$edicount;
 
             $tmp = self::x12Date($ub04id[13]);
@@ -384,14 +469,14 @@ class X125010837I
                 "*434" . "*" . "RD8" . "*" . $tmp . '-' . $tmp1 . "~\n";
         }
 
-        if ($ub04id[13]) {
+        if ($ub04id[13] ?? null) {
             ++$edicount;
             $tmp = self::x12Date($ub04id[25]);
             $out .= "DTP" . // Loop 2300
                 "*435" . "*" . "DT" . "*" . $tmp . $ub04id[26] . "~\n";
         }
 
-        if (strlen(trim($ub04id[13])) == 0) {
+        if (strlen(trim($ub04id[13] ?? '')) == 0) {
             $log .= "*** Error: No Admission Date Entered!\n";
         }
 
@@ -401,10 +486,10 @@ class X125010837I
         // Institutional Claim Code
         // CL1 (Admission Type Code) (Admission Source Code) (Patient Status Code)
 
-        if ($ub04id[27] != "014X") { // Type of bill
+        if (($ub04id[27] ?? null) != "014X") { // Type of bill
             ++$edicount;
             $out .= "CL1" . // Loop 2300
-                "*" . $ub04id[27] . "*" . $ub04id[28] . "*" . $ub04id[30] . "~\n";
+                "*" . ($ub04id[27] ?? '') . "*" . ($ub04id[28] ?? '') . "*" . ($ub04id[30] ?? '') . "~\n";
         }
 
         // Segment PWK (Claim Supplemental Information) omitted.
@@ -486,11 +571,7 @@ class X125010837I
                 $out .= "HI"; // Health Diagnosis Codes
             }
             $out .= "*" . $diag_type_code . ":" . $diag;
-            if ($claim->diagtype == "ICD9") {
-                $diag_type_code = 'BF';
-            } else {
-                $diag_type_code = 'ABF';
-            }
+            $diag_type_code = $claim->diagtype == "ICD9" ? 'BF' : 'ABF';
 
             ++$tmp;
         }
@@ -500,7 +581,7 @@ class X125010837I
 
         // Segment HI*BI (Occurrence Span Information).
         // HI BI (Occurrence Span Code 1) RD8 (Occurrence Span Code Associated Date)
-        if ($ub04id[52]) {
+        if ($ub04id[52] ?? null) {
             $max_per_seg = 4;
             $diag_type_code = 'BI';
             $tmp = 0;
@@ -531,7 +612,7 @@ class X125010837I
         // Segment HI*BH (Occurrence Information).
         // HI BH (Occurrence Code 1) D8 (Occurrence Code Associated Date)
 
-        if ($ub04id[44]) {
+        if ($ub04id[44] ?? null) {
             $max_per_seg = 8;
             $diag_type_code = 'BH';
             $tmp = 0;
@@ -562,7 +643,7 @@ class X125010837I
         // Segment HI*BE (Value Information).
         // HI BE (Value Code 1) *.* (Value Code Amount)
 
-        if ($ub04id[74]) {
+        if ($ub04id[74] ?? null) {
             $max_per_seg = 12;
             $diag_type_code = 'BE';
             $os = 74;
@@ -592,7 +673,7 @@ class X125010837I
         // Segment HI*BG (Condition Information).
         // HI BG (Condition Code 1)
 
-        if ($ub04id[31]) {
+        if ($ub04id[31] ?? null) {
             $max_per_seg = 11;
             $diag_type_code = 'BG';
             $os = 31;
@@ -623,7 +704,7 @@ class X125010837I
         // Segment HI*TC (Treatment Code Information).
         // HI TC (Treatment Code 1)
         /* 63a. TREATMENT AUTHORIZATION CODES - PRIMARY PLAN */
-        if ($ub04id[319]) {
+        if ($ub04id[319] ?? null) {
             $max_per_seg = 3;
             $diag_type_code = 'TC';
             $tmp = 0;
@@ -641,17 +722,13 @@ class X125010837I
                     $out .= "*" . $diag_type_code . ":" . $ub04id[319];
                     $diag_type_code = 'TC';
                 }
-                if ($i = 1) {
-                    if ($ub04id[322]) {
-                        $out .= "*" . $diag_type_code . ":" . $ub04id[322];
-                        $diag_type_code = 'TC';
-                    }
+                if ($i === 1 && $ub04id[322]) {
+                    $out .= "*" . $diag_type_code . ":" . $ub04id[322];
+                    $diag_type_code = 'TC';
                 }
-                if ($i = 2) {
-                    if ($ub04id[325]) {
-                        $out .= "*" . $diag_type_code . ":" . $ub04id[325];
-                        $diag_type_code = 'TC';
-                    }
+                if ($i === 2 && $ub04id[325]) {
+                    $out .= "*" . $diag_type_code . ":" . $ub04id[325];
+                    $diag_type_code = 'TC';
                 }
 
                 ++$tmp;
@@ -665,16 +742,15 @@ class X125010837I
         // Segment HCP (Claim Pricing/Repricing Information) omitted.
 
         // This needs to allow Attending Physician 2310A, Operating Physician Name 2310B, Other Operating Physician Name 2310C
-        // and Rendering Provider Name (Rendering Provider Name is futher down)
+        // and Rendering Provider Name (Rendering Provider Name is further down)
 
-        if ($ub04id[388]) {
+        if ($ub04id[388] ?? null) {
             ++$edicount;
             // Loop 2310A Attending Physician
             $out .= "NM1" . "*71" . "*1" . "*" . $ub04id[388] . "*" . $ub04id[389] . "*" . "*";
-            if ($ub04id[379]) { // NPI
-                $out .= "*" . "XX" . "*" . $ub04id[379];
-            } else {
-                $out .= "*" . "*";
+            $attendingId = self::physicianIdentifier('XX', $ub04id[379] ?? null);
+            $out .= $attendingId;
+            if ($attendingId === '**') {
                 $log .= "*** Attending Physician has no NPI.\n";
             }
             $out .= "~\n";
@@ -688,15 +764,14 @@ class X125010837I
 
         // 2310B
 
-        if ($ub04id[400]) {
+        if ($ub04id[400] ?? null) {
             ++$edicount;
 
             $out .= "NM1" . // Loop 2310B operating Physician
                 "*72" . "*1" . "*" . $ub04id[400] . "*" . $ub04id[400] . "*" . "*";
-            if ($ub04id[390]) {
-                $out .= "*" . "XX" . "*" . $ub04id[390];
-            } else {
-                $out .= "*" . "*";
+            $operatingId = self::physicianIdentifier('XX', $ub04id[390] ?? null);
+            $out .= $operatingId;
+            if ($operatingId === '**') {
                 $log .= "*** Operating Physician has no NPI qualifier.\n";
             }
             $out .= "~\n";
@@ -710,15 +785,17 @@ class X125010837I
 
         // 2310C
 
-        if ($ub04id[413]) {
+        if ($ub04id[413] ?? null) {
             ++$edicount;
 
             $out .= "NM1" . // Loop 2310C other operating Physician
                 "*73" . "*1" . "*" . $ub04id[413] . "*" . $ub04id[414] . "*" . "*";
-            if ($ub04id[405]) {
-                $out .= "*" . $ub04id[405] . "*" . $ub04id[406];
-            } else {
-                $out .= "*" . "*";
+            $otherId = self::physicianIdentifier(
+                self::physicianQualifier($ub04id[405] ?? null),
+                $ub04id[406] ?? null
+            );
+            $out .= $otherId;
+            if ($otherId === '**') {
                 $log .= "*** Other Operating Physician has no NPI.\n";
             }
             $out .= "~\n";
@@ -729,15 +806,17 @@ class X125010837I
                     "*" . $ub04id[407] . "*" . $ub04id[408] . "~\n";
             }
         }
-        if ($ub04id[427]) {
+        if ($ub04id[427] ?? null) {
             ++$edicount;
 
             $out .= "NM1" . // Loop 2310C other operating Physician
                 "*73" . "*1" . "*" . $ub04id[427] . "*" . $ub04id[428] . "*" . "*";
-            if ($ub04id[420]) {
-                $out .= "*" . $ub04id[419] . "*" . $ub04id[420];
-            } else {
-                $out .= "*" . "*";
+            $secondOtherId = self::physicianIdentifier(
+                self::physicianQualifier($ub04id[419] ?? null),
+                $ub04id[420] ?? null
+            );
+            $out .= $secondOtherId;
+            if ($secondOtherId === '**') {
                 $log .= "*** Other Operating Physician has no NPI.\n";
             }
             $out .= "~\n";
@@ -778,7 +857,7 @@ class X125010837I
 
         // 5010 spec says nothing here if NPI was specified.
         //
-        if (!$claim->providerNPI() && in_array($claim->providerNumberType(), array('0B', '1G', 'G2', 'LU'))) {
+        if (!$claim->providerNPI() && in_array($claim->providerNumberType(), ['0B', '1G', 'G2', 'LU'])) {
             if ($claim->providerNumber()) {
                 ++$edicount;
                 $out .= "REF" . "*" . $claim->providerNumberType() . "*" . $claim->providerNumber() . "~\n";
@@ -793,7 +872,7 @@ class X125010837I
 
             $out .= "NM1" . // Loop 2310E Service Location
                 "*77" . "*2";
-            $facilityName = substr($claim->facilityName(), 0, 60);
+            $facilityName = substr((string) $claim->facilityName(), 0, 60);
             if ($claim->facilityName() || $claim->facilityNPI() || $claim->facilityETIN()) {
                 $out .= "*" . $facilityName;
             }
@@ -878,7 +957,7 @@ class X125010837I
                 "*" . $claim->insuredRelationship($ins) .
                 "*" . $claim->groupNumber($ins) .
                 "*" . (($claim->groupNumber($ins)) ? '' : $claim->groupName($ins)) .
-                "*" . ($claim->insuredTypeCode($ins) ? $claim->insuredTypeCode($ins) : $tmp2) .
+                "*" . ($claim->insuredTypeCode($ins) ?: $tmp2) .
                 "*" .
                 "*" .
                 "*" .
@@ -944,7 +1023,7 @@ class X125010837I
 
             // Segment REF (Other Subscriber Secondary Identification) omitted.
             ++$edicount;
-            $payerName = substr($claim->payerName($ins), 0, 60);
+            $payerName = substr((string) $claim->payerName($ins), 0, 60);
             $out .= "NM1" . // Loop 2330B Payer info for other insco. Page 322/359.
                 "*" . "PR" .
                 "*" . "2" .
@@ -988,19 +1067,15 @@ class X125010837I
         //
 
         for ($tlh = 0; $tlh < $proccount; ++$tlh) {
-            $tmp = $claim->procs[$tlh][code_text];
+            $tmp = $claim->procs[$tlh]['code_text'];
 
-            if ($claim->procs[$tlh][code_type] == 'HCPCS') {
-                $tmpcode = '3';
-            } else {
-                $tmpcode = '1';
-            }
+            $tmpcode = $claim->procs[$tlh]['code_type'] == 'HCPCS' ? '3' : '1';
             $getrevcd = $claim->cptCode($tlh);
             $sql = "SELECT * FROM codes WHERE code_type = ? and code = ? ORDER BY revenue_code DESC";
-            $revcode[$tlh] = sqlQuery($sql, array(
+            $revcode[$tlh] = sqlQuery($sql, [
                 $tmpcode,
                 $getrevcd
-            ));
+            ]);
         }
 
 
@@ -1016,7 +1091,6 @@ class X125010837I
             ++$edicount;
 
             // Revenue code from form
-            //
             $tmp = $ub04id[$os]; //$revcode[$prockey][revenue_code];
             if (empty($tmp)) {
                 $log .= "*** Error: Missing Revenue Code for " . $claim->cptKey($prockey) . "!\n";
@@ -1044,10 +1118,10 @@ class X125010837I
 
             ++$edicount;
 
-            $out .= "DTP" . // Date of Service. Needs to be when service preformed.
+            $out .= "DTP" . // Date of Service. Needs to be when service performed.
                 "*" . "472" . "*" . "D8" . "*" . $ub04id[$dosos] . "~\n"; //$claim->serviceDate()
 
-            $testnote = rtrim($claim->cptNotecodes($prockey));
+            $testnote = rtrim((string) $claim->cptNotecodes($prockey));
             if (!empty($testnote)) {
                 ++$edicount;
                 $out .= "NTE" . // Explain Unusual Circumstances.
@@ -1098,7 +1172,7 @@ class X125010837I
                     "*" . $ndc .
                     "~\n";
 
-                if (!preg_match('/^\d\d\d\d\d-\d\d\d\d-\d\d$/', $ndc, $tmp) && !preg_match('/^\d{11}$/', $ndc)) {
+                if (!preg_match('/^\d\d\d\d\d-\d\d\d\d-\d\d$/', (string) $ndc, $tmp) && !preg_match('/^\d{11}$/', (string) $ndc)) {
                     $log .= "*** NDC code '$ndc' has invalid format!\n";
                 }
 

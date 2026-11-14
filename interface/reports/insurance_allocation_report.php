@@ -6,22 +6,28 @@
  * a visit is counted only once, regardless of how many visits.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2017-2018 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 require_once("../globals.php");
-require_once("../../library/patient.inc");
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 
+if (!AclMain::aclCheckCore('acct', 'rep_a')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for acct/rep_a: Patient Insurance Distribution", xl("Patient Insurance Distribution"));
+}
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 if (!empty($_POST)) {
-    if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-        CsrfUtils::csrfNotVerified();
-    }
+    CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 }
 
 $form_from_date = (!empty($_POST['form_from_date'])) ?  DateToYYYYMMDD($_POST['form_from_date']) : '';
@@ -60,7 +66,7 @@ if (!empty($_POST['form_csvexport'])) {
         <?php $datetimepicker_timepicker = false; ?>
         <?php $datetimepicker_showseconds = false; ?>
         <?php $datetimepicker_formatInput = true; ?>
-        <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+        <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
         <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
         });
     });
@@ -106,7 +112,7 @@ if (!empty($_POST['form_csvexport'])) {
 </div>
 
 <form name='theform' method='post' action='insurance_allocation_report.php' id='theform' onsubmit='return top.restoreSession()'>
-<input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+<input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
 
 <div id="report_parameters">
 <input type='hidden' name='form_refresh' id='form_refresh' value=''/>
@@ -137,7 +143,7 @@ if (!empty($_POST['form_csvexport'])) {
     </div>
 
   </td>
-  <td class='h-100' align='left' valign='middle'>
+  <td class='h-100' valign='middle'>
     <table class='w-100 h-100' style='border-left:1px solid;'>
         <tr>
             <td>
@@ -170,11 +176,11 @@ if (!empty($_POST['form_csvexport'])) {
 <table class='table'>
 
  <thead class='thead-light'>
-  <th align='left'> <?php echo xlt('Primary Insurance'); ?> </th>
-  <th align='right'> <?php echo xlt('Charges'); ?> </th>
-  <th align='right'> <?php echo xlt('Visits'); ?> </th>
-  <th align='right'> <?php echo xlt('Patients'); ?> </th>
-  <th align='right'> <?php echo xlt('Pt %'); ?> </th>
+ <th> <?php echo xlt('Primary Insurance'); ?> </th>
+ <th> <?php echo xlt('Charges'); ?> </th>
+ <th> <?php echo xlt('Visits'); ?> </th>
+ <th> <?php echo xlt('Patients'); ?> </th>
+ <th> <?php echo xlt('Pt %'); ?> </th>
  </thead>
  <tbody>
     <?php
@@ -188,8 +194,8 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_csvexport'])) {
     "AND b.code_type != 'COPAY' AND b.activity > 0 AND b.fee != 0 " .
     "GROUP BY b.pid, b.encounter ORDER BY b.pid, b.encounter";
 
-    $res = sqlStatement($query, array((!empty($form_from_date)) ? $form_from_date : '0000-00-00', $form_to_date));
-    $insarr = array();
+    $res = sqlStatement($query, [(!empty($form_from_date)) ? $form_from_date : '0000-00-00', $form_to_date]);
+    $insarr = [];
     $prev_pid = 0;
     $patcount = 0;
 
@@ -202,15 +208,15 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_csvexport'])) {
         "insurance_data.type = 'primary' AND " .
         "(insurance_data.date <= ? OR insurance_data.date IS NULL) AND " .
         "insurance_companies.id = insurance_data.provider " .
-        "ORDER BY insurance_data.date DESC LIMIT 1", array($patient_id, $encounter_date));
+        "ORDER BY insurance_data.date DESC LIMIT 1", [$patient_id, $encounter_date]);
         $plan = (!empty($irow['name'])) ? $irow['name'] : '-- No Insurance --';
-        $insarr[$plan]['visits'] = $insarr[$plan]['visits'] ?? null;
+        $insarr[$plan]['visits'] ??= 0;
         $insarr[$plan]['visits'] += 1;
-        $insarr[$plan]['charges'] = $insarr[$plan]['charges'] ?? null;
-        $insarr[$plan]['charges'] += sprintf('%0.2f', $row['charges']);
+        $insarr[$plan]['charges'] ??= 0;
+        $insarr[$plan]['charges'] += (float)$row['charges'];
         if ($patient_id != $prev_pid) {
             ++$patcount;
-            $insarr[$plan]['patients'] =  $insarr[$plan]['patients'] ?? null;
+            $insarr[$plan]['patients'] ??= 0;
             $insarr[$plan]['patients'] += 1;
             $prev_pid = $patient_id;
         }
@@ -231,16 +237,16 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_csvexport'])) {
       <td>
             <?php echo text($key); ?>
   </td>
-  <td align='right'>
+  <td>
             <?php echo text(oeFormatMoney($val['charges'])); ?>
   </td>
-  <td align='right'>
+  <td>
             <?php echo text($val['visits']); ?>
   </td>
-  <td align='right'>
+  <td>
             <?php echo text($val['patients']); ?>
   </td>
-  <td align='right'>
+  <td>
             <?php printf("%.1f", $val['patients'] * 100 / $patcount) ?>
   </td>
  </tr>

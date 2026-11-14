@@ -3,177 +3,259 @@
 /**
  * HttpRestRequest represents the current OpenEMR api request
  * @package openemr
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Stephen Nielson <stephen@nielson.org>
+ * @author    Stephen Nielson <snielson@discoverandchange.com>
  * @copyright Copyright (c) 2021 Stephen Nielson <stephen@nielson.org>
+ * @copyright Copyright (c) 2024 Care Management Solutions, Inc. <stephen.waite@cmsvt.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Common\Http;
 
-use OpenEMR\Common\Logging\SystemLogger;
-use OpenEMR\Common\System\System;
+use Http\Message\Encoding\GzipDecodeStream;
+use InvalidArgumentException;
+use OpenEMR\Common\Auth\OpenIDConnect\Entities\ResourceScopeEntityList;
+use OpenEMR\Common\Auth\OpenIDConnect\Entities\ScopeEntity;
+use OpenEMR\Common\Auth\OpenIDConnect\Validators\ScopeValidatorFactory;
 use OpenEMR\Common\Uuid\UuidRegistry;
+use Psr\Http\Message\StreamInterface;
+use Psr\Http\Message\UriInterface;
+use Stringable;
+use Symfony\Component\HttpFoundation\FileBag;
+use Symfony\Component\HttpFoundation\InputBag;
+use Symfony\Component\HttpFoundation\Request;
 
-class HttpRestRequest
+class HttpRestRequest extends Request implements Stringable
 {
-
-    /**
-     * @var \RestConfig
-     */
-    private $restConfig;
-
     /**
      * The Resource that is being requested in this http rest call.
-     * @var string
+     * @var string|null
      */
-    private $resource;
+    private ?string $resource = null;
 
     /**
      * The FHIR operation that this request represents.  FHIR operations are prefixed with a $ ie $export
-     * @var string
+     * @var string|null
      */
-    private $operation;
+    private ?string $operation = null;
 
     /**
      * @var array
      */
-    private $requestUser;
+    private array $requestUser;
 
     /**
      * The binary string of the request user uuid
-     * @var string
+     * @var string|null
      */
-    private $requestUserUUID;
+    private ?string $requestUserUUID = null;
 
     /**
-     * @var string
+     * @var string|null
      */
-    private $requestUserUUIDString;
+    private ?string $requestUserUUIDString = null;
 
     /**
      * @var 'patient'|'users'
      */
-    private $requestUserRole;
+    private string $requestUserRole;
 
     /**
-     * @var array
+     * @var string|null The uuid of the patient in the current EHR context.  Could be logged in patient,
+     * or patient that is in the EHR context session or was selected with a launch/patient context scope
      */
-    private $accessTokenScopes;
+    private ?string $patientUUIDString = null;
 
     /**
-     * @var string
+     * @var ResourceScopeEntityList[] hashmap of string => ResourceScopeEntityList where the string is the scope lookup key
      */
-    private $requestSite;
+    private array $accessTokenScopes;
 
     /**
-     * @var string
+     * @var array hashmap of resource => scopeContext where scopeContext is patient,user, or system
      */
-    private $clientId;
+    private array $resourceScopeContexts;
 
-    /**
-     * @var string
+    /*
+     * @var bool True if the current request is a patient context request, false if its not.
      */
-    private $accessTokenId;
-
-    /**
-     * @var boolean
-     */
-    private $isLocalApi;
+    private bool $patientRequest;
 
     /**
      * @var string
      */
-    private $requestMethod;
+    private string $requestSite = "default"; // default site
+
+    /**
+     * @var string|null
+     */
+    private ?string $clientId = null;
+
+    /** The address book entry the request's client is limited to (ClientEntity::getAddressBookUuid()), or null. */
+    private ?string $clientAddressBookUuid = null;
+
+    /**
+     * @var string
+     */
+    private string $accessTokenId;
+
+    /**
+     * @var bool
+     */
+    private bool $isLocalApi = false;
 
     /**
      * The kind of REST api request this object represents
-     * @var string
+     * @var string|null
      */
-    private $apiType;
-
-    /**
-     * @var string
-     */
-    private $requestPath;
+    private ?string $apiType = null;
 
     /**
      * @var string the URL for the api base full url
      */
-    private $apiBaseFullUrl;
+    private string $apiBaseFullUrl;
 
     /**
-     * @var string[] The request headers
+     * @var ScopeEntity The required endpoint scope for this request
      */
-    private $headers;
+    protected ScopeEntity $requiredEndpointScope;
 
-    public function __construct($restConfig, $server)
+    public static function createFromGlobals(): static
     {
-        $this->restConfig = $restConfig;
-        $this->requestSite = $restConfig::$SITE;
+        // Handle the rewrite command transformation before calling parent
+        // TODO: change this logic if we decide to change up our _REWRITE_COMMAND logic.
+        // our current mod_rewrite rules will set the _REWRITE_COMMAND in the query string which is different than
+        // how php will typically handle clean urls where PATH_INFO is set to come after the script name.
+        // If the _REWRITE_COMMAND is set, we will use it to set the PATH_INFO and REQUEST_URI so we can handle the
+        // request properly in Symfony.
+        if (isset($_GET['_REWRITE_COMMAND'])) {
+            $rewritePath = $_GET['_REWRITE_COMMAND'];
 
-        $this->requestMethod = $server["REQUEST_METHOD"];
-        $this->setRequestURI($server['REQUEST_URI'] ?? "");
-        $this->headers = $this->parseHeadersFromServer($server);
+            // Remove the _REWRITE_COMMAND from $_GET so Symfony doesn't see it
+            unset($_GET['_REWRITE_COMMAND']);
+
+            // Set up PATH_INFO for Symfony
+            $_SERVER['PATH_INFO'] = '/' . ltrim((string) $rewritePath, '/');
+
+            // Update REQUEST_URI to reflect the clean path
+            $queryString = http_build_query($_GET);
+            // need to imitate the request the way symfony would parse it.
+            $_SERVER['REQUEST_URI'] = $_SERVER['SCRIPT_NAME'] . $_SERVER['PATH_INFO'] . ($queryString ? '?' . $queryString : '');
+
+            // Update QUERY_STRING to exclude the _REWRITE_COMMAND
+            $_SERVER['QUERY_STRING'] = $queryString;
+
+            // Set PHP_SELF appropriately
+            $_SERVER['PHP_SELF'] = $_SERVER['SCRIPT_NAME'] . $_SERVER['PATH_INFO'];
+        }
+
+        $request = parent::createFromGlobals();
+        $request->setPatientRequest(false); // default to false
+
+        if (!empty($request->headers->has('APICSRFTOKEN'))) {
+            $request->setIsLocalApi(true);
+        }
+        return $request;
+    }
+
+    public function __construct(array $query = [], array $request = [], array $attributes = [], array $cookies = [], array $files = [], array $server = [], $content = null)
+    {
+        $this->patientRequest = false;
+        parent::__construct($query, $request, $attributes, $cookies, $files, $server, $content);
+    }
+
+    /**
+     * Returns the raw request body if this is a POST or PUT request
+     * @return false|null|string|resource
+     */
+    public function getRequestBody(): mixed
+    {
+        return $this->content;
+    }
+
+    public function getRequestBodyJSON()
+    {
+        $contentEncoding = $this->encodings;
+        // let's decode the gzip content if we can
+        if (!empty($contentEncoding) && $contentEncoding[0] === "gzip") {
+            $stream = new GzipDecodeStream($this->getContent(true));
+        } else {
+            $stream = $this->getContent(true);
+        }
+        return json_decode($stream->getContents(), true);
+    }
+
+    public function setRequestMethod($requestMethod): void
+    {
+        $this->method = $requestMethod;
+    }
+
+    /**
+     * @param array<string, mixed> $queryParams
+     */
+    public function setQueryParams(array $queryParams): void
+    {
+        $this->query = new InputBag($queryParams);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function getQueryParams(): array
+    {
+        return $this->query->all();
+    }
+
+    public function getQueryParam(string $key): bool|float|int|null|string
+    {
+        return $this->query->get($key);
     }
 
     /**
      * Return an array of HTTP request headers
-     * @return array|string[]
+     * @return array|string[][]
      */
-    public function getHeaders()
+    public function getHeaders(): array
     {
-        return array_values($this->headers);
+        return $this->headers->all();
     }
 
     /**
-     * Retrieve the value of the passed in request's HTTP header.  Return's null if the value does not exist
+     * Retrieve the value of the passed in request's HTTP header.  Returns an empty array if the header is not found
      * @param $headerName string the name of the header value to retrieve.
-     * @return mixed|string|null
+     * @return string[]
      */
-    public function getHeader($headerName)
+    public function getHeader(string $headerName): array
     {
-        return $this->headers[$headerName] ?? null;
+        return $this->headers->all($headerName);
     }
 
     /**
      * Checks if the current HTTP request has the passed in header
-     * @param $headerName The name of the header to check
+     * @param string $headerName The name of the header to check
      * @return bool true if the header exists, false otherwise.
      */
-    public function hasHeader($headerName)
+    public function hasHeader(string $headerName): bool
     {
-        return !empty($this->headers[$headerName]);
-    }
-
-    /**
-     * @return \RestConfig
-     */
-    public function getRestConfig(): \RestConfig
-    {
-        return $this->restConfig;
+        return $this->headers->has($headerName);
     }
 
     /**
      * Return the Request URI (matches the $_SERVER['REQUEST_URI'])
-     * @return mixed|string
+     * changing the request uri, resets all of the populated methods that derive from the URI as we can't determine
+     * what they are, these have to be manually reset
+     * @param string $requestURI
+     * @deprecated
      */
-    public function getRequestURI()
+    public function setRequestURI(string $requestURI): void
     {
-        return $this->requestURI;
+        $this->resource = null;
+        $this->requestUri = $requestURI;
     }
 
     /**
-     * Return the Request URI (matches the $_SERVER['REQUEST_URI'])
-     * @param mixed|string $requestURI
-     */
-    public function setRequestURI($requestURI): void
-    {
-        $this->requestURI = $requestURI;
-    }
-
-    /**
-     * @return string
+     * @return string|null
      */
     public function getResource(): ?string
     {
@@ -181,7 +263,7 @@ class HttpRestRequest
     }
 
     /**
-     * @param string $resource
+     * @param string|null $resource
      */
     public function setResource(?string $resource): void
     {
@@ -191,7 +273,7 @@ class HttpRestRequest
     /**
      * Returns the operation name for this request if this request represents a FHIR operation.
      * Operations are prefixed with a $
-     * @return string
+     * @return string|null
      */
     public function getOperation(): ?string
     {
@@ -201,9 +283,9 @@ class HttpRestRequest
     /**
      * Sets the operation name for this request if this request represents a FHIR operation.
      * Operations are prefixed with a $
-     * @param string $operation The operation name
+     * @param string|null $operation The operation name
      */
-    public function setOperation(string $operation): void
+    public function setOperation(?string $operation): void
     {
         $this->operation = $operation;
     }
@@ -227,9 +309,10 @@ class HttpRestRequest
     }
 
     /**
+     * @param string|null $userUUIDString
      * @param array $requestUser
      */
-    public function setRequestUser($userUUIDString, array $requestUser): void
+    public function setRequestUser(?string $userUUIDString, array $requestUser): void
     {
         $this->requestUser = $requestUser;
 
@@ -239,30 +322,156 @@ class HttpRestRequest
             $this->requestUserUUID = null;
         } else {
             $this->requestUserUUIDString = $userUUIDString ?? null;
-            $this->requestUserUUID = UuidRegistry::uuidToBytes($userUUIDString) ?? null;
+            $this->requestUserUUID = UuidRegistry::uuidToBytes($userUUIDString);
         }
     }
 
     /**
-     * @return array
+     * Returns an array of strings that represent the access token scopes for this request.
+     * @deprecated Use getAccessTokenScopeEntityList()
+     * @return string[]
      */
     public function getAccessTokenScopes(): array
     {
-        return $this->accessTokenScopes;
+        $scopes = [];
+        foreach ($this->accessTokenScopes as $scopeList) {
+            foreach ($scopeList as $scopeEntity) {
+                $scopes[] = $scopeEntity->getIdentifier();
+            }
+        }
+        return $scopes;
+    }
+
+    /**
+     * Returns an array of ScopeEntity objects that represent the access token scopes for this request.
+     * @return ScopeEntity[]
+     */
+    public function getAccessTokenScopeEntityList(): array
+    {
+        // returns the access token scopes as a list of ResourceScopeEntityList
+        $scopes = [];
+        foreach ($this->accessTokenScopes as $scopeList) {
+            foreach ($scopeList as $scopeEntity) {
+                $scopes[] = $scopeEntity;
+            }
+        }
+        return $scopes;
+    }
+
+    /**
+     * Checks if the request's access token has the given scope identifier.
+     * @param string $scope
+     * @deprecated use requestHasScopeEntity() instead which receives a ScopeEntity object
+     * @return bool true if the request has the scope, false otherwise.
+     */
+    public function requestHasScope(string $scope): bool
+    {
+        // TODO: would prefer to move this into a Permission Decision Point code (PDP)
+        $scopeEntity = ScopeEntity::createFromString($scope);
+        return $this->requestHasScopeEntity($scopeEntity);
+    }
+
+    /**
+     * Checks if the request's access token has the given scope contained within the access token scopes.
+     * @param ScopeEntity $scopeEntity
+     * @return bool
+     */
+    public function requestHasScopeEntity(ScopeEntity $scopeEntity): bool
+    {
+        $scopeKey = $scopeEntity->getScopeLookupKey();
+        if (isset($this->accessTokenScopes[$scopeKey])) {
+            return $this->accessTokenScopes[$scopeKey]->containsScope($scopeEntity);
+        }
+        return false;
+    }
+
+    /**
+     * Like requestHasScopeEntity(), but only an access token scope with no constraints counts.
+     * For endpoints that cannot filter their output by constraint (bulk export), a scope such
+     * as system/Observation.rs?category=laboratory must not authorize every Observation.
+     */
+    public function requestHasUnconstrainedScopeEntity(ScopeEntity $scopeEntity): bool
+    {
+        foreach ($this->getAllContainedScopesForScopeEntity($scopeEntity) as $tokenScope) {
+            if ($tokenScope instanceof ScopeEntity && !$tokenScope->hasConstraints()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public function getAllContainedScopesForScopeEntity(ScopeEntity $scopeEntity): array
+    {
+        // returns all scopes that are contained within the access token scopes for the given scope entity
+        $scopeKey = $scopeEntity->getScopeLookupKey();
+        if (isset($this->accessTokenScopes[$scopeKey])) {
+            return $this->accessTokenScopes[$scopeKey]->getContainedScopes($scopeEntity);
+        }
+        return [];
+    }
+
+    /**
+     * @param ResourceScopeEntityList[] $scopeValidationArray
+     * @return void
+     */
+    public function setAccessTokenScopeValidationArray(array $scopeValidationArray): void
+    {
+        $this->accessTokenScopes = $scopeValidationArray;
+        $this->buildResourceScopeContexts($scopeValidationArray);
+    }
+
+    /**
+     * @param ResourceScopeEntityList[] $scopeValidationArray
+     * @return void
+     */
+    private function buildResourceScopeContexts(array $scopeValidationArray): void
+    {
+        $this->resourceScopeContexts = [];
+        $validContext = ['patient', 'user','system'];
+        foreach ($scopeValidationArray as $resourceScopeList) {
+            foreach ($resourceScopeList as $scopeEntity) {
+                $scopeContext = "patient";
+                $context = $scopeEntity->getContext();
+                $resource = $scopeEntity->getResource();
+                if (empty($context) || empty($resource)) {
+                    continue; // nothing to do here
+                    // skip over any launch parameters, fhiruser, etc.
+                } elseif (!in_array($context, $validContext)) {
+                    continue;
+                }
+                $currentContext = $this->resourceScopeContexts[$resource] ?? $scopeContext;
+                // user scope overwrites user and patient
+                if ($context == "user" && $currentContext != 'system') {
+                    $scopeContext = "user";
+                    // system scope for the resource overwrites everything
+                } elseif ($context == "system") {
+                    $scopeContext = "system";
+                } elseif ($currentContext != "patient") {
+                    // if what we have currently is not a patient context we want to use that value and not overwrite
+                    // it with a patient context
+                    $scopeContext = $currentContext;
+                }
+                $this->resourceScopeContexts[$resource] = $scopeContext;
+            }
+        }
     }
 
     /**
      * @param array $scopes
+     * @deprecated use setAccessTokenScopeValidationArray() instead which receives a ResourceScopeEntityList[] that is built from the ScopeRepository->buildValidationArray
      */
     public function setAccessTokenScopes(array $scopes): void
     {
-        $this->accessTokenScopes = $scopes;
+        // when we remove this function we can drop the dependency on the ScopeValidatorFactory
+        $scopeValidatorFactory = new ScopeValidatorFactory();
+        $this->accessTokenScopes = $scopeValidatorFactory->buildScopeValidatorArray($scopes);
+        $this->buildResourceScopeContexts($this->accessTokenScopes);
     }
 
     /**
      * @return string
      */
-    public function getRequestSite(): ?string
+    public function getRequestSite(): string
     {
         return $this->requestSite;
     }
@@ -272,12 +481,26 @@ class HttpRestRequest
      */
     public function setRequestSite(string $requestSite): void
     {
+        // TODO: @adunsulag should we update the request URI to remove the site from the path?
         $this->requestSite = $requestSite;
     }
 
     /**
-     * @return string
+     * @return string|null
      */
+    public function getClientAddressBookUuid(): ?string
+    {
+        return $this->clientAddressBookUuid;
+    }
+
+    /**
+     * Records the address book entry the calling client is limited to, or null for no limit.
+     */
+    public function setClientAddressBookUuid(?string $uuid): void
+    {
+        $this->clientAddressBookUuid = $uuid;
+    }
+
     public function getClientId(): ?string
     {
         return $this->clientId;
@@ -294,7 +517,7 @@ class HttpRestRequest
     /**
      * @return string
      */
-    public function getAccessTokenId(): ?string
+    public function getAccessTokenId(): string
     {
         return $this->accessTokenId;
     }
@@ -324,9 +547,9 @@ class HttpRestRequest
     }
 
     /**
-     * @return mixed
+     * @return string
      */
-    public function getRequestUserRole()
+    public function getRequestUserRole(): string
     {
         return $this->requestUserRole;
     }
@@ -334,33 +557,56 @@ class HttpRestRequest
     /**
      * @param string $requestUserRole either 'patients' or 'users'
      */
-    public function setRequestUserRole($requestUserRole): void
+    public function setRequestUserRole(string $requestUserRole): void
     {
         if (!in_array($requestUserRole, ['patient', 'users', 'system'])) {
-            throw new \InvalidArgumentException("invalid user role found");
+            throw new InvalidArgumentException("invalid user role found");
         }
         $this->requestUserRole = $requestUserRole;
     }
 
-    public function getRequestUserUUID()
+    public function getRequestUserUUID(): ?string
     {
         return $this->requestUserUUID;
     }
 
-    public function getRequestUserUUIDString()
+    public function getRequestUserUUIDString(): ?string
     {
         return $this->requestUserUUIDString;
     }
 
-    public function getPatientUUIDString()
+    public function getPatientUUIDString(): ?string
     {
-        // we may change how this is set, it will depend on if a 'user' role type can still have
+        // if the logged in account is a patient user this will match with requestUserUUID
+        // If the logged in account is a practitioner user this will be the user selected as part of the launch/patient
+        // EHR context session.
+        // This is used in
         // patient/<resource>.* requests.  IE patient/Patient.read
-        return $this->requestUserUUIDString;
+        return $this->patientUUIDString;
+    }
+
+    public function setPatientUuidString(?string $value): void
+    {
+        $this->patientUUIDString = $value;
+    }
+
+    public function setPatientRequest($isPatientRequest): void
+    {
+        $this->patientRequest = $isPatientRequest;
     }
 
     /**
-     * @return string
+     * Returns the scope context (patient,user,system) that is used for the given resource as parsed from the request scopes
+     * @param $resource string|null The resource to check (IE Patient, AllergyIntolerance, etc).
+     * @return string|null The context or null if the resource does not exist in the scopes.
+     */
+    public function getScopeContextForResource(?string $resource): ?string
+    {
+        return $this->resourceScopeContexts[$resource] ?? null;
+    }
+
+    /**
+     * @return string|null
      */
     public function getApiType(): ?string
     {
@@ -368,32 +614,52 @@ class HttpRestRequest
     }
 
     /**
-     * @param string $api
+     * @param string $apiType
      */
     public function setApiType(string $apiType): void
     {
         if (!in_array($apiType, ['fhir', 'oemr', 'port'])) {
-            throw new \InvalidArgumentException("invalid api type found");
+            throw new InvalidArgumentException("invalid api type found");
         }
         $this->apiType = $apiType;
     }
 
     /**
-     * @return string
+     * @deprecated use getMethod() instead
+     * @return string|null
      */
     public function getRequestMethod(): ?string
     {
-        return $this->requestMethod;
+        return $this->getMethod();
     }
 
 
-    public function isPatientRequest()
+    public function isPatientRequest(): bool
     {
-        return $this->requestUserRole === 'patient';
+        return $this->patientRequest === true;
     }
 
-    public function isFhir()
+    public function isFhirRequest(): bool
     {
+        return str_contains($this->getPathInfo(), "/fhir/");
+    }
+
+    public function isPortalRequest(): bool
+    {
+        return str_contains($this->getPathInfo(), "/portal/");
+    }
+
+    public function isStandardApiRequest(): bool
+    {
+        return str_contains($this->getPathInfo(), "/api/");
+    }
+
+    public function isFhir(): bool
+    {
+        if (!isset($this->apiType) && $this->isFhirRequest()) {
+            // if we don't have an api type set, then we assume its a fhir request
+            $this->setApiType('fhir');
+        }
         return $this->getApiType() === 'fhir';
     }
 
@@ -401,19 +667,47 @@ class HttpRestRequest
      * If this is a patient context request for write/modify of patient context resources
      * @return bool
      */
-    public function isPatientWriteRequest()
+    public function isPatientWriteRequest(): bool
     {
         return $this->isFhir() && $this->isPatientRequest() && $this->getRequestMethod() != 'GET';
     }
 
-    public function setRequestPath(string $requestPath)
+    public function isFhirSearchRequest(): bool
     {
-        $this->requestPath = $requestPath;
+        if ($this->isFhir() && $this->getRequestMethod() == "POST") {
+            return str_ends_with((string) $this->getRequestPath(), '_search') !== false;
+        }
+        return false;
+    }
+
+    public function setRequestPath(string $requestPath): void
+    {
+        // TODO: @adunsulag is there a better way to do this?
+        $this->pathInfo = $requestPath;
+        $this->server->set('PATH_INFO', $requestPath);
+    }
+
+    public function getRequestPathWithoutSite(): ?string
+    {
+        // This will return the request path without the site prefix
+        $pathInfo = $this->getPathInfo();
+        if (empty($pathInfo)) {
+            return null; // no path info available
+        }
+        if (empty($this->requestSite)) {
+            return $pathInfo; // no site prefix set, return full path
+        }
+
+        $endOfPath = strpos($pathInfo, '/', 1);
+        if ($endOfPath === false) {
+            return $pathInfo; // no site prefix found
+        }
+        return substr($pathInfo, $endOfPath);
     }
 
     public function getRequestPath(): ?string
     {
-        return $this->requestPath;
+        return $this->getPathInfo();
     }
 
     /**
@@ -434,28 +728,185 @@ class HttpRestRequest
         $this->apiBaseFullUrl = $apiBaseFullUrl;
     }
 
-    /**
-     * Given an array of server variables (typically the $_SERVER superglobal) parse out all of the HTTP_X headers
-     * and convert them into a hashmap of header -> header
-     * @param $server array of server variables typically the $_SERVER superglobal
-     * @return array hashmap of header -> header
-     */
-    private function parseHeadersFromServer($server)
+
+    public function withProtocolVersion($version): self
     {
-        $headers = array();
-        foreach ($server as $key => $value) {
-            $prefix = substr($key, 0, 5);
+        $clonedRequest = clone $this;
+        $clonedRequest->server->set("SERVER_PROTOCOL", 'HTTP/' . $version);
+        return $clonedRequest;
+    }
 
-            if ($prefix != 'HTTP_') {
-                continue;
-            }
+    public function getHeaderLine($name): string
+    {
+        return implode(",", $this->getHeader($name));
+    }
 
-            $serverHeader = strtolower(substr($key, 5));
-            $uppercasedServerHeader = ucwords(str_replace('_', ' ', $serverHeader));
+    public function withHeader($name, $value): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->headers->set($name, $value);
+        return $clonedRequest;
+    }
 
-            $header = str_replace(' ', '-', $uppercasedServerHeader);
-            $headers[$header] = $value;
+    public function withAddedHeader($name, $value): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->headers->set($name, $value);
+        return $clonedRequest;
+    }
+
+    public function withoutHeader($name): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->headers->remove($name);
+        return $clonedRequest;
+    }
+
+    /**
+     * @return false|resource|string|null
+     */
+    public function getBody(): mixed
+    {
+        return $this->getContent();
+    }
+
+    public function withBody(StreamInterface $body): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->content = $body;
+        return $clonedRequest;
+    }
+
+    public function withMethod($method): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->method = $method;
+        return $clonedRequest;
+    }
+
+    public function getUri(): string
+    {
+        return $this->requestUri;
+    }
+
+    public function withUri(UriInterface $uri, $preserveHost = false): self
+    {
+        $clonedRequest = clone $this;
+        if (!$preserveHost) {
+            $clonedRequest->headers->set('HOST', $uri->getHost());
         }
-        return $headers;
+        $clonedRequest->server->set('REQUEST_URI', $uri->getPath() . '?' . $uri->getQuery());
+        $clonedRequest->prepareRequestUri();
+        $clonedRequest->resource = null;
+        return $clonedRequest;
+    }
+
+    public function getServerParams(): array
+    {
+        return $this->server->all();
+    }
+
+    public function getCookieParams(): array
+    {
+        return $this->cookies->all();
+    }
+
+    /**
+     * @param array<string, mixed> $cookies
+     */
+    public function withCookieParams(array $cookies): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->cookies = new InputBag($cookies);
+        return $clonedRequest;
+    }
+
+    /**
+     * @param array<string, mixed> $query
+     */
+    public function withQueryParams(array $query): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->query = new InputBag($query);
+        return $clonedRequest;
+    }
+
+    public function getUploadedFiles(): array
+    {
+        return $this->files->all();
+    }
+
+    public function withUploadedFiles(array $uploadedFiles): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->files = new FileBag($uploadedFiles);
+        return $clonedRequest;
+    }
+
+    public function getParsedBody(): array
+    {
+        return $this->getPayload()->all();
+    }
+
+    /**
+     * @param array<string, mixed>|null $data
+     */
+    public function withParsedBody($data): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->request = new InputBag($data ?? []);
+        return $clonedRequest;
+    }
+
+    public function getAttributes(): array
+    {
+        return $this->attributes->all();
+    }
+
+    public function getAttribute($name, $default = null): mixed
+    {
+        return $this->attributes->get($name, $default);
+    }
+
+    public function withAttribute($name, $value): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->attributes->set($name, $value);
+        return $clonedRequest;
+    }
+
+    public function withoutAttribute($name): self
+    {
+        $clonedRequest = clone $this;
+        $clonedRequest->attributes->remove($name);
+        return $clonedRequest;
+    }
+
+    /**
+     * @param ScopeEntity $endpointScope Sets the required endpoint scope necessary for the current request to be authorized
+     * @return void
+     */
+    public function setRequestRequiredScope(ScopeEntity $endpointScope): void
+    {
+        $this->requiredEndpointScope = $endpointScope;
+    }
+
+    /**
+     * Returns the required endpoint scope necessary for the current request to be authorized.  This can be useful
+     * to do additional access checks based on the scope required for the request.
+     * @return ScopeEntity The required endpoint scope necessary for the current request to be authorized
+     */
+    /**
+     * Whether the scope check recorded the scope this request needed. It is recorded for every
+     * request authorized by an access token; requests the scope check skips (the in-EHR local
+     * API, and routes marked skipAuthorization) have none.
+     */
+    public function hasRequestRequiredScope(): bool
+    {
+        return isset($this->requiredEndpointScope);
+    }
+
+    public function getRequestRequiredScope(): ScopeEntity {
+        return $this->requiredEndpointScope;
     }
 }

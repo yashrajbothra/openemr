@@ -4,7 +4,7 @@
  * Work/School Note Form view.php
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Nikolai Vitsyn
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2004-2005 Nikolai Vitsyn
@@ -15,28 +15,36 @@
 
 
 require_once(__DIR__ . "/../../globals.php");
-require_once("$srcdir/api.inc");
 
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Forms\EncounterFormAccess;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$srcdir = OEGlobalsBag::getInstance()->getSrcDir();
+$rootdir = OEGlobalsBag::getInstance()->getString('rootdir');
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 
 formHeader("Form: note");
 $returnurl = 'encounter_top.php';
-$provider_results = sqlQuery("select fname, lname from users where username=?", array($_SESSION["authUser"]));
+$provider_results = sqlQuery("select fname, lname from users where username=?", [$session->get('authUser')]);
 
 /* name of this form */
 $form_name = "note";
 
+$formIdInput = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+$formId = is_int($formIdInput) && $formIdInput >= 0 ? $formIdInput : 0;
+EncounterFormAccess::assertFormBelongsToSessionPatient($formId, $form_name);
+
 // get the record from the database
-if ($_GET['id'] != "") {
-    $obj = formFetch("form_" . $form_name, $_GET["id"]);
+$obj = [];
+if ($formId > 0) {
+    $obj = formFetch("form_" . $form_name, $formId);
 }
 
-/* remove the time-of-day from the date fields */
-if ($obj['date_of_signature'] != "") {
-    $dateparts = explode(" ", $obj['date_of_signature']);
-    $obj['date_of_signature'] = $dateparts[0];
-}
 ?>
 <html><head>
 
@@ -44,10 +52,20 @@ if ($obj['date_of_signature'] != "") {
 
 <script>
 // required for textbox date verification
-var mypcc = <?php echo js_escape($GLOBALS['phone_country_code']); ?>;
+var mypcc = <?php echo OEGlobalsBag::getInstance()->getInt('phone_country_code'); ?>;
+
+$(function () {
+            $('.datepicker').datetimepicker({
+                <?php $datetimepicker_timepicker = false; ?>
+                <?php $datetimepicker_showseconds = false; ?>
+                <?php $datetimepicker_formatInput = true; ?>
+                <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+                <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
+            });
+        });
 
 function PrintForm() {
-    newwin = window.open(<?php echo js_escape($rootdir . "/forms/" . $form_name . "/print.php?id=" . urlencode($_GET["id"])); ?>,"mywin");
+    newwin = window.open(<?php echo js_escape($rootdir . "/forms/" . $form_name . "/print.php?id=" . urlencode((string) $formId)); ?>,"mywin");
 }
 
 </script>
@@ -55,8 +73,8 @@ function PrintForm() {
 </head>
 <body class="body_top">
 
-<form method=post action="<?php echo $rootdir . "/forms/" . $form_name . "/save.php?mode=update&id=" . attr_url($_GET["id"]);?>" name="my_form" id="my_form">
-<input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+<form method=post action="<?php echo $rootdir . "/forms/" . $form_name . "/save.php?mode=update&id=" . attr_url((string) $formId);?>" name="my_form" id="my_form">
+<input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
 
 <span class="title"><?php echo xlt('Work/School Note'); ?></span><br /><br />
 
@@ -86,8 +104,8 @@ function PrintForm() {
 </td><td>
 <span class="text"><?php echo xlt('Date'); ?></span>
    <input type='text' size='10' class='datepicker' name='date_of_signature' id='date_of_signature'
-    value='<?php echo attr($obj['date_of_signature']); ?>'
-    title='<?php echo xla('yyyy-mm-dd'); ?>' />
+    value='<?php echo attr(oeFormatShortDate($obj['date_of_signature'])); ?>'
+    title='<?php echo xla('Date of Signature'); ?>' />
 </td></tr>
 </table>
 
@@ -116,14 +134,6 @@ $(function () {
     $("input").keydown(function() { $(".printform").attr("disabled","disabled"); });
     $("select").change(function() { $(".printform").attr("disabled","disabled"); });
     $("textarea").keydown(function() { $(".printform").attr("disabled","disabled"); });
-
-    $('.datepicker').datetimepicker({
-        <?php $datetimepicker_timepicker = false; ?>
-        <?php $datetimepicker_showseconds = false; ?>
-        <?php $datetimepicker_formatInput = false; ?>
-        <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
-        <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
-    });
 });
 
 </script>

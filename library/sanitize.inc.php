@@ -14,30 +14,42 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\Core\Sanitize\IsAcceptedFileFilterEvent;
 
-// Function to collect ip address(es)
-function collectIpAddresses()
+/**
+ * Function to collect ip address(es)
+ *
+ * @return array{
+ *   ip_string: string,
+ *   ip: string,
+ *   forward_ip: string,
+ * }
+ */
+function collectIpAddresses(): array
 {
-    $mainIp = $_SERVER['REMOTE_ADDR'];
+    /** @var string */
+    $mainIp = $_SERVER['REMOTE_ADDR'] ?? ''; // Fallback to blank for CLI, etc
     $stringIp = $mainIp;
 
     if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        /** @var string */
         $forwardIp = $_SERVER['HTTP_X_FORWARDED_FOR'];
         $stringIp .= " (" . $forwardIp . ")";
     }
 
-    return array(
+    return [
         'ip_string' => $stringIp,
         'ip' => $mainIp,
         'forward_ip' => $forwardIp ?? ''
-    );
+    ];
 }
 
 // Sanitize a json encoded entry.
 function json_sanitize($json)
 {
-    if (json_decode($json)) {
-        return json_encode(json_decode($json, true));
+    if (json_decode((string) $json)) {
+        return json_encode(json_decode((string) $json, true));
     } else {
         error_log("OPENEMR ERROR: " . errorLogEscape($json) . " is not a valid json ");
         return false;
@@ -47,7 +59,7 @@ function json_sanitize($json)
 // If the label contains any illegal characters, then the script will die.
 function check_file_dir_name($label)
 {
-    if (empty($label) || preg_match('/[^A-Za-z0-9_.-]/', $label)) {
+    if (preg_match('/[^A-Za-z0-9_.-]/', (string) $label)) {
         error_log("ERROR: The following variable contains invalid characters:" . errorLogEscape($label));
         die(xlt("ERROR: The following variable contains invalid characters") . ": " . attr($label));
     } else {
@@ -58,25 +70,25 @@ function check_file_dir_name($label)
 // Convert all illegal characters to _
 function convert_safe_file_dir_name($label)
 {
-    return preg_replace('/[^A-Za-z0-9_.-]/', '_', $label);
+    return preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $label);
 }
 
 // Convert all non A-Z a-z 0-9 characters to _
 function convert_very_strict_label($label)
 {
-    return preg_replace('/[^A-Za-z0-9]/', '_', $label);
+    return preg_replace('/[^A-Za-z0-9]/', '_', (string) $label);
 }
 
 // Check integer
-function check_integer($value)
+function check_integer($value): bool
 {
-    return (empty(preg_match('/[^0-9]/', $value)));
+    return (empty(preg_match('/[^0-9]/', (string) $value)));
 }
 
 //Basename functionality for nonenglish languages (without this, basename function omits nonenglish characters).
-function basename_international($path)
+function basename_international($path): string
 {
-    $parts = preg_split('~[\\\\/]~', $path);
+    $parts = preg_split('~[\\\\/]~', (string) $path);
     foreach ($parts as $key => $value) {
         $encoded = urlencode($value);
         $parts[$key] = $encoded;
@@ -102,25 +114,38 @@ function isWhiteFile($file)
 {
     global $white_list;
     if (is_null($white_list)) {
-        $white_list = array();
+        $white_list = [];
         $lres = sqlStatement("SELECT option_id FROM list_options WHERE list_id = 'files_white_list' AND activity = 1");
         while ($lrow = sqlFetchArray($lres)) {
             $white_list[] = $lrow['option_id'];
         }
+        // allow module writers to modify the white list... this only gets executed the first time this function runs
+        $event = new IsAcceptedFileFilterEvent($file, $white_list);
+        $resultEvent = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher()->dispatch($event, IsAcceptedFileFilterEvent::EVENT_GET_ACCEPTED_LIST);
+        $white_list = $resultEvent->getAcceptedList();
     }
 
     $mimetype  = mime_content_type($file);
+    $isAllowedFile = false;
     if (in_array($mimetype, $white_list)) {
-        return true;
+        $isAllowedFile = true;
     } else {
         $splitMimeType = explode('/', $mimetype);
         $categoryType = $splitMimeType[0];
         if (in_array($categoryType . '/*', $white_list)) {
-            return true;
+            $isAllowedFile = true;
+        } elseif (OEGlobalsBag::getInstance()->hasKernel()) {
+            // we can fire off an event
+            // allow module writers to modify the isWhiteFile on the fly.
+            $event = new IsAcceptedFileFilterEvent($file, $white_list);
+            $event->setAllowedFile(false);
+            $event->setMimeType($mimetype);
+            $resultEvent = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher()->dispatch($event, IsAcceptedFileFilterEvent::EVENT_FILTER_IS_ACCEPTED_FILE);
+            $isAllowedFile = $resultEvent->isAllowedFile();
         }
     }
 
-    return false;
+    return $isAllowedFile;
 }
 
 // Sanitize a value to ensure it is a number.
@@ -140,12 +165,12 @@ function sanitizeNumber($number)
  * Function to get sql statement for empty datetime check.
  *
  * @param  string  $sqlColumn     SQL column/field name
- * @param  boolean  $time         flag used to determine if it's a datetime or a date
- * @param  boolean  $rev          flag used to reverse the condition
+ * @param bool $time flag used to determine if it's a datetime or a date
+ * @param bool $rev flag used to reverse the condition
  * @return string                 SQL statement checking if passed column is empty
  */
 
-function dateEmptySql($sqlColumn, $time = false, $rev = false)
+function dateEmptySql($sqlColumn, $time = false, $rev = false): string
 {
     if (!$rev) {
         if ($time) {
@@ -162,4 +187,32 @@ function dateEmptySql($sqlColumn, $time = false, $rev = false)
     }
 
     return $stat;
+}
+
+/**
+ * Compares a multibyte unicode string identifier in a case insensitive way to see if the two strings
+ * are semantically identical.  Note that NFKC will treat several 'similar' semantically meaning texts as the same and so
+ * should be used for identifiers (things such as proper nouns, etc).
+ * @see https://learn.microsoft.com/en-us/windows/win32/intl/using-unicode-normalization-to-represent-strings - * Note if trying to understand string normalization, Microsoft has a good explanation here
+ * @see https://www.unicode.org/faq/normalization.html#2 for explanation on why we use NFKC
+ * @see https://stackoverflow.com/a/38855868
+ */
+function mb_is_string_equal_ci(string $string1, string $string2): bool
+{
+    if ($string1 == $string2) {
+        return true;
+    }
+
+    // Normalizer::normalize() returns false for malformed input (and the symfony
+    // polyfill declares no return type), so fall back to the raw string.
+    $string1_normalized = Normalizer::normalize($string1, Normalizer::FORM_KC);
+    if (!is_string($string1_normalized)) {
+        $string1_normalized = $string1;
+    }
+    $string2_normalized = Normalizer::normalize($string2, Normalizer::FORM_KC);
+    if (!is_string($string2_normalized)) {
+        $string2_normalized = $string2;
+    }
+    return mb_strtolower($string1_normalized) === mb_strtolower($string2_normalized)
+        || mb_strtoupper($string1_normalized) === mb_strtoupper($string2_normalized);
 }

@@ -17,7 +17,7 @@
  * @author  Kevin Yeh <kevin.y@integralemr.com>
  * @author  Ray Magauran <magauran@MedFetch.com>
  * @author  Tyler Wrenn <tyler@tylerwrenn.com>
- * @link    http://www.open-emr.org
+ * @link    https://www.open-emr.org
  */
 
 /* TODO: Fully redesign the navbar to be better supported with BS4 */
@@ -316,7 +316,7 @@ body {
   box-shadow: 0 6px 12px rgba(0, 0, 0, 0.176);
   color: var(--black);
   display: none;
-  margin-top: 4px;
+  margin-top: 0;
   min-width: 175px;
   padding-bottom: 4px;
   padding-left: 0;
@@ -362,7 +362,7 @@ body {
 
 .menuDisabled {
   background-color: transparent;
-  color: var(--gray) !important;
+  color: var(--gray300) !important;
   pointer-events: none;
 }
 

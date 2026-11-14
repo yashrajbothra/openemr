@@ -1,55 +1,77 @@
 <?php
 
 /**
- * interface/eRx.php Redirect to NewCrop pages.
+ * interface/eRx.php Redirect to Ensora eRx pages.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Eldho Chacko <eldho@zhservices.com>
  * @author    Vinish K <vinish@zhservices.com>
  * @author    Sam Likins <sam.likins@wsi-services.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2011 ZMG LLC <sam@zhservices.com>
  * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Http\CurrentRequest;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Rx\Ensora\ErxLaunchBlock;
+use OpenEMR\Rx\Ensora\ErxLaunchBlockedException;
+use OpenEMR\Rx\Ensora\ErxPage;
+use OpenEMR\Rx\Ensora\ErxXmlBuilder;
+
 require_once(__DIR__ . '/globals.php');
-require_once($GLOBALS['fileroot'] . '/interface/eRxGlobals.php');
-require_once($GLOBALS['fileroot'] . '/interface/eRxStore.php');
-require_once($GLOBALS['fileroot'] . '/interface/eRxXMLBuilder.php');
-require_once($GLOBALS['fileroot'] . '/interface/eRxPage.php');
+require_once(OEGlobalsBag::getInstance()->getProjectDir() . '/interface/eRxGlobals.php');
+require_once(OEGlobalsBag::getInstance()->getProjectDir() . '/interface/eRxStore.php');
+
+if (!AclMain::aclCheckCore('patients', 'rx')) {
+    AccessDeniedHelper::deny('eRx.php: patients/rx not granted');
+}
+
+// The page carries the eRx launch request, credentials included; keep browsers from storing it.
+header('Cache-Control: no-store');
 
 set_time_limit(0);
 
-function array_key_exists_default($key, $search, $default = null)
-{
-    if (array_key_exists($key, $search)) {
-        $value = $search[$key];
-    } else {
-        $value = $default;
-    }
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 
-    return $value;
-}
-
-$eRxPage = new eRxPage(
-    new eRxXMLBuilder(
-        new eRxGlobals($GLOBALS),
-        new eRxStore()
-    )
+$GLOBALS_REF = $GLOBALS;
+$eRxPage = new ErxPage(
+    new ErxXmlBuilder(
+        new eRxGlobals($GLOBALS_REF),
+        new eRxStore(),
+        ServiceContainer::getGuzzle(),
+        OEGlobalsBag::getInstance()->getBoolean('http_verify_ssl', true),
+    ),
+    ServiceContainer::getLogger(),
 );
 
-$eRxPage->setAuthUserId(array_key_exists_default('authUserID', $_SESSION))
-    ->setDestination(array_key_exists_default('page', $_REQUEST))
-    ->setPatientId(array_key_exists_default('pid', $GLOBALS))
-    ->setPrescriptionIds(array_key_exists_default('id', $_REQUEST))
+$authUserId = $session->get('authUserID');
+if (is_string($authUserId) && ctype_digit($authUserId)) {
+    $authUserId = (int) $authUserId;
+}
+if (!is_int($authUserId)) {
+    AccessDeniedHelper::deny('eRx.php: no authenticated user');
+}
+
+$request = CurrentRequest::get();
+$eRxPage->setAuthUserId($authUserId)
+    ->setDestination($request->query->getString('page'))
+    ->setPatientId(OEGlobalsBag::getInstance()->getInt('pid'))
+    ->setPrescriptionIds($request->query->getString('id'))
     ->setPrescriptionCount(60);
 
 ?>
 <html>
     <head>
-        <title><?php echo xlt('New Crop'); ?></title>
+        <title><?php echo xlt('Ensora eRx'); ?></title>
     </head>
     <body>
 <?php
@@ -67,9 +89,20 @@ if (count($missingExtensions) > 0) {
         <ul>
     <?php
 } else {
-    $messages = $eRxPage->buildXML();
+    $blocked = null;
+    $messages = ['demographics' => [], 'empty' => [], 'warning' => []];
+    try {
+        $messages = $eRxPage->buildXML();
+    } catch (ErxLaunchBlockedException $e) {
+        $blocked = $e->reason;
+    }
 
-    if (count($messages['demographics']) > 0) {
+    if ($blocked instanceof ErxLaunchBlock) {
+        echo match ($blocked) {
+            ErxLaunchBlock::UnauthorizedRole => xlt('Unauthorized access to ePrescription'),
+            ErxLaunchBlock::MissingTaxId => xlt('Please select a Primary Business Entity facility with \'Tax ID\' as your facility Tax ID. If you are an individual practitioner, use your tax id. This is used for identifying you in the NewCrop system.'),
+        };
+    } elseif (count($messages['demographics']) > 0) {
         ?>
         <strong><?php echo xlt('Warning'); ?>:</strong>
         <p><?php echo xlt('The following fields have to be filled to send a request.'); ?></p>
@@ -78,7 +111,7 @@ if (count($missingExtensions) > 0) {
                 echo '<li>' . text($message) . '</li>';
             } ?>
         <ul>
-        <p><?php echo xlt('You will be automatically redirected to Demographics. You may make the necessary corrections and navigate to NewCrop again.'); ?></p>
+        <p><?php echo xlt('You will be automatically redirected to Demographics. You may make the necessary corrections and navigate to Ensora again.'); ?></p>
         <?php
 
         ob_end_flush();
@@ -86,7 +119,7 @@ if (count($missingExtensions) > 0) {
         ?>
         <script>
             window.setTimeout(function() {
-                window.location = "<?php echo $GLOBALS['webroot']; ?>/interface/patient_file/summary/demographics_full.php";
+                window.location = "<?php echo OEGlobalsBag::getInstance()->getWebRoot(); ?>/interface/patient_file/summary/demographics_full.php";
             }, <?php echo (count($messages) * 2000) + 3000; ?>);
         </script>
         <?php
@@ -124,7 +157,7 @@ if (count($missingExtensions) > 0) {
 
         if (count($errors) > 0) {
             ?>
-        <strong><?php echo xlt('NewCrop call failed'); ?></strong>
+        <strong><?php echo xlt('Ensora call failed'); ?></strong>
         <ul>
             <?php foreach ($errors as $message) {
                 echo '<li>' . text($message) . '</li>';
@@ -136,9 +169,9 @@ if (count($missingExtensions) > 0) {
 
             ?>
         <script>
-            <?php require($GLOBALS['srcdir'] . '/restoreSession.php'); ?>
+            <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/restoreSession.php'); ?>
         </script>
-        <form name="info" method="post" action="<?php echo $GLOBALS['erx_newcrop_path']; ?>" onsubmit="return top.restoreSession()">
+        <form name="info" method="post" action="<?php echo OEGlobalsBag::getInstance()->getString('erx_newcrop_path'); ?>" onsubmit="return top.restoreSession()">
             <input type="submit" style="display:none">
             <input type="hidden" id="RxInput" name="RxInput" value="<?php echo attr($xml); ?>">
         </form>

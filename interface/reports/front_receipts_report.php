@@ -4,7 +4,7 @@
  * This report lists front office receipts for a given date range.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2006-2015 Rod Roark <rod@sunsetsystems.com>
@@ -13,25 +13,28 @@
  */
 
 require_once("../globals.php");
-require_once("$srcdir/patient.inc");
-require_once "$srcdir/options.inc.php";
+require_once \OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . "/options.inc.php";
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Common\Utils\FormatMoney;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 
+if (!AclMain::aclCheckCore('acct', 'rep_a')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for acct/rep_a: Front Office Receipts", xl("Front Office Receipts"));
+}
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 if (!empty($_POST)) {
-    if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-        CsrfUtils::csrfNotVerified();
-    }
+    CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 }
 
 $from_date = (isset($_POST['form_from_date'])) ? DateToYYYYMMDD($_POST['form_from_date']) : date('Y-m-d');
 $to_date   = (isset($_POST['form_to_date'])) ? DateToYYYYMMDD($_POST['form_to_date']) : date('Y-m-d');
 
-function bucks($amt)
-{
-    return ($amt != 0.00) ? oeFormatMoney($amt) : '';
-}
 ?>
 <html>
 <head>
@@ -41,7 +44,7 @@ function bucks($amt)
     <?php Header::setupHeader('datetime-picker'); ?>
 
     <script>
-        <?php require($GLOBALS['srcdir'] . "/restoreSession.php"); ?>
+        <?php require(OEGlobalsBag::getInstance()->getSrcDir() . "/restoreSession.php"); ?>
 
         $(function () {
             var win = top.printLogSetup ? top : opener.top;
@@ -51,15 +54,19 @@ function bucks($amt)
                 <?php $datetimepicker_timepicker = false; ?>
                 <?php $datetimepicker_showseconds = false; ?>
                 <?php $datetimepicker_formatInput = true; ?>
-                <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+                <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
                 <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
             });
         });
 
         // The OnClick handler for receipt display.
         function show_receipt(pid,timestamp) {
-            dlgopen('../patient_file/front_payment.php?receipt=1&patient=' + encodeURIComponent(pid) +
-                '&time=' + encodeURIComponent(timestamp), '_blank', 550, 400, '', '', {
+            const params = new URLSearchParams({
+                patient: pid,
+                receipt: '1',
+                time: timestamp
+            });
+            dlgopen('../patient_file/front_payment.php?' + params, '_blank', 850, 550, '', '', {
                 onClosed: 'reload'
             });
          }
@@ -103,7 +110,7 @@ function bucks($amt)
 </div>
 
 <form name='theform' method='post' action='front_receipts_report.php' id='theform' onsubmit='return top.restoreSession()'>
-<input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+<input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
 
 <div id="report_parameters">
 
@@ -165,7 +172,7 @@ function bucks($amt)
                <input type='text' class='datepicker form-control' name='form_from_date' id="form_from_date" size='10' value='<?php echo attr(oeFormatShortDate($from_date)); ?>'>
             </td>
             <td class='col-form-label'>
-                <?php xl('To{{Range}}', 'e'); ?>:
+                <?php echo xl('To{{Range}}'); ?>:
             </td>
             <td>
                <input type='text' class='datepicker form-control' name='form_to_date' id="form_to_date" size='10' value='<?php echo attr(oeFormatShortDate($to_date)); ?>'>
@@ -204,7 +211,7 @@ function bucks($amt)
 if (!empty($_POST['form_refresh']) || !empty($_POST['form_orderby'])) {
     ?>
 <div id="report_results">
-<table class='table'>
+<table class='table table-striped'>
 <thead class='thead-light'>
 <th> <?php echo xlt('Time'); ?> </th>
 <th> <?php echo xlt('Patient'); ?> </th>
@@ -220,8 +227,10 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_orderby'])) {
     if (true || $_POST['form_refresh']) {
         $total1 = 0.00;
         $total2 = 0.00;
+        $total1_by_method = [];
+        $total2_by_method = [];
 
-        $inputArray = array($from_date . ' 00:00:00', $to_date . ' 23:59:59');
+        $inputArray = [$from_date . ' 00:00:00', $to_date . ' 23:59:59'];
         $query = "SELECT r.pid, r.dtime, " .
         "SUM(r.amount1) AS amount1, " .
         "SUM(r.amount2) AS amount2, " .
@@ -251,12 +260,12 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_orderby'])) {
 
         while ($row = sqlFetchArray($res)) {
             // Make the timestamp URL-friendly.
-            $timestamp = preg_replace('/[^0-9]/', '', $row['dtime']);
+            $timestamp = preg_replace('/[^0-9]/', '', (string) $row['dtime']);
             ?>
    <tr>
     <td nowrap>
      <a href="javascript:show_receipt(<?php echo attr_js($row['pid']); ?>, <?php echo attr_js($timestamp); ?>)">
-            <?php echo text(oeFormatShortDate(substr($row['dtime'], 0, 10))) . text(substr($row['dtime'], 10, 6)); ?>
+            <?php echo text(oeFormatShortDate(substr((string) $row['dtime'], 0, 10))) . text(substr((string) $row['dtime'], 10, 6)); ?>
    </a>
   </td>
   <td>
@@ -272,18 +281,30 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_orderby'])) {
             <?php echo text($row['source']); ?>
   </td>
   <td align='right'>
-            <?php echo text(bucks($row['amount1'])); ?>
+            <?php echo text(FormatMoney::getBucks($row['amount1'])); ?>
   </td>
   <td align='right'>
-            <?php echo text(bucks($row['amount2'])); ?>
+            <?php echo text(FormatMoney::getBucks($row['amount2'])); ?>
   </td>
   <td align='right'>
-            <?php echo text(bucks($row['amount1'] + $row['amount2'])); ?>
+            <?php echo text(FormatMoney::getBucks($row['amount1'] + $row['amount2'])); ?>
   </td>
  </tr>
             <?php
             $total1 += $row['amount1'];
             $total2 += $row['amount2'];
+            $method = $row['method'];
+            if (!is_string($method)) {
+                continue;
+            }
+            if (empty($total1_by_method[$method])) {
+                $total1_by_method[$method] = 0;
+            }
+            $total1_by_method[$method] += $row['amount1'];
+            if (empty($total2_by_method[$method])) {
+                $total2_by_method[$method] = 0;
+            }
+            $total2_by_method[$method] += $row['amount2'];
         }
         ?>
 
@@ -293,18 +314,36 @@ if (!empty($_POST['form_refresh']) || !empty($_POST['form_orderby'])) {
  </td>
 </tr>
 
+        <?php
+        $method_keys = array_keys(array_unique(array_merge($total1_by_method, $total2_by_method)));
+        foreach ($method_keys as $method_key) { ?>
+            <tr class="report_totals_by_method">
+                <td colspan='5'>
+                    <?php echo xlt('Totals by Method') . ' ' . text($method_key); ?>
+                <td align='right'>
+                        <?php echo text(FormatMoney::getBucks($total1_by_method[$method_key])); ?>
+                </td>
+                <td align='right'>
+                        <?php echo text(FormatMoney::getBucks($total2_by_method[$method_key])); ?>
+                </td>
+                <td align='right'>
+                        <?php echo text(FormatMoney::getBucks($total1_by_method[$method_key] + $total2_by_method[$method_key])); ?>
+                </td>
+            </tr>
+        <?php } ?>
+
 <tr class="report_totals">
  <td colspan='5'>
         <?php echo xlt('Totals'); ?>
  </td>
  <td align='right'>
-        <?php echo text(bucks($total1)); ?>
+        <?php echo text(FormatMoney::getBucks($total1)); ?>
  </td>
  <td align='right'>
-        <?php echo text(bucks($total2)); ?>
+        <?php echo text(FormatMoney::getBucks($total2)); ?>
  </td>
  <td align='right'>
-        <?php echo text(bucks($total1 + $total2)); ?>
+        <?php echo text(FormatMoney::getBucks($total1 + $total2)); ?>
  </td>
 </tr>
 

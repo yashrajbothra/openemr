@@ -319,7 +319,7 @@ class FHIRHumanName extends FHIRElement implements \JsonSerializable
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -327,7 +327,7 @@ class FHIRHumanName extends FHIRElement implements \JsonSerializable
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->use)) {
@@ -364,15 +364,13 @@ class FHIRHumanName extends FHIRElement implements \JsonSerializable
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<HumanName xmlns="http://hl7.org/fhir"></HumanName>');
-        }
+        $sxe ??= new \SimpleXMLElement('<HumanName xmlns="http://hl7.org/fhir"></HumanName>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->use)) {
             $this->use->xmlSerialize(true, $sxe->addChild('use'));

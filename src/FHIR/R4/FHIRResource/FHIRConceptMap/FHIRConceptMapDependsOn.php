@@ -213,7 +213,7 @@ class FHIRConceptMapDependsOn extends FHIRBackboneElement implements \JsonSerial
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return (string)$this->getValue();
     }
@@ -221,7 +221,7 @@ class FHIRConceptMapDependsOn extends FHIRBackboneElement implements \JsonSerial
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->property)) {
@@ -240,15 +240,13 @@ class FHIRConceptMapDependsOn extends FHIRBackboneElement implements \JsonSerial
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ConceptMapDependsOn xmlns="http://hl7.org/fhir"></ConceptMapDependsOn>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ConceptMapDependsOn xmlns="http://hl7.org/fhir"></ConceptMapDependsOn>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->property)) {
             $this->property->xmlSerialize(true, $sxe->addChild('property'));

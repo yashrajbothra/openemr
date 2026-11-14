@@ -11,7 +11,7 @@
  *    $datetimepicker_showseconds = false; (php variable)
  *    $datetimepicker_formatInput = false; (php variable)
  *    $datetimepicker_maxDate = '+1970/01/01' (php variable) `+1970/01/01` means today for tomorrow use `+1970/01/02`
- *    require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); (php command)
+ *    require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); (php command)
  *    can add any additional settings to datetimepicker here; need to prepend first setting with a comma
  *  });
  *  $('.datepicker').datetimepicker({
@@ -19,7 +19,7 @@
  *    $datetimepicker_showseconds = false; (php variable)
  *    $datetimepicker_formatInput = false; (php variable)
  *    $datetimepicker_minDate = '-1970/01/01'; (php variable)
- *    require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); (php command)
+ *    require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); (php command)
  *    can add any additional settings to datetimepicker here; need to prepend first setting with a comma
  *  });
  *
@@ -32,15 +32,26 @@
  *  support internationalization of dates; note this setting does not yet work with the timepicker yet)
  *   -oeFormatShortDate() function for when placing a default formatted date in the field
  *   -DateToYYYYMMDD() function when insert the formatted date into database or codebase works on it
+ * $language_direction - optional; if pre-set by the caller before any output is sent, the session
+ *  will not be reopened mid-output. If not set, it will be read from the active session here.
  *
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2017-2018 Brady Miller <brady.g.miller@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Services\Utils\DateFormatterUtils;
+
+// If the caller already fetched $language_direction before output began,
+// skip the session read to avoid reopening the session after headers are sent.
+if (!isset($language_direction)) {
+    $session = SessionWrapperFactory::getInstance()->getActiveSession();
+    $language_direction = $session->get('language_direction');
+}
 ?>
     i18n:{
         en: {
@@ -54,9 +65,9 @@
             ]
         },
     },
-    <?php if ($_SESSION['language_direction'] == 'rtl') { ?>
+    <?php if (($language_direction ?? '') === 'rtl') { ?>
     /**
-     * In RTL languages a datepicker popup is opened in left and it's cutted by the edge of the window
+     * In RTL languages a datepicker popup is opened on the left and cut by the edge of the window
      * This patch resolves that and moves a datepicker popup to right side.
      */
     onGenerate:function(current_time,$input){
@@ -76,7 +87,7 @@
     yearStart: '1900',
     scrollInput: false,
     scrollMonth: false,
-    rtl: <?php echo ($_SESSION['language_direction'] == 'rtl') ? "true" : "false"; ?>,
+    rtl: <?php echo (($language_direction ?? '') === 'rtl') ? "true" : "false"; ?>,
     <?php if (!empty($datetimepicker_minDate)) { ?>
         minDate: '<?php echo $datetimepicker_minDate; ?>',
     <?php } ?>
@@ -85,20 +96,27 @@
     <?php } ?>
     <?php if ($datetimepicker_timepicker) { ?>
         <?php if ($datetimepicker_showseconds) { ?>
-            <?php if ($datetimepicker_formatInput) { ?>
-                format: '<?php echo DateFormatRead("jquery-datetimepicker"); ?> H:i:s',
+            <?php if ($datetimepicker_formatInput) {
+                $time_format_with_secs = DateFormatterUtils::getTimeFormat(true); ?>
+                format: '<?php echo DateFormatRead("jquery-datetimepicker") . " " . $time_format_with_secs; ?>',
+                formatTime: '<?php echo $time_format_with_secs; ?>',
+                validateOnBlur: false,
             <?php } else { ?>
                 format: 'Y-m-d H:i:s',
+                formatTime: 'H:i:s',
             <?php } ?>
         <?php } else { ?>
-            <?php if ($datetimepicker_formatInput) { ?>
-                format: '<?php echo DateFormatRead("jquery-datetimepicker"); ?> H:i',
+            <?php if ($datetimepicker_formatInput) {
+                $time_format_without_secs =  DateFormatterUtils::getTimeFormat(); ?>
+                format: '<?php echo DateFormatRead("jquery-datetimepicker") . " " . $time_format_without_secs; ?>',
+                formatTime: '<?php echo $time_format_without_secs; ?>',
+                validateOnBlur: false,
             <?php } else { ?>
                 format: 'Y-m-d H:i',
             <?php } ?>
         <?php } ?>
         timepicker:true,
-        step: '30'
+        step: 30
     <?php } else { ?>
         <?php if ($datetimepicker_formatInput) { ?>
             format: '<?php echo DateFormatRead("jquery-datetimepicker"); ?>',

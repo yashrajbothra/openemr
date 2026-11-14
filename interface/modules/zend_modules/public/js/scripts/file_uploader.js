@@ -46,14 +46,14 @@ function AjaxFileUploader(settings) {
 
 	if($(".file-uploader-progress").length <1 && settings.progress_bar) {
 		var progress_div = "<div class='file-uploader-progress' "+
-										 " style='width:"+progress_div_width+"px;height:"+progress_div_height+"px;'>"+
-										 "<div class='file-uploader-progress-div_head'>"+
-										 "<div class='file-uploader-progress-close'></div>"+
-										 "<div class='file-uploader-progress-minimize'></div>"+
-										 "<div class='file-uploader-progress-expand'></div>"+
-										 "</div>"+
-										 "<div class='file-uploader-progress-content'></div>"+
-										 "</div>";
+										" style='width:"+progress_div_width+"px;height:"+progress_div_height+"px;'>"+
+										"<div class='file-uploader-progress-div_head'>"+
+										"<div class='file-uploader-progress-close'></div>"+
+										"<div class='file-uploader-progress-minimize'></div>"+
+										"<div class='file-uploader-progress-expand'></div>"+
+										"</div>"+
+										"<div class='file-uploader-progress-content'></div>"+
+										"</div>";
 		$("body").append(progress_div);
 	}
 	if(settings.batch_upload){
@@ -240,7 +240,15 @@ function sendFileToServer(formData,status,progress_bar,success_function)
 			if(progress_bar) {
 				status.setProgress(100);
 			}
-			eval(success_function+"("+data+")");
+			if (typeof window[success_function] === 'function') {
+				try {
+					window[success_function](typeof data === 'string' ? JSON.parse(data) : data);
+				} catch (error) {
+					console.warn('file_uploader: callback failed:', success_function, error);
+				}
+			} else {
+				console.warn('file_uploader: callback not found on window:', success_function);
+			}
 		}
 	});
 	if(progress_bar) {
@@ -251,16 +259,16 @@ function sendFileToServer(formData,status,progress_bar,success_function)
 var rowCount=0;
 function createStatusbar(obj)
 {
-     rowCount++;
-     var row="odd";
-     if(rowCount %2 ==0) row ="even";
-     this.statusbar = $("<div class='statusbar "+row+"'></div>");
-     this.filename = $("<div class='filename'></div>").appendTo(this.statusbar);
-     this.size = $("<div class='filesize'></div>").appendTo(this.statusbar);
-     this.progressBar = $("<div class='progressBar'><div></div></div>").appendTo(this.statusbar);
-	 var resultTranslated = js_xl('Abort');
-     this.abort = $("<div class='abort'>"+resultTranslated.msg+"</div>").appendTo(this.statusbar);
-     obj.after(this.statusbar);
+    rowCount++;
+    var row="odd";
+    if(rowCount %2 ==0) row ="even";
+    this.statusbar = $("<div class='statusbar "+row+"'></div>");
+    this.filename = $("<div class='filename'></div>").appendTo(this.statusbar);
+    this.size = $("<div class='filesize'></div>").appendTo(this.statusbar);
+    this.progressBar = $("<div class='progressBar'><div></div></div>").appendTo(this.statusbar);
+	var resultTranslated = js_xl('Abort');
+    this.abort = $("<div class='abort'>"+resultTranslated.msg+"</div>").appendTo(this.statusbar);
+    obj.after(this.statusbar);
 
     this.setFileNameSize = function(name,size)
     {

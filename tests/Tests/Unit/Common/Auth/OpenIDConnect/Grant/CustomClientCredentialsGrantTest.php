@@ -3,7 +3,7 @@
 /**
  * CustomClientCredentialsGrantTest.php
  * @package openemr
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Stephen Nielson <stephen@nielson.org>
  * @copyright Copyright (c) 2021 Stephen Nielson <stephen@nielson.org>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -16,6 +16,7 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
 use Lcobucci\JWT\Configuration;
+use Lcobucci\JWT\Signer\Key\InMemory;
 use Lcobucci\JWT\Signer\Key\LocalFileReference;
 use Lcobucci\JWT\Signer\Rsa\Sha384;
 use League\OAuth2\Server\CryptKey;
@@ -27,10 +28,14 @@ use OpenEMR\Common\Auth\OpenIDConnect\Entities\AccessTokenEntity;
 use OpenEMR\Common\Auth\OpenIDConnect\Entities\ClientEntity;
 use OpenEMR\Common\Auth\OpenIDConnect\Grant\CustomClientCredentialsGrant;
 use OpenEMR\Common\Auth\OpenIDConnect\Repositories\AccessTokenRepository;
+use OpenEMR\Common\Auth\OpenIDConnect\Repositories\JWTRepository;
+use OpenEMR\Common\Http\SsrfSafeUrlValidator;
+use OpenEMR\Services\JWTClientAuthenticationService;
 use OpenEMR\Services\UserService;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\ServerRequestInterface;
 use Ramsey\Uuid\Uuid;
+use Symfony\Component\HttpFoundation\Session\SessionInterface;
 
 class CustomClientCredentialsGrantTest extends TestCase
 {
@@ -44,7 +49,7 @@ class CustomClientCredentialsGrantTest extends TestCase
      * client entity (when they choose not to use a jwks_uri)
      * @throws \Exception
      */
-    public function testValidResponseForClientWithRegisteredJwks()
+    public function testValidResponseForClientWithRegisteredJwks(): void
     {
 
         $clientEntity = $this->getClientEntityForTest();
@@ -56,14 +61,15 @@ class CustomClientCredentialsGrantTest extends TestCase
 
 
         $ttl = new \DateInterval('PT300S');
-        $grant = new CustomClientCredentialsGrant(self::AUDIENCE);
+        $clientRepository = $this->getMockClientRepository($clientEntity);
+        $grant = new CustomClientCredentialsGrant($this->createMock(SessionInterface::class), self::AUDIENCE);
         $grant->setUserService($this->getMockUserService());
         $grant->setPrivateKey($this->createMock(CryptKey::class));
-        $grant->setClientRepository($this->getMockClientRepository($clientEntity));
-        $grant->setHttpClient(new Client());
+        $grant->setClientRepository($clientRepository);
         $grant->setAccessTokenRepository($this->getMockAccessTokenRepository($accessToken));
         $grant->setScopeRepository($this->getMockScopeRepository());
-
+        $jwtAuthservice = new JWTClientAuthenticationService(self::AUDIENCE, $clientRepository, $this->getMockJwtRepository());
+        $grant->setJWTAuthenticationService($jwtAuthservice);
         $response = $this->createMock(ResponseTypeInterface::class);
 
         // make sure we assert that our setAccessToken will be called as this is the final step where we know
@@ -84,7 +90,7 @@ class CustomClientCredentialsGrantTest extends TestCase
      * to be retrieved from.
      * @throws \Exception
      */
-    public function testValidResponseForClientWithJwksUri()
+    public function testValidResponseForClientWithJwksUri(): void
     {
         $clientEntity = $this->getClientEntityForTest();
         $jwt = $this->createJWTForKeys($clientEntity->getIdentifier(), self::AUDIENCE);
@@ -106,13 +112,33 @@ class CustomClientCredentialsGrantTest extends TestCase
         $accessToken = new AccessTokenEntity();
 
         $ttl = new \DateInterval('PT300S');
-        $grant = new CustomClientCredentialsGrant(self::AUDIENCE);
+        $clientRepository = $this->getMockClientRepository($clientEntity);
+        $grant = new CustomClientCredentialsGrant($this->createMock(SessionInterface::class), self::AUDIENCE);
         $grant->setUserService($this->getMockUserService());
         $grant->setPrivateKey($this->createMock(CryptKey::class));
-        $grant->setClientRepository($this->getMockClientRepository($clientEntity));
-        $grant->setHttpClient($httpClient);
+        $grant->setClientRepository($clientRepository);
         $grant->setAccessTokenRepository($this->getMockAccessTokenRepository($accessToken));
         $grant->setScopeRepository($this->getMockScopeRepository());
+        $jwtAuthservice = new JWTClientAuthenticationService(self::AUDIENCE, $clientRepository, $this->getMockJwtRepository(), $httpClient);
+        // The read-path outbound-URL validator rejects the mock localhost jwks_uri used in this test.
+        // Inject a no-op validator so the unit test can exercise the JWT flow without needing
+        // a publicly-resolvable URL; the write-path validator (exercised elsewhere) is what
+        // enforces the outbound-URL check against real client registrations.
+        $permissiveValidator = $this->createMock(SsrfSafeUrlValidator::class);
+        $permissiveValidator->method('validate')->willReturn(null);
+        // JWTClientAuthenticationService reads pin data (host/port/ips) from
+        // validateAndPin to decide whether to swap in a pinned Guzzle client
+        // for the JWKS fetch. Empty `ips` keeps the injected mock http client
+        // path — the test asserts the JWT flow, not the pinning transport.
+        $permissiveValidator->method('validateAndPin')->willReturn([
+            'reason' => null,
+            'host' => 'localhost',
+            'port' => 9000,
+            'scheme' => 'https',
+            'ips' => [],
+        ]);
+        $jwtAuthservice->setJwksUriValidator($permissiveValidator);
+        $grant->setJWTAuthenticationService($jwtAuthservice);
 
         $response = $this->createMock(ResponseTypeInterface::class);
 
@@ -134,7 +160,7 @@ class CustomClientCredentialsGrantTest extends TestCase
      * to be retrieved from.
      * @throws \Exception
      */
-    public function testInvalidResponseForClientWithJwksUri()
+    public function testInvalidResponseForClientWithJwksUri(): void
     {
         $clientEntity = $this->getClientEntityForTest();
         $jwt = $this->createJWTForKeys('not_an_issuer', self::AUDIENCE);
@@ -143,19 +169,19 @@ class CustomClientCredentialsGrantTest extends TestCase
         $accessToken = new AccessTokenEntity();
 
         $ttl = new \DateInterval('PT300S');
-        $grant = new CustomClientCredentialsGrant(self::AUDIENCE);
+        $clientRepository = $this->getMockClientRepository($clientEntity);
+        $grant = new CustomClientCredentialsGrant($this->createMock(SessionInterface::class), self::AUDIENCE);
         $grant->setUserService($this->getMockUserService());
         $grant->setPrivateKey($this->createMock(CryptKey::class));
-        $grant->setClientRepository($this->getMockClientRepository($clientEntity));
-        $grant->setHttpClient(new Client());
+        $grant->setClientRepository($clientRepository);
         $grant->setAccessTokenRepository($this->getMockAccessTokenRepository($accessToken));
         $grant->setScopeRepository($this->getMockScopeRepository());
-
+        $grant->setJWTAuthenticationService(new JWTClientAuthenticationService(self::AUDIENCE, $clientRepository, $this->getMockJwtRepository()));
         $response = $this->createMock(ResponseTypeInterface::class);
 
         // if the issuer is invalid than we get a client authentication failed message
         $this->expectException(OAuthServerException::class);
-        $this->expectExceptionMessage('Client authentication failed');
+        $this->expectExceptionMessage('The request is missing a required parameter, includes an invalid parameter value, includes a parameter more than once, or is otherwise malformed.');
 
         $grant->respondToAccessTokenRequest($this->getMockServerRequestForJWT($jwt), $response, $ttl);
     }
@@ -164,14 +190,14 @@ class CustomClientCredentialsGrantTest extends TestCase
      * Tests and makes sure the lobocci library for creating a Jwt works which is what we need in our other tests.
      * @throws \Exception
      */
-    public function testCreateJwtForKeys()
+    public function testCreateJwtForKeys(): void
     {
 
         $configuration = Configuration::forAsymmetricSigner(
         // You may use RSA or ECDSA and all their variations (256, 384, and 512)
             new Sha384(),
-            LocalFileReference::file(__DIR__ . "/../../../../../data/Unit/Common/Auth/Grant/openemr-rsa384-private.key"),
-            LocalFileReference::file(__DIR__ . "/../../../../../data/Unit/Common/Auth/Grant/openemr-rsa384-public.pem")
+            InMemory::file(__DIR__ . "/../../../../../data/Unit/Common/Auth/Grant/openemr-rsa384-private.key"),
+            InMemory::file(__DIR__ . "/../../../../../data/Unit/Common/Auth/Grant/openemr-rsa384-public.pem")
             // You may also override the JOSE encoder/decoder if needed by providing extra arguments here
         );
 
@@ -199,7 +225,7 @@ class CustomClientCredentialsGrantTest extends TestCase
         $this->assertNotEmpty($jwt, "Token failed to create");
     }
 
-    private function getMockScopeRepository()
+    private function getMockScopeRepository(): \PHPUnit\Framework\MockObject\MockObject
     {
         $repo = $this->createMock(ScopeRepositoryInterface::class);
         $repo->method('finalizeScopes')
@@ -207,7 +233,13 @@ class CustomClientCredentialsGrantTest extends TestCase
         return $repo;
     }
 
-    private function getMockServerRequestForJWT($jwt)
+    public function getMockJwtRepository(): \PHPUnit\Framework\MockObject\MockObject
+    {
+        $repo = $this->createMock(JWTRepository::class);
+        return $repo;
+    }
+
+    private function getMockServerRequestForJWT($jwt): \PHPUnit\Framework\MockObject\MockObject
     {
         $request = $this->createMock(ServerRequestInterface::class);
         $request->method('getParsedBody')
@@ -219,15 +251,19 @@ class CustomClientCredentialsGrantTest extends TestCase
         return $request;
     }
 
-    private function getClientEntityForTest()
+    private function getClientEntityForTest(): ClientEntity
     {
         $clientEntity = new ClientEntity();
         $clientEntity->setIdentifier(self::TEST_CLIENT_ID);
         $clientEntity->setIsConfidential(true);
+        $clientEntity->setIsEnabled(true);
+        // a backend-services client is registered for client_credentials; clients without it
+        // are rejected with unauthorized_client (ClientGrantTypeGuardTrait)
+        $clientEntity->setGrantTypes(['client_credentials']);
         return $clientEntity;
     }
 
-    private function getMockAccessTokenRepository(AccessTokenEntity $accessToken)
+    private function getMockAccessTokenRepository(AccessTokenEntity $accessToken): \PHPUnit\Framework\MockObject\MockObject
     {
         $accessTokenRepo = $this->createMock(AccessTokenRepository::class);
         $accessTokenRepo->method('getNewToken')
@@ -235,7 +271,7 @@ class CustomClientCredentialsGrantTest extends TestCase
         return $accessTokenRepo;
     }
 
-    private function getMockUserService()
+    private function getMockUserService(): \PHPUnit\Framework\MockObject\MockObject
     {
         $userService = $this->createMock(UserService::class);
         $userService->method('getSystemUser')
@@ -245,7 +281,7 @@ class CustomClientCredentialsGrantTest extends TestCase
         return $userService;
     }
 
-    private function getMockClientRepository(ClientEntity $clientEntity)
+    private function getMockClientRepository(ClientEntity $clientEntity): \PHPUnit\Framework\MockObject\MockObject
     {
         $clientRepo = $this->createMock(ClientRepositoryInterface::class);
         $clientRepo->method('getClientEntity')
@@ -257,12 +293,12 @@ class CustomClientCredentialsGrantTest extends TestCase
 
     private function loadJSONFile($fileName)
     {
-        $filePath = dirname(__FILE__) . "/../../../../../data/Unit/Common/Auth/Grant/" . $fileName;
+        $filePath = __DIR__ . "/../../../../../data/Unit/Common/Auth/Grant/" . $fileName;
         $jsonData = file_get_contents($filePath);
         return $jsonData;
     }
 
-    private function createJWTForKeys($iss, $aud)
+    private function createJWTForKeys($iss, $aud): string
     {
 
         $configuration = Configuration::forAsymmetricSigner(
@@ -277,6 +313,8 @@ class CustomClientCredentialsGrantTest extends TestCase
         $token = $configuration->builder()
             // Configures the issuer (iss claim)
             ->issuedBy($iss)
+            // Configures the subject (sub claim)
+            ->relatedTo($iss)
             // Configures the audience (aud claim)
             ->permittedFor($aud)
             // Configures the id (jti claim)

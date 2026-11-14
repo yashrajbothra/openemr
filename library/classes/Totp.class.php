@@ -4,50 +4,43 @@
  * Totp class used to generated MultiFactor App Based 2FA
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Anthony Zullo <anthonykzullo@gmail.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2019 Anthony Zullo <anthonykzullo@gmail.com>
  * @copyright Copyright (c) 2019 Brady Miller <brady.g.miller@gmail.com>
- * @license   https://github.com/openemr/openemr/blob/master/LICENSE CNU General Public License 3
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-use OpenEMR\Common\Utils\RandomGenUtils;
-use ParagonIE\MultiFactor\Vendor\GoogleAuth;
+use RobThree\Auth\Algorithm;
+use RobThree\Auth\Providers\Qr\BaconQrCodeProvider;
+use RobThree\Auth\TwoFactorAuth;
 
 /**
  * Class Totp
  */
 class Totp
 {
-
-    /** @var bool|GoogleAuth  */
-    private $_googleAuth = false;
     /** @var bool|string - totp hashed secret */
     private $_secret = false;
     /** @var string - issuer mentioned in the QR App  */
     private $_issuer = "OpenEMR";
-    /** @var  string - user name of user stored in QR App */
-    private $_username;
 
     /**
      * @param bool $secret - user secret or false to generate
-     * @param string $username - username to store in QR App
+     * @param string $_username - username to store in QR App
      */
-    public function __construct($secret = false, $username = '')
+    public function __construct($secret = false, private $_username = '')
     {
-        $this->_username = $username;
-
-        if ($secret) {
+        if (!empty($secret)) {
             $this->_secret = $secret;
         } else {
+            $tfa = new TwoFactorAuth($this->getQrProvider());
             // Shared key (per rfc6238 and rfc4226) should be 20 bytes (160 bits) and encoded in base32, which should
-            //   be 32 characters in base32
-            // Would be nice to use the OpenEMR\Common\Utils\RandomGenUtils\produceRandomBytes() function and then encode to base32,
-            //   but does not appear to be a standard way to encode binary to base32 in php.
-            $this->_secret = RandomGenUtils::produceRandomString(32, "234567ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+            //   be 32 characters in base32 (below line does all this)
+            $this->_secret = $tfa->createSecret(160);
             if (empty($this->_secret)) {
-                error_log('OpenEMR Error : Random String error - exiting');
+                error_log('OpenEMR Error : MFA was unable to create secret - exiting');
                 die();
             }
         }
@@ -55,29 +48,20 @@ class Totp
 
     /**
      * Generates a QR code code
-     * @return bool|string|void
+     * @return bool|string
      */
     public function generateQrCode()
     {
-        if (class_exists('ParagonIE\MultiFactor\Vendor\GoogleAuth')) {
-            // Generates a file with a PNG of the qr code
-            if (!empty($GLOBALS['temporary_files_dir'])) {
-                $tempFilePath = tempnam($GLOBALS['temporary_files_dir'], "oer");
-            } else {
-                $tempFilePath = tempnam(sys_get_temp_dir(), 'oer');
-            }
-            $this->_getGoogleAuth()->makeQRCode(null, $tempFilePath, $this->_username, $this->_issuer);
-
-            // Gets the image file data to return
-            $data = base64_encode(file_get_contents($tempFilePath));
-            $image = sprintf('data:%s;base64,%s', 'image/png', $data);
-
-            // Delete image file before returning
-            unlink($tempFilePath);
-
-            return $image;
+        if (empty($this->_issuer) || empty($this->_username) || empty($this->_secret)) {
+            return false;
         }
-        return false;
+
+        $tfa = new TwoFactorAuth($this->getQrProvider(), $this->_issuer, 6, 30, Algorithm::Sha1);
+        $qr = $tfa->getQRCodeImageAsDataUri($this->_username, $this->_secret);
+        if (empty($qr)) {
+            return false;
+        }
+        return $qr;
     }
 
     /**
@@ -85,12 +69,46 @@ class Totp
      * @param $totp : unencrypted
      * @return bool
      */
-    public function validateCode($totp)
+    public function validateCode($totp): bool
     {
-        if (class_exists('ParagonIE\MultiFactor\Vendor\GoogleAuth') && (!empty($this->_secret))) {
-            return $this->_getGoogleAuth()->validateCode($totp, strtotime("now"));
+        if (empty($totp) || empty($this->_secret)) {
+            return false;
         }
-        return false;
+        $tfa = new TwoFactorAuth($this->getQrProvider());
+        return $tfa->verifyCode($this->_secret, $totp);
+    }
+
+    /**
+     * Validates a TOTP and returns the RFC 6238 time slice
+     * (floor(unix_ts / period)) that matched, or 0 on no match.
+     *
+     * Used by MfaUtils::checkTOTP for A-B-A replay protection: the
+     * caller stores the returned slice alongside the registration and
+     * rejects any subsequent code whose slice is not strictly greater.
+     * RobThree's verifyCode accepts codes for slices T-1, T, T+1 (with
+     * default $discrepancy = 1) — storing the matched slice and
+     * requiring monotonic-forward progression is the RFC 6238-recommended
+     * replay defense.
+     *
+     * @param $totp : unencrypted
+     * @return int matched slice number, or 0 if the code did not verify
+     */
+    public function validateCodeAndGetSlice($totp): int
+    {
+        if (empty($totp) || empty($this->_secret)) {
+            return 0;
+        }
+        $tfa = new TwoFactorAuth($this->getQrProvider());
+        $slice = 0;
+        // Only return the slice when verifyCode itself returns true.
+        // Current RobThree implementation leaves $slice at 0 on
+        // failure, so this is equivalent today — but treating the
+        // return value as the source of truth (and $slice as a
+        // secondary datum) hardens against any future RobThree API
+        // drift where the by-ref parameter might be populated on
+        // paths that don't match.
+        $ok = $tfa->verifyCode($this->_secret, $totp, 1, null, $slice);
+        return $ok ? $slice : 0;
     }
 
     /**
@@ -102,15 +120,8 @@ class Totp
         return $this->_secret;
     }
 
-    /**
-     * Gets the GoogleAuth object related this Totp
-     * @return bool|GoogleAuth
-     */
-    private function _getGoogleAuth()
+    private function getQrProvider(): BaconQrCodeProvider
     {
-        if (!$this->_googleAuth) {
-            $this->_googleAuth = new GoogleAuth($this->getSecret());
-        }
-        return $this->_googleAuth;
+        return new BaconQrCodeProvider(4, '#ffffff', '#000000', 'svg');
     }
 }

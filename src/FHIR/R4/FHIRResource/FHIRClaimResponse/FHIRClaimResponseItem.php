@@ -231,7 +231,7 @@ class FHIRClaimResponseItem extends FHIRBackboneElement implements \JsonSerializ
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -239,7 +239,7 @@ class FHIRClaimResponseItem extends FHIRBackboneElement implements \JsonSerializ
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->itemSequence)) {
@@ -267,15 +267,13 @@ class FHIRClaimResponseItem extends FHIRBackboneElement implements \JsonSerializ
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ClaimResponseItem xmlns="http://hl7.org/fhir"></ClaimResponseItem>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ClaimResponseItem xmlns="http://hl7.org/fhir"></ClaimResponseItem>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->itemSequence)) {
             $this->itemSequence->xmlSerialize(true, $sxe->addChild('itemSequence'));

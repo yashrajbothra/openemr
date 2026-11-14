@@ -126,7 +126,7 @@ class FHIRTestReportAction2 extends FHIRBackboneElement implements \JsonSerializ
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -134,7 +134,7 @@ class FHIRTestReportAction2 extends FHIRBackboneElement implements \JsonSerializ
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->operation)) {
@@ -144,15 +144,13 @@ class FHIRTestReportAction2 extends FHIRBackboneElement implements \JsonSerializ
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<TestReportAction2 xmlns="http://hl7.org/fhir"></TestReportAction2>');
-        }
+        $sxe ??= new \SimpleXMLElement('<TestReportAction2 xmlns="http://hl7.org/fhir"></TestReportAction2>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->operation)) {
             $this->operation->xmlSerialize(true, $sxe->addChild('operation'));

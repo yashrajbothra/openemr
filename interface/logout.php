@@ -4,7 +4,7 @@
  * Logout script.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Tony McCormick <tony@mi-squared.com>
  * @author    Kevin Yeh <kevin.y@integralemr.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
@@ -13,7 +13,7 @@
  */
 
 // Set the GET auth parameter to logout.
-//  This parameter is then captured in the auth.inc script (which is included in globals.php script) and does the following:
+//  This parameter is then captured in the auth.inc.php script (which is included in globals.php script) and does the following:
 //    1. Logs out user
 //    2. Closes the php session
 //    3. Redirects user to the login screen (maintains the site id)

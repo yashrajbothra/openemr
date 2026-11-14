@@ -213,7 +213,7 @@ class FHIRImmunizationEducation extends FHIRBackboneElement implements \JsonSeri
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -221,7 +221,7 @@ class FHIRImmunizationEducation extends FHIRBackboneElement implements \JsonSeri
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->documentType)) {
@@ -240,15 +240,13 @@ class FHIRImmunizationEducation extends FHIRBackboneElement implements \JsonSeri
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ImmunizationEducation xmlns="http://hl7.org/fhir"></ImmunizationEducation>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ImmunizationEducation xmlns="http://hl7.org/fhir"></ImmunizationEducation>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->documentType)) {
             $this->documentType->xmlSerialize(true, $sxe->addChild('documentType'));

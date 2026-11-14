@@ -331,7 +331,7 @@ class FHIRMedicinalProductContraindication extends FHIRDomainResource implements
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -339,7 +339,7 @@ class FHIRMedicinalProductContraindication extends FHIRDomainResource implements
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         $json['resourceType'] = $this->_fhirElementName;
@@ -383,15 +383,13 @@ class FHIRMedicinalProductContraindication extends FHIRDomainResource implements
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<MedicinalProductContraindication xmlns="http://hl7.org/fhir"></MedicinalProductContraindication>');
-        }
+        $sxe ??= new \SimpleXMLElement('<MedicinalProductContraindication xmlns="http://hl7.org/fhir"></MedicinalProductContraindication>');
         parent::xmlSerialize(true, $sxe);
         if (0 < count($this->subject)) {
             foreach ($this->subject as $subject) {

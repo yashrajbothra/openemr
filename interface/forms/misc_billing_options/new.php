@@ -1,87 +1,106 @@
 <?php
 
-/*
+/**
  * This program creates the misc_billing_form
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Terry Hill <terry@lilysystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Stephen Waite <stephen.waite@cmsvt.com>
  * @author    Jerry Padgett <sjpadgett@gmail.com>
  * @author    Ranganath Pathak <pathak@scrs1.org>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (C) 2007 Bo Huynh
  * @copyright Copyright (C) 2016 Terry Hill <terry@lillysystems.com>
  * @copyright Copyright (C) 2017-2019 Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (C) 2017-2021 Stephen Waite <stephen.waite@cmsvt.com>
  * @copyright Copyright (C) 2018 Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2019 Ranganath Pathak <pathak@scrs1.org>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(__DIR__ . "/../../globals.php");
-require_once("$srcdir/options.inc.php");
-require_once("$srcdir/api.inc");
-require_once("date_qualifier_options.php");
-require_once("$srcdir/user.inc");
-require_once("$srcdir/pid.inc");
-require_once("$srcdir/encounter.inc");
+declare(strict_types=1);
 
+require_once(__DIR__ . "/../../globals.php");
+
+use OpenEMR\Billing\MiscBillingOptions;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Http\CurrentRequest;
+use OpenEMR\Common\Session\EncounterSessionUtil;
+use OpenEMR\Common\Session\PatientSessionUtil;
 use OpenEMR\Common\Session\SessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\OeUI\OemrUI;
 
-if (isset($_REQUEST['isBilling'])) {
-    $pid = $_REQUEST['pid'];
-    SessionUtil::setSession('billpid', $pid);
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$srcdir = OEGlobalsBag::getInstance()->getSrcDir();
+$rootdir = OEGlobalsBag::getInstance()->getString('rootdir');
+$pid = PatientSessionUtil::getPid();
+$encounter = EncounterSessionUtil::getEncounter();
 
-    if ($pid != $_SESSION["pid"]) {
+require_once("$srcdir/options.inc.php");
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+$request = CurrentRequest::get();
+$isBilling = $request->query->has('isBilling');
+
+if ($isBilling) {
+    // The billing report opens this for any claim's patient and encounter.
+    // Switching to another patient or encounter needs a CSRF token in the link.
+    $pid = $request->query->getInt('pid');
+    $encounter = $request->query->getInt('enc');
+    PatientSessionUtil::requireCsrfForLinkSwitch($request, $pid, $encounter);
+
+    SessionUtil::setSession('billpid', $pid);
+    if ($pid !== PatientSessionUtil::getPid()) {
         setpid($pid);
     }
 
-    $encounter = $_REQUEST['enc'];
     SessionUtil::setSession('billencounter', $encounter);
-
-    if ($encounter != $_SESSION["encounter"]) {
+    if ($encounter !== EncounterSessionUtil::getEncounter()) {
         setencounter($encounter);
     }
-} elseif (isset($_SESSION['billencounter'])) {
+} elseif ($session->has('billencounter')) {
     SessionUtil::unsetSession(['billpid', 'billencounter']);
 }
+
+$MBO = new MiscBillingOptions();
 
 if (!$encounter) { // comes from globals.php
     die(xlt("Internal error: we do not seem to be in an encounter!"));
 }
 //only one misc billing form per encounter so grab if exists
-$formid = 0 + (isset($_GET['id']) ? $_GET['id'] : 0);
+$formid = (int) ($_GET['id'] ?? 0);
 if (empty($formid)) {
-    $mboquery = sqlquery("SELECT `fmbo`.`id` FROM `form_misc_billing_options` AS `fmbo`
-                          INNER JOIN `forms` ON (`fmbo`.`id` = `forms`.`form_id`) WHERE
-                          `forms`.`deleted` = 0 AND `forms`.`formdir` = 'misc_billing_options' AND
-                          `forms`.`encounter` = ? ORDER BY `fmbo`.`id` DESC", array($encounter));
+    $mboquery = sqlquery("SELECT `id` FROM `form_misc_billing_options` WHERE
+                          `encounter` = ?", [$encounter]);
     if (!empty($mboquery['id'])) {
-        $formid = 0 + $mboquery['id'];
+        $formid = (int) $mboquery['id'];
     }
 }
-$obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
+$fetched = $formid ? formFetch("form_misc_billing_options", $formid) : [];
+$obj = is_array($fetched) ? $fetched : [];
 ?>
 <html>
 <head>
     <?php Header::setupHeader(['datetime-picker', 'opener']); ?>
     <title><?php echo xlt('Miscellaneous Billing Options for HCFA-1500'); ?></title>
     <?php
-    $arrOeUiSettings = array(
+    $arrOeUiSettings = [
         'heading_title' => xl('Miscellaneous Billing Options for HCFA-1500'),
         'include_patient_name' => true,// use only in appropriate pages
         'expandable' => false,
-        'expandable_files' => array(""),//all file names need suffix _xpd
+        'expandable_files' => [""],//all file names need suffix _xpd
         'action' => "",//conceal, reveal, search, reset, link or back
         'action_title' => "",
         'action_href' => "",//only for actions - reset, link or back
         'show_help_icon' => true,
         'help_file_name' => "cms_1500_help.php"
-    );
+    ];
     $oemr_ui = new OemrUI($arrOeUiSettings);
     ?>
 </head>
@@ -91,46 +110,87 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
             <div class="col-sm-12">
                 <?php echo  $oemr_ui->pageHeading() . "\r\n"; ?>
             <form method=post <?php echo "name='my_form' " . "action='$rootdir/forms/misc_billing_options/save.php?id=" . attr_url($formid) . "'\n"; ?>>
-                <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                 <fieldset>
                     <legend><?php echo xlt('Select Options for Current Encounter') ?></legend>
                     <div class="container">
-                        <span class="text"><?php echo xlt('Checked box = yes, empty = no'); ?><br /><br /></span>
+<!-- ai generated code by google-labs-jules starts -->
+                        <span class="text"><?php echo xlt('Select Yes/No where appropriate'); ?><br /><br /></span>
                         <div class="form-group">
-                            <label><?php echo xlt('Box 10 A. Employment related'); ?>:
-                                <input type="checkbox" name="employment_related" id="box10a" value="1"
-                                    <?php
-                                    if (!empty($obj['employment_related']) && ($obj['employment_related'] == "1")) {
-                                        echo "checked";
-                                    } ?> />
-                            </label>
+                            <label for="employment_related"><?php echo xlt('Box 10 A. Employment related'); ?>:</label>
+                            <select name="employment_related" id="employment_related" class="form-control">
+                                <option value="" <?php
+                                if (empty($obj['employment_related']) || !in_array($obj['employment_related'], ['0', '1'])) {
+                                    echo "selected";
+                                }
+                                ?>>-- <?php echo xlt('Select'); ?> --</option>
+                                <option value="1" <?php
+                                if (!empty($obj['employment_related']) && $obj['employment_related'] == "1") {
+                                    echo "selected";
+                                }
+                                ?>><?php echo xlt('Yes'); ?></option>
+                                <option value="0" <?php
+                                if (isset($obj['employment_related']) && $obj['employment_related'] == "0") {
+                                    echo "selected";
+                                }
+                                ?>><?php echo xlt('No'); ?></option>
+                            </select>
+<!-- ai gen'ed code ends -->
                         </div>
                         <div class="form-row mt-3">
                             <div class="col-md">
-                                <label><?php echo xlt('Box 10 B. Auto Accident'); ?>:</label>
-                                <input type="checkbox" name="auto_accident" id="box10b" value="1"
-                                    <?php
-                                    if (!empty($obj['auto_accident']) && ($obj['auto_accident'] == "1")) {
-                                        echo "checked";
-                                    } ?> />
+<!-- ai generated code by google-labs-jules starts -->
+                                <label for="auto_accident"><?php echo xlt('Box 10 B. Auto Accident'); ?>:</label>
+                                <select name="auto_accident" id="auto_accident" class="form-control">
+                                    <option value="" <?php
+                                    if (empty($obj['auto_accident']) || !in_array($obj['auto_accident'], ['0', '1'])) {
+                                        echo "selected";
+                                    }
+                                    ?>>-- <?php echo xlt('Select'); ?> --</option>
+                                    <option value="1" <?php
+                                    if (!empty($obj['auto_accident']) && $obj['auto_accident'] == "1") {
+                                        echo "selected";
+                                    }
+                                    ?>><?php echo xlt('Yes'); ?></option>
+                                    <option value="0" <?php
+                                    if (isset($obj['auto_accident']) && $obj['auto_accident'] == "0") {
+                                        echo "selected";
+                                    }
+                                    ?>><?php echo xlt('No'); ?></option>
+                                </select>
                             </div>
                             <div class="col-md">
-                                <label><?php echo xlt('State'); ?>:</label>
+                                <label for="box10bstate"><?php echo xlt('State'); ?>:</label>
+<!-- ai gen'ed code ends -->
                                 <input type="text" class="form-control" name="accident_state" id="box10bstate" size="1"
                                     value="<?php echo attr($obj["accident_state"] ?? ''); ?>" />
                             </div>
                         </div>
                         <div class="form-group">
-                            <label><?php echo xlt('Box 10 C. Other Accident'); ?>:</label>
-                            <input type="checkbox" name="other_accident" id="box10c" value="1"
-                                <?php
-                                if (!empty($obj['other_accident']) && ($obj['other_accident'] == "1")) {
-                                    echo "checked";
-                                } ?> />
+<!-- ai generated code by google-labs-jules starts -->
+                            <label for="other_accident"><?php echo xlt('Box 10 C. Other Accident'); ?>:</label>
+                            <select name="other_accident" id="other_accident" class="form-control">
+                                <option value="" <?php
+                                if (empty($obj['other_accident']) || !in_array($obj['other_accident'], ['0', '1'])) {
+                                    echo "selected";
+                                }
+                                ?>>-- <?php echo xlt('Select'); ?> --</option>
+                                <option value="1" <?php
+                                if (!empty($obj['other_accident']) && $obj['other_accident'] == "1") {
+                                    echo "selected";
+                                }
+                                ?>><?php echo xlt('Yes'); ?></option>
+                                <option value="0" <?php
+                                if (isset($obj['other_accident']) && $obj['other_accident'] == "0") {
+                                    echo "selected";
+                                }
+                                ?>><?php echo xlt('No'); ?></option>
+                            </select>
                         </div>
                         <div class="form-row mt-3">
                             <div class="col-md">
-                                <label><?php echo xlt('Box 10 D. EPSDT Referral Code'); ?></label>
+                                <label for="box10d"><?php echo xlt('Box 10 D. Claim Codes (Designated by NUCC)'); ?></label>
+<!-- ai gen'ed code ends -->
                                 <input type="text" class="form-control" name="medicaid_referral_code" id="box10d"
                                     value="<?php echo attr($obj["medicaid_referral_code"] ?? ''); ?>" />
                             </div>
@@ -153,7 +213,7 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
                                     value='<?php echo attr($onset_date); ?>' title='<?php echo xla('yyyy-mm-dd'); ?>' />
                             </div>
                             <div class="col-md">
-                                <?php echo generateDateQualifierSelect("box_14_date_qual", $box_14_qualifier_options, $obj); ?>
+                                <?php echo $MBO->generateDateQualifierSelect("box_14_date_qual", $MBO->box_14_qualifier_options, $obj); ?>
                             </div>
                         </div>
                         <div class="form-row mt-3">
@@ -167,7 +227,7 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
                                     title='<?php echo xla('yyyy-mm-dd'); ?>' />
                             </div>
                             <div class="col-md">
-                                <?php generateDateQualifierSelect("box_15_date_qual", $box_15_qualifier_options, $obj); ?>
+                                <?php $MBO->generateDateQualifierSelect("box_15_date_qual", $MBO->box_15_qualifier_options, $obj); ?>
                             </div>
                         </div>
                         <div class="form-row mt-3">
@@ -196,15 +256,19 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
                         <div class="form-group">
                             <label class="form-inline"><?php echo xlt('Box 17. Provider') ?>:</label>
                             <?php
-                            if (!empty($obj["provider_id"])) {
-                                genReferringProviderSelect('provider_id', '-- ' . xl("Please Select") . ' --', $obj["provider_id"]);
-                            } else { // defalut to the patient's ref_prov
-                                genReferringProviderSelect('provider_id', '-- ' . xl("Please Select") . ' --', getPatientData($pid, "ref_providerID")['ref_providerID']);
-                            } ?>
+                            // The form's own provider, falling back to the patient's
+                            // referring provider. Either can be absent: the select posts an
+                            // empty string when nothing is chosen, which the int column
+                            // stores as 0, and patient_data.ref_providerID is nullable.
+                            $boxSeventeenProvider = MiscBillingOptions::providerId($obj["provider_id"] ?? null)
+                                ?? MiscBillingOptions::providerId(getPatientData($pid, "ref_providerID")['ref_providerID'] ?? null);
+                            $MBO->genReferringProviderSelect('provider_id', '-- ' . xl("Please Select") . ' --', $boxSeventeenProvider); ?>
                         </div>
                         <div class="form-group">
                             <label class="form-inline"><?php echo xlt('Box 17. Provider Qualifier'); ?>:</label>
-                            <?php echo generate_select_list('provider_qualifier_code', 'provider_qualifier_code', ($obj["provider_qualifier_code"] ?? null), 'Provider Qualifier Code'); ?>
+<!-- ai generated code by google-labs-jules starts -->
+                            <?php echo generate_select_list('provider_qualifier_code', 'provider_qualifier_code', ($obj["provider_qualifier_code"] ?? null), xlt('Provider Qualifier Code'), ' ', '', '', '', null, false, '', true); ?>
+<!-- ai gen'ed code ends -->
                         </div>
                         <div class="form-row mt-3">
                             <div class="col-md">
@@ -232,29 +296,42 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
                         </div>
                         <div class="form-row mt-3">
                             <div class="col-md">
-                                <label><?php echo xlt('Box 20. Is Outside Lab used?'); ?>:</label>
-                                <input type="checkbox" name="outside_lab" id="outside_lab" value="1"
-                                    <?php
-                                    if (!empty($obj['outside_lab']) && ($obj['outside_lab'] == "1")) {
-                                        echo "checked";
-                                    } ?> />
+<!-- ai generated code by google-labs-jules starts -->
+                                <label for="outside_lab"><?php echo xlt('Box 20. Is Outside Lab used?'); ?>:</label>
+                                <select name="outside_lab" id="outside_lab" class="form-control">
+                                    <option value="" <?php
+                                    if (empty($obj['outside_lab']) || !in_array($obj['outside_lab'], ['0', '1'])) {
+                                        echo "selected";
+                                    }
+                                    ?>>-- <?php echo xlt('Select'); ?> --</option>
+                                    <option value="1" <?php
+                                    if (!empty($obj['outside_lab']) && $obj['outside_lab'] == "1") {
+                                        echo "selected";
+                                    }
+                                    ?>><?php echo xlt('Yes'); ?></option>
+                                    <option value="0" <?php
+                                    if (isset($obj['outside_lab']) && $obj['outside_lab'] == "0") {
+                                        echo "selected";
+                                    }
+                                    ?>><?php echo xlt('No'); ?></option>
+                                </select>
                             </div>
                             <div class="col-md">
-                                <label><?php echo xlt('Amount Charged'); ?>:</label>
+                                <label for="lab_amount"><?php echo xlt('Amount Charged'); ?>:</label>
                                 <input type="text" size="7" class="form-control" name="lab_amount" id="lab_amount"
                                     value="<?php echo attr($obj["lab_amount"] ?? ''); ?>" />
                             </div>
                         </div>
                         <div class="form-row mt-3">
                             <div class="col-md">
-                                <label><?php echo xlt('Box 22. Medicaid Resubmission Code (ICD-10)'); ?>:</label>
-                                <input type="text" class="form-control" name="medicaid_resubmission_code" id="medicaid_resubmission_code"
-                                    value="<?php echo attr($obj["medicaid_resubmission_code"] ?? ''); ?>" />
+                                <label for="resubmission_code"><?php echo xlt('Box 22. Resubmission Code'); ?>:</label>
+                                <input type="text" class="form-control" name="resubmission_code" id="resubmission_code"
+                                    value="<?php echo attr($obj["resubmission_code"] ?? ''); ?>" />
                             </div>
                             <div class="col-md">
-                                <label><?php echo xlt('Medicaid Original Reference No.'); ?>:</label>
-                                <input type="text" class="form-control" name="medicaid_original_reference" id="medicaid_original_reference"
-                                    value="<?php echo attr($obj["medicaid_original_reference"] ?? ''); ?>" />
+                                <label><?php echo xlt('Box 22a. Original Ref. No.'); ?>:</label>
+                                <input type="text" class="form-control" name="original_reference_number" id="original_reference_number"
+                                    value="<?php echo attr($obj["original_reference_number"] ?? ''); ?>" />
                             </div>
                         </div>
                         <div class="form-group mt-3">
@@ -264,12 +341,26 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
                         </div>
                         <div class="form-row mt-3">
                             <div class="col-md">
-                                <label><?php echo xlt('X12 only: Replacement Claim'); ?>:</label>
-                                <input type="checkbox" name="replacement_claim" id="replacement_claim" value="1"
+                                <input type="radio" class="btn-check" name="replacement_claim" id="replacement_claim" autocomplete="Off" value="1"
                                     <?php
                                     if (!empty($obj['replacement_claim']) && ($obj['replacement_claim'] == "1")) {
                                         echo "checked";
                                     } ?> />
+                                <label class="btn btn-secondary" for="replacement_claim"><?php echo xlt('X12 only: Replacement Claim'); ?>:</label>
+
+                                <input type="radio" class="btn-check" name="replacement_claim" id="void_claim" autocomplete="Off" value="2"
+                                    <?php
+                                    if (!empty($obj['replacement_claim']) && ($obj['replacement_claim'] == "2")) {
+                                        echo "checked";
+                                    } ?> />
+                                <label class="btn btn-secondary" for="void_claim"><?php echo xlt('Void Claim'); ?>:</label>
+
+                                <input type="radio" class="btn-check" name="replacement_claim" id="new_claim" autocomplete="Off" value="0"
+                                    <?php
+                                    if (empty($obj['replacement_claim'])) {
+                                        echo "checked";
+                                    } ?> />
+                                <label class="btn btn-secondary" for="new_claim"><?php echo xlt('New Claim'); ?>:</label>
                             </div>
                             <div class="col-md">
                                 <label><?php echo xlt('X12 only ICN resubmission No.'); ?>:</label>
@@ -305,7 +396,7 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
     // jQuery stuff to make the page a little easier to use
     $(function () {
         $(".dontsave").click(function () {
-            <?php if (isset($_REQUEST['isBilling'])) { ?>
+            <?php if ($isBilling) { ?>
                 dlgclose();
             <?php } else { ?>
                 parent.closeTab(window.name, false);
@@ -316,7 +407,7 @@ $obj = $formid ? formFetch("form_misc_billing_options", $formid) : array();
             <?php $datetimepicker_timepicker = false; ?>
             <?php $datetimepicker_showseconds = false; ?>
             <?php $datetimepicker_formatInput = false; ?>
-            <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+            <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
             <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
         });
     });

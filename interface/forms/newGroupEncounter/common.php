@@ -4,37 +4,37 @@
  * Common script for the encounter form (new and view) scripts for therapy groups.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Amiel Elboim <amielel@matrix.co.il>
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2016 Shachar Zilbershlag <shaharzi@matrix.co.il>
  * @copyright Copyright (c) 2016 Amiel Elboim <amielel@matrix.co.il>
  * @copyright Copyright (c) 2017-2019 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once("$srcdir/options.inc.php");
-require_once("$srcdir/api.inc");
-require_once("$srcdir/group.inc");
-require_once("$srcdir/classes/POSRef.class.php");
+declare(strict_types=1);
 
+require_once("$srcdir/options.inc.php");
+require_once("$srcdir/group.inc.php");
+
+use OpenEMR\BC\Utilities;
 use OpenEMR\Common\Acl\AclExtended;
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Services\FacilityService;
 
 $facilityService = new FacilityService();
-
-$months = array("01","02","03","04","05","06","07","08","09","10","11","12");
-$days = array("01","02","03","04","05","06","07","08","09","10","11","12","13","14",
-  "15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31");
-$thisyear = date("Y");
-$years = array($thisyear - 1, $thisyear, $thisyear + 1, $thisyear + 2);
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 
 if ($viewmode) {
-    $id = (isset($_REQUEST['id'])) ? $_REQUEST['id'] : '';
-    $result = sqlQuery("SELECT * FROM form_groups_encounter WHERE id = ?", array($id));
+    $id = $_REQUEST['id'] ?? '';
+    $result = sqlQuery("SELECT * FROM form_groups_encounter WHERE id = ?", [$id]);
     $encounter = $result['encounter'];
     if ($result['sensitivity'] && !AclMain::aclCheckCore('sensitivities', $result['sensitivity'])) {
         echo "<body>\n<html>\n";
@@ -45,7 +45,7 @@ if ($viewmode) {
 }
 
 // Sort comparison for sensitivities by their order attribute.
-function sensitivity_compare($a, $b)
+function sensitivity_compare($a, $b): int
 {
     return ($a[2] < $b[2]) ? -1 : 1;
 }
@@ -67,9 +67,9 @@ $ires = sqlStatement("SELECT id, type, title, begdate FROM lists WHERE " .
 <?php
 //Not lbf forms use the new validation, please make sure you have the corresponding values in the list Page validation
 $use_validate_js = 1;
-require_once($GLOBALS['srcdir'] . "/validation/validation_script.js.php"); ?>
+require_once(OEGlobalsBag::getInstance()->getSrcDir() . "/validation/validation_script.js.php"); ?>
 
-<?php include_once("{$GLOBALS['srcdir']}/ajax/facility_ajax_jav.inc.php"); ?>
+<?php include_once(OEGlobalsBag::getInstance()->getSrcDir() . "/ajax/facility_ajax_jav.inc.php"); ?>
 <script>
 
 /*
@@ -90,11 +90,7 @@ require_once($GLOBALS['srcdir'] . "/validation/validation_script.js.php"); ?>
     //Gets validation rules from Page Validation list.
     //Note that for technical reasons, we are bypassing the standard validateUsingPageRules() call.
     $collectthis = collectValidationPageRules("/interface/forms/newGroupEncounter/common.php");
-    if (empty($collectthis)) {
-         $collectthis = "undefined";
-    } else {
-         $collectthis = json_sanitize($collectthis["new-encounter-form"]["rules"]);
-    }
+    $collectthis = empty($collectthis) ? "undefined" : json_sanitize($collectthis["new-encounter-form"]["rules"]);
     ?>
  var collectvalidation = <?php echo $collectthis; ?>;
  $(function () {
@@ -110,7 +106,7 @@ require_once($GLOBALS['srcdir'] . "/validation/validation_script.js.php"); ?>
     <?php $datetimepicker_timepicker = false; ?>
     <?php $datetimepicker_showseconds = false; ?>
     <?php $datetimepicker_formatInput = true; ?>
-    <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+    <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
     <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
   });
 
@@ -142,7 +138,7 @@ function cancelClickedOld() {
 @media only screen and (max-width: 1024px) {
     #visit-details [class*="col-"], #visit-issues [class*="col-"] {
       width: 100%;
-      text-align: <?php echo ($_SESSION['language_direction'] == 'rtl') ? 'right ' : 'left '?> !important;
+      text-align: <?php echo ($session->get('language_direction') === 'rtl') ? 'right ' : 'left '?> !important;
     }
 }
 </style>
@@ -175,7 +171,7 @@ $help_icon = '';
                     <input type='hidden' name='mode' value='new' />
                 <?php } ?>
                 <fieldset>
-                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                     <legend><?php echo xlt('Visit Details')?></legend>
                     <div id="visit-details">
                       <div class="row p-3">
@@ -212,7 +208,7 @@ $help_icon = '';
                             <?php
                             $sensitivities = AclExtended::aclGetSensitivities();
                             if ($sensitivities && count($sensitivities)) {
-                                usort($sensitivities, "sensitivity_compare");
+                                usort($sensitivities, sensitivity_compare(...));
                                 ?>
                             <label for="pc_catid" class="col-form-label col-sm-2"><?php echo xlt('Sensitivity'); ?>:</label>
                             <div class="col-sm-3">
@@ -252,25 +248,25 @@ $help_icon = '';
                             <label for='form_date' class="col-form-label col-sm-2"><?php echo xlt('Date of Service'); ?>:</label>
                             <div class="col-sm-3">
                                 <input type='text' class='form-control datepicker' name='form_date' id='form_date' <?php echo $disabled ?>
-                                       value='<?php echo $viewmode ? attr(oeFormatShortDate(substr($result['date'], 0, 10))) : attr(oeFormatShortDate(date('Y-m-d'))); ?>'
+                                       value='<?php echo $viewmode ? attr(oeFormatShortDate(substr((string) $result['date'], 0, 10))) : attr(oeFormatShortDate(date('Y-m-d'))); ?>'
                                        title='<?php echo xla('Date of service'); ?>'/>
                             </div>
 
-                            <?php if ($GLOBALS['ippf_specific']) {
+                            <?php if (OEGlobalsBag::getInstance()->get('ippf_specific')) {
                                 echo "<div class='invisible'>"; } ?>
                                 <label for='form_onset_date' class="col-form-label col-sm-2"><?php echo xlt('Onset/hosp. date'); ?>:</label>
                                 <div class="col-sm-3">
                                     <input type='text' class='form-control datepicker' name='form_onset_date' id='form_onset_date'
-                                           value='<?php echo $viewmode && $result['onset_date'] != '0000-00-00 00:00:00' ? attr(oeFormatShortDate(substr($result['onset_date'], 0, 10))) : ''; ?>'
+                                           value='<?php echo $viewmode && !Utilities::isDateEmpty($result['onset_date']) ? attr(oeFormatShortDate(substr((string) $result['onset_date'], 0, 10))) : ''; ?>'
                                            title='<?php echo xla('Date of onset or hospitalization'); ?>' />
                                 </div>
-                            <?php if ($GLOBALS['ippf_specific']) {
+                            <?php if (OEGlobalsBag::getInstance()->get('ippf_specific')) {
                                 echo "</div>"; } ?>
                             <div class="clearfix"></div>
                         </div>
                         <div class="col-md-6 form-group row"
                             <?php
-                            if (!$GLOBALS['gbl_visit_referral_source']) {
+                            if (!OEGlobalsBag::getInstance()->getBoolean('gbl_visit_referral_source')) {
                                 echo "style='display:none'";
                             } ?>>">
                             <label  class="col-form-label col-sm-2"><?php echo xlt('Referral Source'); ?>:</label>
@@ -279,7 +275,7 @@ $help_icon = '';
                             </div>
                             <div class="clearfix"></div>
                         </div>
-                        <?php if ($GLOBALS['enable_group_therapy']) { ?>
+                        <?php if (OEGlobalsBag::getInstance()->getBoolean('enable_group_therapy')) { ?>
                             <div class="col-md-6 form-group row" id="therapy_group_name" style="display: none">
                                 <label for="form_group" class="col-form-label col-sm-2"><?php echo xlt('Group name'); ?>:</label>
                                 <div class="col-sm-3">
@@ -289,7 +285,7 @@ $help_icon = '';
                                 <div class="clearfix"></div>
                             </div>
                         <?php }?>
-                        <?php if ($GLOBALS['set_pos_code_encounter']) { ?>
+                        <?php if (OEGlobalsBag::getInstance()->getBoolean('set_pos_code_encounter')) { ?>
                             <div class="col-md-6 form-group row">
                                 <label for='facility_id' class="col-form-label col-sm-2"><?php echo xlt('POS Code'); ?>:</label>
                                 <div class="col-sm-8">
@@ -318,7 +314,7 @@ $help_icon = '';
                                     if ($viewmode) {
                                         $def_facility = $result['facility_id'];
                                     } else {
-                                        $dres = sqlStatement("select facility_id from users where username = ?", array($_SESSION['authUser']));
+                                        $dres = sqlStatement("select facility_id from users where username = ?", [$session->get('authUser')]);
                                         $drow = sqlFetchArray($dres);
                                         $def_facility = $drow['facility_id'];
                                     }
@@ -348,7 +344,7 @@ $help_icon = '';
                 <fieldset>
                     <div class="col-md-12 form-group">
                       <legend><?php echo xlt('Reason for Visit')?></legend>
-                      <textarea name="reason" id="reason" class="form-control" cols="80" rows="4"><?php echo $viewmode ? text($result['reason']) : text($GLOBALS['default_chief_complaint']); ?></textarea>
+                      <textarea name="reason" id="reason" class="form-control" cols="80" rows="4"><?php echo $viewmode ? text($result['reason']) : text(OEGlobalsBag::getInstance()->getString('default_chief_complaint')); ?></textarea>
                     </div>
                 </fieldset>
                 <div class="col-md-12 form-group clearfix">
@@ -376,7 +372,8 @@ if (!$viewmode) { ?>
             // User pressed the cancel button, so re-direct to today's encounter
             top.restoreSession();
             parent.left_nav.setEncounter(datestr, enc, window.name);
-            parent.left_nav.loadFrame('enc2', window.name, 'patient_file/encounter/encounter_top.php?set_encounter=' + encodeURIComponent(enc));
+            const params = new URLSearchParams({set_encounter: enc, csrf_token_form: top.csrf_token_js});
+            parent.left_nav.loadFrame('enc2', window.name, 'patient_file/encounter/encounter_top.php?' + params);
             return;
         }
         // otherwise just continue normally
@@ -391,12 +388,12 @@ if (!$viewmode) { ?>
     " AND fe.date <= ? " .
     " AND " .
     "f.formdir = 'newGroupEncounter' AND f.form_id = fe.id AND f.deleted = 0 " .
-    "ORDER BY fe.encounter DESC LIMIT 1", array($therapy_group,date('Y-m-d 00:00:00'),date('Y-m-d 23:59:59')));
+    "ORDER BY fe.encounter DESC LIMIT 1", [$therapy_group,date('Y-m-d 00:00:00'),date('Y-m-d 23:59:59')]);
 
     if (!empty($erow['encounter'])) {
         // If there is an encounter from today then present the duplicate visit dialog
         echo "duplicateVisit(" . js_escape($erow['encounter']) . ", " .
-        js_escape(oeFormatShortDate(substr($erow['date'], 0, 10))) . ");\n";
+        js_escape(oeFormatShortDate(substr((string) $erow['date'], 0, 10))) . ");\n";
     }
 }
 ?>

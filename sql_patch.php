@@ -12,7 +12,7 @@
 // for the new release.
 
 // Checks if the server's PHP version is compatible with OpenEMR:
-require_once(dirname(__FILE__) . "/src/Common/Compatibility/Checker.php");
+require_once(__DIR__ . "/src/Common/Compatibility/Checker.php");
 $response = OpenEMR\Common\Compatibility\Checker::checkPhpVersion();
 if ($response !== true) {
     die(htmlspecialchars($response));
@@ -24,21 +24,26 @@ ini_set('max_execution_time', '0');
 $ignoreAuth = true; // no login required
 
 require_once('interface/globals.php');
-require_once('library/sql_upgrade_fx.php');
 
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Common\Uuid\UuidRegistry;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Services\Utils\SQLUpgradeService;
 use OpenEMR\Services\VersionService;
 
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 // Force logging off
-$GLOBALS["enable_auditlog"] = 0;
+OEGlobalsBag::getInstance()->set("enable_auditlog", 0);
 
-$EMRversion = trim(preg_replace('/\s*\([^)]*\)/', '', $GLOBALS['openemr_version']));
+$EMRversion = (new VersionService())->getSoftwareVersion()->base;
+
+$sqlUpgradeService = new SQLUpgradeService();
 ?>
 
 
 <html>
 <head>
 <title>OpenEMR <?php echo attr($EMRversion) ?> <?php echo xlt('Database Patch'); ?></title>
-<link rel='STYLESHEET' href='interface/themes/style_blue.css'>
 <link rel="shortcut icon" href="public/images/favicon.ico" />
 </head>
 <body style="color:green;">
@@ -46,20 +51,30 @@ $EMRversion = trim(preg_replace('/\s*\([^)]*\)/', '', $GLOBALS['openemr_version'
 <div style="box-shadow: 3px 3px 5px 6px #ccc; border-radius: 20px; padding: 10px 40px;background-color:#EFEFEF; width:500px; margin:40px auto">
 
   <p style="font-weight:bold; font-size:1.8em; text-align:center">OpenEMR <?php echo text($EMRversion),' ',xlt('Database Patch'),' ',text($v_realpatch) ?></p>
-  <p style="font-weight:bold; text-align:center;"><?php echo xlt('Applying Patch to site'),' : ',text($_SESSION['site_id']) ?></p>
+  <p style="font-weight:bold; text-align:center;"><?php echo xlt('Applying Patch to site'),' : ',text($session->get('site_id')) ?></p>
 
 
     <?php
     upgradeFromSqlFile('patch.sql');
     flush();
 
+    echo "<br /><p class='text-success'>Updating UUIDs (this could take some time)<br />\n";
+    $sqlUpgradeService->flush_echo();
+    $updateUuidLog = UuidRegistry::populateAllMissingUuids();
+    if (!empty($updateUuidLog)) {
+        echo "Updated UUIDs: " . text($updateUuidLog) . "</p>\n";
+    } else {
+        echo "Did not need to update or add any new UUIDs</p>\n";
+    }
+    $sqlUpgradeService->flush_echo();
+
     echo '<p style="font-weight:bold; text-align:left; color:green">',xlt('Updating global configuration defaults'),'...</p>';
     $skipGlobalEvent = true; //use in globals.inc.php script to skip event stuff
     require_once("library/globals.inc.php");
-    foreach ($GLOBALS_METADATA as $grpname => $grparr) {
+    foreach ($GLOBALS_METADATA as $grparr) {
         foreach ($grparr as $fldid => $fldarr) {
-            list($fldname, $fldtype, $flddef, $flddesc) = $fldarr;
-            if (is_array($fldtype) || (substr($fldtype, 0, 2) !== 'm_')) {
+            [$fldname, $fldtype, $flddef, $flddesc] = $fldarr;
+            if (is_array($fldtype) || (!str_starts_with((string) $fldtype, 'm_'))) {
                 $row = sqlQuery("SELECT count(*) AS count FROM globals WHERE gl_name = '$fldid'");
                 if (empty($row['count'])) {
                     sqlStatement("INSERT INTO globals ( gl_name, gl_index, gl_value ) " .
@@ -89,10 +104,10 @@ $EMRversion = trim(preg_replace('/\s*\([^)]*\)/', '', $GLOBALS['openemr_version'
 
     echo '<p style="text-align:center; font-size:1.8em;">OpenEMR ',xlt('Version'),' = ',text($EMRversion . '(' . $desiredVersion['v_realpatch'] . ')'),'.</p>';
 
-    echo '<p><a style="border-radius: 10px; padding:5px; width:200px; margin:0 auto; background-color:green; color:white; font-weight:bold; display:block; text-align:center;" href="index.php?site=',attr($_SESSION['site_id']) . '">',xlt('Log in'),'</a></p>';
+    echo '<p><a style="border-radius: 10px; padding:5px; width:200px; margin:0 auto; background-color:green; color:white; font-weight:bold; display:block; text-align:center;" href="index.php?site=',attr($session->get('site_id')) . '">',xlt('Log in'),'</a></p>';
 
     if (isset($_SERVER['HTTP_REFERER'])) {
-        $split = preg_split('/\//', $_SERVER['HTTP_REFERER']);
+        $split = preg_split('/\//', (string) $_SERVER['HTTP_REFERER']);
         if ($split[count($split) - 1] == 'admin.php') {
             echo '<p><a style="border-radius: 10px; padding:5px; width:200px; margin:0 auto; background-color:green; color:white; font-weight:bold; display:block; text-align:center;" href="admin.php">',xlt('Back to Admin Page'),'</a></p>';
         }

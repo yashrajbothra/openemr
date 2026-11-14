@@ -4,16 +4,23 @@
  * ConditionService
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Yash Bothra <yashrajbothra786gmail.com>
+ * @author    Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2020 Yash Bothra <yashrajbothra786gmail.com>
+ * @copyright Copyright (c) 2026 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Services;
 
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Uuid\UuidRegistry;
-use OpenEMR\Validators\BaseValidator;
+use OpenEMR\Services\Search\FhirSearchWhereClauseBuilder;
+use OpenEMR\Services\Search\ISearchField;
+use OpenEMR\Services\Search\SearchModifier;
+use OpenEMR\Services\Search\StringSearchField;
+use OpenEMR\Services\Search\TokenSearchField;
 use OpenEMR\Validators\ConditionValidator;
 use OpenEMR\Validators\ProcessingResult;
 
@@ -22,7 +29,6 @@ class ConditionService extends BaseService
     private const CONDITION_TABLE = "lists";
     private const PATIENT_TABLE = "patient_data";
     private const ENCOUNTER_TABLE = "form_encounter";
-    private $uuidRegistry;
     private $conditionValidator;
 
     /**
@@ -30,12 +36,77 @@ class ConditionService extends BaseService
      */
     public function __construct()
     {
-        parent::__construct('lists');
-        $this->uuidRegistry = new UuidRegistry(['table_name' => self::CONDITION_TABLE]);
-        $this->uuidRegistry->createMissingUuids();
-        (new UuidRegistry(['table_name' => self::PATIENT_TABLE]))->createMissingUuids();
-        (new UuidRegistry(['table_name' => self::ENCOUNTER_TABLE]))->createMissingUuids();
+        parent::__construct(self::CONDITION_TABLE);
+        UuidRegistry::createMissingUuidsForTables([self::CONDITION_TABLE, self::PATIENT_TABLE, self::ENCOUNTER_TABLE]);
         $this->conditionValidator = new ConditionValidator();
+    }
+
+    public function search(array $search, $isAndCondition = true): ProcessingResult
+    {
+        $sql = "SELECT lists.*,
+        lists.pid AS patient_id,
+        lists.title,
+        encounter.uuid as encounter_uuid,
+        patient.puuid,
+        patient.patient_uuid,
+        condition_ids.condition_uuid,
+        condition_ids.last_updated_time,
+        verification.title as verification_title
+        ,provider.provider_id
+        ,provider.provider_npi
+        ,provider.provider_uuid
+        ,provider.provider_username
+    FROM lists
+        INNER JOIN (
+            SELECT lists.uuid AS condition_uuid, lists.modifydate as last_updated_time FROM lists
+        ) condition_ids ON lists.uuid = condition_ids.condition_uuid
+        LEFT JOIN list_options as verification ON verification.option_id = lists.verification and verification.list_id = 'condition-verification'
+        RIGHT JOIN (
+            SELECT
+                patient_data.uuid AS puuid
+                ,patient_data.pid
+                ,patient_data.uuid AS patient_uuid
+            FROM patient_data
+        ) patient ON patient.pid = lists.pid
+        LEFT JOIN issue_encounter as issue ON issue.list_id =lists.id
+        LEFT JOIN form_encounter as encounter ON encounter.encounter =issue.encounter
+        LEFT JOIN (
+                select
+                   id AS provider_id
+                   ,uuid AS provider_uuid
+                   ,npi AS provider_npi
+                    ,username as provider_username
+                FROM users
+            ) provider ON lists.user = provider.provider_username";
+
+        $search['type'] = new StringSearchField('type', ['medical_problem'], SearchModifier::EXACT);
+        $whereClause = FhirSearchWhereClauseBuilder::build($search, $isAndCondition);
+
+        $sql .= $whereClause->getFragment();
+        $sqlBindArray = $whereClause->getBoundValues();
+        $statementResults =  QueryUtils::sqlStatementThrowException($sql, $sqlBindArray);
+
+
+        $processingResult = new ProcessingResult();
+        while ($row = sqlFetchArray($statementResults)) {
+            $resultRecord = $this->createResultRecordFromDatabaseResult($row);
+            $processingResult->addData($resultRecord);
+        }
+        return $processingResult;
+    }
+
+    public function getUuidFields(): array
+    {
+        return ['condition_uuid', 'puuid', 'encounter_uuid', 'uuid', 'patient_uuid', 'provider_uuid'];
+    }
+
+    public function createResultRecordFromDatabaseResult($row)
+    {
+        $row = parent::createResultRecordFromDatabaseResult($row);
+        if ($row['diagnosis'] != "") {
+            $row['diagnosis'] = $this->addCoding($row['diagnosis']);
+        }
+        return $row;
     }
 
     /**
@@ -43,112 +114,70 @@ class ConditionService extends BaseService
      * Search criteria is conveyed by array where key = field/column name, value = field value.
      * If no search criteria is provided, all records are returned.
      *
-     * @param  $search search array parameters
+     * @param array<string, ISearchField|string> $search search array parameters
      * @param  $isAndCondition specifies if AND condition is used for multiple criteria. Defaults to true.
      * @param $puuidBind - Optional variable to only allow visibility of the patient with this puuid.
      * @return ProcessingResult which contains validation messages, internal error messages, and the data
      * payload.
      */
-    public function getAll($search = array(), $isAndCondition = true, $puuidBind = null)
+    public function getAll(array $search = [], $isAndCondition = true, $puuidBind = null)
     {
-        // Validating and Converting Patient UUID to PID
-        if (isset($search['lists.pid'])) {
+        $newSearch = [];
+
+        // Validate puuid before converting to TokenSearchField
+        if (isset($search['puuid']) && !($search['puuid'] instanceof ISearchField)) {
             $isValidPatient = $this->conditionValidator->validateId(
                 'uuid',
                 self::PATIENT_TABLE,
-                $search['lists.pid'],
+                $search['puuid'],
                 true
             );
             if ($isValidPatient !== true) {
                 return $isValidPatient;
             }
-            $puuidBytes = UuidRegistry::uuidToBytes($search['lists.pid']);
-            $search['lists.pid'] = $this->getIdByUuid($puuidBytes, self::PATIENT_TABLE, "pid");
         }
 
-        // Validating and Converting UUID to ID
-        if (isset($search['lists.id'])) {
-            $isValidcondition = $this->conditionValidator->validateId(
+        // Validate condition_uuid before converting to TokenSearchField
+        if (isset($search['condition_uuid']) && !($search['condition_uuid'] instanceof ISearchField)) {
+            $isValidCondition = $this->conditionValidator->validateId(
                 'uuid',
                 self::CONDITION_TABLE,
-                $search['lists.id'],
+                $search['condition_uuid'],
                 true
             );
-            if ($isValidcondition !== true) {
-                return $isValidcondition;
-            }
-            $uuidBytes = UuidRegistry::uuidToBytes($search['lists.id']);
-            $search['lists.id'] = $this->getIdByUuid($uuidBytes, self::CONDITION_TABLE, "id");
-        }
-
-        if (!empty($puuidBind)) {
-            // code to support patient binding
-            $isValidPatient = $this->conditionValidator->validateId(
-                'uuid',
-                self::PATIENT_TABLE,
-                $puuidBind,
-                true
-            );
-            if ($isValidPatient !== true) {
-                return $isValidPatient;
+            if ($isValidCondition !== true) {
+                return $isValidCondition;
             }
         }
 
-        $sqlBindArray = array();
-        $sql = "SELECT lists.*,
-                        patient.uuid as puuid,
-                        verification.title as verification_title,
-                        encounter.uuid as encounter_uuid
-                        FROM lists
-                        LEFT JOIN list_options as verification ON verification.option_id = lists.verification AND verification.list_id='condition-verification'
-                        RIGHT JOIN patient_data as patient ON patient.pid = lists.pid
-                        LEFT JOIN issue_encounter as issue ON issue.list_id =lists.id
-                        LEFT JOIN form_encounter as encounter ON encounter.encounter =issue.encounter
-                        WHERE lists.type = 'medical_problem'";
-
-        if (!empty($search)) {
-            $sql .= ' AND ';
-            if (!empty($puuidBind)) {
-                // code to support patient binding
-                $sql .= '(';
-            }
-            $whereClauses = array();
-            foreach ($search as $fieldName => $fieldValue) {
-                array_push($whereClauses, $fieldName . ' = ?');
-                array_push($sqlBindArray, $fieldValue);
-            }
-            $sqlCondition = ($isAndCondition == true) ? 'AND' : 'OR';
-            $sql .= implode(' ' . $sqlCondition . ' ', $whereClauses);
-            if (!empty($puuidBind)) {
-                // code to support patient binding
-                $sql .= ") AND `patient`.`uuid` = ?";
-                $sqlBindArray[] = UuidRegistry::uuidToBytes($puuidBind);
-            }
-        } elseif (!empty($puuidBind)) {
-            // code to support patient binding
-            $sql .= " AND `patient`.`uuid` = ?";
-            $sqlBindArray[] = UuidRegistry::uuidToBytes($puuidBind);
+        // override puuid with the token search field
+        // standard api will send a string which needs to be a token to be converted to the binary field value
+        // FHIR api will send an already populated TokenSearchField
+        if (isset($search['puuid']) && !($search['puuid'] instanceof ISearchField)) {
+            $newSearch['puuid'] = new TokenSearchField('puuid', $search['puuid'], true);
+            unset($search['puuid']);
         }
 
-        $statementResults = sqlStatement($sql, $sqlBindArray);
+        // override condition_uuid with token search field for binary comparison
+        if (isset($search['condition_uuid']) && !($search['condition_uuid'] instanceof ISearchField)) {
+            $newSearch['condition_uuid'] = new TokenSearchField('condition_uuid', $search['condition_uuid'], true);
+            unset($search['condition_uuid']);
+        }
 
-        $processingResult = new ProcessingResult();
-        while ($row = sqlFetchArray($statementResults)) {
-            $row['uuid'] = UuidRegistry::uuidToString($row['uuid']);
-            $row['puuid'] = UuidRegistry::uuidToString($row['puuid']);
-            if (($row['encounter_uuid']) != "") {
-                $row['encounter_uuid'] = UuidRegistry::uuidToString($row['encounter_uuid']);
+        foreach ($search as $key => $value) {
+            if (!$value instanceof ISearchField) {
+                $newSearch[$key] = new StringSearchField($key, [$value], SearchModifier::EXACT);
             } else {
-                //If encounter value is null, remove the key
-                //So that Encounter reference is not set in FHIR Condition
-                unset($row['encounter_uuid']);
+                $newSearch[$key] = $value;
             }
-            if ($row['diagnosis'] != "") {
-                $row['diagnosis'] = $this->addCoding($row['diagnosis']);
-            }
-            $processingResult->addData($row);
         }
-        return $processingResult;
+
+        // override puuid, this replaces anything in search if it is already specified.
+        if (isset($puuidBind)) {
+            $newSearch['puuid'] = new TokenSearchField('puuid', $puuidBind, true);
+        }
+
+        return $this->search($newSearch, $isAndCondition);
     }
 
     /**
@@ -160,66 +189,11 @@ class ConditionService extends BaseService
      */
     public function getOne($uuid, $puuidBind = null)
     {
-        $processingResult = new ProcessingResult();
-
-        $isValid = BaseValidator::validateId("uuid", "lists", $uuid, true);
-        if ($isValid !== true) {
-            $validationMessages = [
-                'uuid' => ["invalid or nonexisting value" => " value " . $uuid]
-            ];
-            $processingResult->setValidationMessages($validationMessages);
-            return $processingResult;
+        $search['condition_uuid'] = new TokenSearchField('condition_uuid', $uuid, true);
+        if (isset($puuidBind)) {
+            $search['puuid'] = new TokenSearchField('puuid', $puuidBind, true);
         }
-
-        if (!empty($puuidBind)) {
-            // code to support patient binding
-            $isValid = BaseValidator::validateId("uuid", self::PATIENT_TABLE, $puuidBind, true);
-            if ($isValid !== true) {
-                $validationMessages = [
-                    'puuid' => ["invalid or nonexisting value" => " value " . $puuidBind]
-                ];
-                $processingResult->setValidationMessages($validationMessages);
-                return $processingResult;
-            }
-        }
-
-        $sql = "SELECT lists.*,
-                patient.uuid as puuid,
-                verification.title as verification_title,
-                encounter.uuid as encounter_uuid
-                FROM lists
-                LEFT JOIN list_options as verification ON verification.option_id = lists.verification AND verification.list_id='condition-verification'
-                RIGHT JOIN patient_data as patient ON patient.pid = lists.pid
-                LEFT JOIN issue_encounter as issue ON issue.list_id =lists.id
-                LEFT JOIN form_encounter as encounter ON encounter.encounter =issue.encounter
-                WHERE lists.type = 'medical_problem' AND lists.uuid = ?";
-
-        $uuidBinary = UuidRegistry::uuidToBytes($uuid);
-        $sqlBindArray = [$uuidBinary];
-
-        if (!empty($puuidBind)) {
-            // code to support patient binding
-            $sql .= " AND `patient`.`uuid` = ?";
-            $sqlBindArray[] = UuidRegistry::uuidToBytes($puuidBind);
-        }
-
-        $sqlResult = sqlQuery($sql, $sqlBindArray);
-        if (!empty($sqlResult)) {
-            $sqlResult['uuid'] = UuidRegistry::uuidToString($sqlResult['uuid']);
-            $sqlResult['puuid'] = UuidRegistry::uuidToString($sqlResult['puuid']);
-            if (($sqlResult['encounter_uuid']) != "") {
-                $sqlResult['encounter_uuid'] = UuidRegistry::uuidToString($sqlResult['encounter_uuid']);
-            } else {
-                //If encounter value is null, remove the key
-                //So that Encounter reference is not set in FHIR Condition
-                unset($row['encounter_uuid']);
-            }
-            if ($sqlResult['diagnosis'] != "") {
-                $row['diagnosis'] = $this->addCoding($sqlResult['diagnosis']);
-            }
-            $processingResult->addData($sqlResult);
-        }
-        return $processingResult;
+        return $this->search($search);
     }
 
 
@@ -257,10 +231,10 @@ class ConditionService extends BaseService
         );
 
         if ($results) {
-            $processingResult->addData(array(
+            $processingResult->addData([
                 'id' => $results,
                 'uuid' => UuidRegistry::uuidToString($data['uuid'])
-            ));
+            ]);
         } else {
             $processingResult->addInternalError("error processing SQL Insert");
         }
@@ -276,7 +250,7 @@ class ConditionService extends BaseService
      * @return ProcessingResult which contains validation messages, internal error messages, and the data
      * payload.
      */
-    public function update($uuid, $data)
+    public function update($uuid, $data, ?int $expectedPatientId = null)
     {
         if (empty($data)) {
             $processingResult = new ProcessingResult();
@@ -293,14 +267,46 @@ class ConditionService extends BaseService
             return $processingResult;
         }
 
+        $uuidBinary = UuidRegistry::uuidToBytes($uuid);
+
+        // The owning patient is resolved before anything is written. buildUpdateColumns() drops
+        // `puuid` -- a read alias rather than a `lists` column -- and the predicate matched only
+        // uuid and type, so a caller holding one patient's context could name their own patient
+        // as the subject and still mutate a condition uuid belonging to someone else. The
+        // generic compartment check compares only Condition.subject against the token, never the
+        // uuid in the url.
+        $rowPidRaw = QueryUtils::fetchSingleValue(
+            "SELECT pid FROM lists WHERE uuid = ? AND type = 'medical_problem'",
+            'pid',
+            [$uuidBinary]
+        );
+        // A fresh result rather than the validator's: its return type is untyped, so reusing it
+        // here would widen these returns to mixed.
+        if (!is_numeric($rowPidRaw)) {
+            $notFound = new ProcessingResult();
+            $notFound->setValidationMessages(['uuid' => 'Condition not found']);
+            return $notFound;
+        }
+        $rowPid = (int) $rowPidRaw;
+
+        if ($expectedPatientId !== null && $rowPid !== $expectedPatientId) {
+            // Reported as not-found rather than forbidden so a uuid probe cannot confirm the
+            // existence of another patient's condition.
+            $notFound = new ProcessingResult();
+            $notFound->setValidationMessages(['uuid' => 'Condition not found']);
+            return $notFound;
+        }
+
         $query = $this->buildUpdateColumns($data);
         $sql = " UPDATE lists SET ";
         $sql .= $query['set'];
         $sql .= " WHERE `uuid` = ?";
         $sql .= "       AND `type` = 'medical_problem'";
+        // pid is in the WHERE for belt-and-braces protection if $expectedPatientId was not
+        // supplied, and to close the window between the lookup above and this statement.
+        $sql .= "       AND `pid` = ?";
 
-        $uuidBinary = UuidRegistry::uuidToBytes($uuid);
-        array_push($query['bind'], $uuidBinary);
+        array_push($query['bind'], $uuidBinary, $rowPid);
         $sqlResult = sqlStatement($sql, $query['bind']);
 
         if (!$sqlResult) {
@@ -316,10 +322,8 @@ class ConditionService extends BaseService
      *
      * @param $puuid - The patient uuid identifier in string format used for update.
      * @param $uuid - The condition uuid identifier in string format used for update.
-     * @return ProcessingResult which contains validation messages, internal error messages, and the data
-     * payload.
      */
-    public function delete($puuid, $uuid)
+    public function delete($puuid, $uuid): ProcessingResult
     {
         $processingResult = new ProcessingResult();
 
@@ -339,12 +343,12 @@ class ConditionService extends BaseService
         $pid = $this->getIdByUuid($puuidBytes, self::PATIENT_TABLE, "pid");
         $sql  = "DELETE FROM lists WHERE pid=? AND uuid=? AND type='medical_problem'";
 
-        $results = sqlStatement($sql, array($pid, $auuid));
+        $results = sqlStatement($sql, [$pid, $auuid]);
 
         if ($results) {
-            $processingResult->addData(array(
+            $processingResult->addData([
                 'uuid' => $uuid
-            ));
+            ]);
         } else {
             $processingResult->addInternalError("error processing SQL Insert");
         }

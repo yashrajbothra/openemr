@@ -1,0 +1,670 @@
+<?php
+
+/**
+ * UtilsService holds helper methods for dealing with fhir objects in the services  layer.
+ *
+ * @package   openemr
+ * @link      https://www.open-emr.org
+ * @author    Stephen Nielson <stephen@nielson.org>
+ * @author    Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2021 Stephen Nielson <stephen@nielson.org>
+ * @copyright Copyright (c) 2026 Jerry Padgett <sjpadgett@gmail.com>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
+
+namespace OpenEMR\Services\FHIR;
+
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\ORDataObject\ContactAddress;
+use OpenEMR\Cqm\Cql\Ucum\Ucum;
+use OpenEMR\Cqm\Cql\Util\JavaScript;
+use OpenEMR\FHIR\Config\ServerConfig;
+use OpenEMR\FHIR\R4\FHIRDomainResource\FHIROperationOutcome;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRAddress;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRAddressType;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRAddressUse;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRCanonical;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRCode;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRCodeableConcept;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRCoding;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRContactPoint;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRDateTime;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRExtension;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRHumanName;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRId;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRInstant;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRIssueSeverity;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRIssueType;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRMeta;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRNarrative;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRPeriod;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRQuantity;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRReference;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRString;
+use OpenEMR\FHIR\R4\FHIRElement\FHIRUri;
+use OpenEMR\FHIR\R4\FHIRResource\FHIROperationOutcome\FHIROperationOutcomeIssue;
+use OpenEMR\Services\Utils\DateFormatterUtils;
+
+class UtilsService
+{
+    const UNKNOWNABLE_CODE_NULL_FLAVOR = "UNK";
+    const UNKNOWNABLE_CODE_DATA_ABSENT = "unknown";
+
+    /**
+     * Unit titles in OpenEMR's lists (Drug Units) whose UCUM code is spelled differently.
+     */
+    private const UCUM_ALIASES = [
+        'mcg' => 'ug',
+        'grams' => 'g',
+    ];
+
+    /** @var array<string, ?string> each trimmed unit's UCUM code, or null, once asked */
+    private static array $ucumCodes = [];
+
+    public static function createRelativeReference($type, $uuid, $displayName = null): FHIRReference
+    {
+        $reference = new FHIRReference();
+        $reference->setType($type);
+        $reference->setReference($type . "/" . $uuid);
+        if (!empty($displayName) && is_string($displayName)) {
+            $reference->setDisplay($displayName);
+        }
+        return $reference;
+    }
+
+    public static function createCanonicalUrlForResource($resourceType, $uuid): FHIRCanonical
+    {
+
+        $siteConfig = new ServerConfig();
+        $fhirUrl = $siteConfig->getFhirUrl() ?? "";
+        if (strrpos("/", $fhirUrl) != strlen($fhirUrl)) {
+            $fhirUrl .= "/";
+        }
+        $url = $fhirUrl . $resourceType . '/' . $uuid;
+        $canonical = new FHIRCanonical();
+        $canonical->setValue($url);
+        return $canonical;
+    }
+
+    public static function parseCanonicalUrl(?string $url): array
+    {
+        $parsed_url = [
+            'localResource' => false
+            , 'validUrl' => false
+            , 'resource' => null
+            , 'uuid' => null
+        ];
+        if (empty($url)) {
+            return $parsed_url;
+        }
+
+        $parsed_url['validUrl'] = true;
+        $oauthAddress = (new ServerConfig())->getOauthAddress();
+        $oauthHost = parse_url($oauthAddress, PHP_URL_HOST);
+        $parts = parse_url($url);
+        $parsed_url['localResource'] = $parts['host'] == $oauthHost;
+        $splitParts = explode("/", $parts['path']);
+        if (count($splitParts) >= 2) {
+            $uuid = array_pop($splitParts);
+            $resource = array_pop($splitParts);
+            $resourceClassCheck = 'OpenEMR\\FHIR\\R4\\FHIRDomainResource\\FHIR' . $resource;
+            // we should always be getting canonical urls to a specific resource id, but just in case we are going
+            // to
+            $idClassCheck = 'OpenEMR\\FHIR\\R4\\FHIRElement\\' . $uuid;
+            if (class_exists($resourceClassCheck)) {
+                $parsed_url['resource'] = $resource;
+                $parsed_url['uuid'] = $uuid;
+            } elseif (class_exists($idClassCheck)) {
+                $parsed_url['resource'] = $uuid; // root level resource at the end
+            }
+        }
+        return $parsed_url;
+    }
+
+    public static function getUuidFromReference(?FHIRReference $reference)
+    {
+        if ($reference === null) {
+            return null;
+        }
+        $uuid = null;
+        if (!empty($reference->getReference())) {
+            $parts = explode("/", $reference->getReference());
+            $uuid = $parts[1] ?? null;
+        }
+        return $uuid;
+    }
+
+    public static function createQuantity(mixed $value, mixed $unit, mixed $code): FHIRQuantity
+    {
+        $quantity = new FHIRQuantity();
+        // With no unit, a SimpleQuantity. The unit's text whenever there is one, and UCUM's system and
+        // code only for a code UCUM accepts: receivers trust the system, and units such as MG/DL or
+        // tablet are not UCUM. A unit of 0 was left off before (empty()), and still is.
+        $unitText = is_string($unit) ? JavaScript::trim($unit) : '';
+        if ($unitText !== '' && $unitText !== '0') {
+            $quantity->setUnit(new FHIRString($unitText));
+            $ucumCode = self::ucumCodeFor($code);
+            if ($ucumCode !== null) {
+                $quantity->setCode(new FHIRCode($ucumCode));
+                $quantity->setSystem(new FHIRUri(FhirCodeSystemConstants::UNITS_OF_MEASURE));
+            }
+        }
+        $quantity->setValue($value);
+        return $quantity;
+    }
+
+    /**
+     * The UCUM code for a unit, or null when it isn't one: the unit without spaces around it, when
+     * core's UCUM engine accepts it, else its UCUM spelling ("mcg" is ug, "grams" is g). Codes are
+     * case-sensitive (mg/dL is UCUM, MG/DL is not); the two aliases match in any case.
+     * createQuantity(), an immunization's dose (DoseUnit) and HL7 v2's RXA-7 read units by this rule;
+     * DoseUnit also refuses a bare number, which as a dose's unit is an option id.
+     */
+    public static function ucumCodeFor(mixed $unit): ?string
+    {
+        if (!is_string($unit)) {
+            return null;
+        }
+        // Trimmed as the engine trims, so a code never goes out with spaces under UCUM's system.
+        $unit = JavaScript::trim($unit);
+        if ($unit === '') {
+            return null;
+        }
+        // Kept per unit, as Cql's Units::checkUnit() keeps its answers: a unit the engine refuses costs a full
+        // parse, and an Observation with a range asks three times.
+        if (!array_key_exists($unit, self::$ucumCodes)) {
+            $ucum = Ucum::instance();
+            self::$ucumCodes[$unit] = null;
+            foreach ([$unit, self::UCUM_ALIASES[strtolower($unit)] ?? null] as $candidate) {
+                if ($candidate !== null && $ucum->isValid($candidate)) {
+                    self::$ucumCodes[$unit] = $candidate;
+                    break;
+                }
+            }
+        }
+        return self::$ucumCodes[$unit];
+    }
+
+    public static function createCoding($code, $display, $system): FHIRCoding
+    {
+        if (!is_string($code)) {
+            $code = trim("$code"); // FHIR expects a string
+        }
+        // make sure there are no whitespaces.
+        $coding = new FHIRCoding();
+        $coding->setCode($code);
+        if (!empty($display)) {
+            $coding->setDisplay(trim((string)$display));
+        }
+        if (!empty(($system))) {
+            $coding->setSystem(trim((string)$system));
+        }
+        return $coding;
+    }
+
+    public static function createCodeableConcept(array $diagnosisCodes, $defaultCodeSystem = "", $defaultDisplay = ""): FHIRCodeableConcept
+    {
+        $diagnosisCode = new FHIRCodeableConcept();
+        foreach ($diagnosisCodes as $code => $codeValues) {
+            $codeSystem = $codeValues['system'] ?? $defaultCodeSystem;
+            if (!empty($codeValues['description'])) {
+                $diagnosisCode->addCoding(self::createCoding($code, $codeValues['description'], $codeSystem));
+            } else {
+                $diagnosisCode->addCoding(self::createCoding($code, $defaultDisplay, $codeSystem));
+            }
+        }
+        return $diagnosisCode;
+    }
+
+    /**
+     * An element that holds only a data-absent-reason extension, to pass as the value of a
+     * missing element, e.g. $resource->setSubject(UtilsService::createDataMissingExtension()).
+     * The returned object serializes as {"extension": [<data-absent-reason>]} and has no url
+     * itself, so don't add it to another element's extensions; use
+     * createDataAbsentReasonExtension() for that.
+     * @see http://hl7.org/fhir/us/core/general-guidance.html#missing-data
+     */
+    public static function createDataMissingExtension(): FHIRExtension
+    {
+        $outerExtension = new FHIRExtension();
+        $outerExtension->addExtension(self::createDataAbsentReasonExtension());
+        return $outerExtension;
+    }
+
+    /**
+     * The data-absent-reason extension with the code "unknown", for adding to an element's
+     * extensions, e.g. $reference->addExtension(UtilsService::createDataAbsentReasonExtension()).
+     * @see http://hl7.org/fhir/us/core/general-guidance.html#missing-data
+     */
+    public static function createDataAbsentReasonExtension(): FHIRExtension
+    {
+        $extension = new FHIRExtension();
+        $extension->setUrl(FhirCodeSystemConstants::DATA_ABSENT_REASON_EXTENSION);
+        $extension->setValueCode(new FHIRCode("unknown"));
+        return $extension;
+    }
+
+    public static function getExtensionsByUrl($url, $object): array
+    {
+        if (method_exists($object, 'getExtension')) {
+            $extensions = $object->getExtension();
+            return array_filter($extensions, fn($extension): bool => $extension->getUrl() == $url);
+        }
+        return [];
+    }
+
+    public static function createContactPoint($value, $system, $use): FHIRContactPoint
+    {
+        $fhirContactPoint = new FHIRContactPoint();
+        $fhirContactPoint->setSystem($system);
+        $fhirContactPoint->setValue($value);
+        $fhirContactPoint->setUse($use);
+        return $fhirContactPoint;
+    }
+
+    public static function createAddressFromRecord($dataRecord): ?FHIRAddress
+    {
+        $address = new FHIRAddress();
+        $addressPeriod = new FHIRPeriod();
+
+        if (!empty($dataRecord['type'])) {
+            // TODO: do we want to do any validation on this?  If people add 'types' we will have issues, downside is a code change if we need to support newer standards
+            $address->setType(new FHIRAddressType(['value' => $dataRecord['type']]));
+        }
+        if (!empty($dataRecord['use'])) {
+            // TODO: do we want to do any validation on this?  If people add 'uses' we will have issues, downside is a code change if we need to support newer standards
+            $address->setUse(new FHIRAddressUse(['value' => $dataRecord['use']]));
+        }
+
+        if (!empty($dataRecord['period_start'])) {
+            // we don't use dateStringToDateTime as that converts from OpenEMR formatted strings to DateTime objects
+            $format = str_contains((string) $dataRecord['period_start'], ':') ? "Y-m-d H:i:s" : "Y-m-d";
+            $date = \DateTimeImmutable::createFromFormat($format, $dataRecord['period_start'], new \DateTimeZone(date('P')));
+            if ($date === false) {
+                ServiceContainer::getLogger()->error(
+                    "Failed to format period_start date {start} for contact_address_id {contact_address_id}",
+                    ['start' => $dataRecord['period_start'], 'contact_address_id' => ($dataRecord['contact_address_id'] ?? null)]
+                );
+                $date = new \DateTime('now', new \DateTimeZone(date('P')));
+            }
+            // TODO: look into why we use RFC3339_EXTENDED here instead of DATE_ATOM like other places
+            $addressPeriod->setStart(new FHIRDateTime($date->format(\DateTime::RFC3339_EXTENDED)));
+        } else {
+            // we should always have a start period, but if we don't, we will go one year before
+            $start = new \DateTime();
+            $start->sub(new \DateInterval('P1Y')); // subtract one year
+            $addressPeriod->setStart(new FHIRDateTime($start->format(\DateTime::RFC3339_EXTENDED)));
+        }
+
+        if (!empty($dataRecord['period_end'])) {
+            $date = DateFormatterUtils::dateStringToDateTime($dataRecord['period_end'], true);
+            if ($date === false) {
+                ServiceContainer::getLogger()->error(
+                    "Failed to format period_end date {date} for contact_address_id {contact_address_id}",
+                    ['date' => $dataRecord['period_end'], 'contact_address_id' => ($dataRecord['contact_address_id'] ?? null)]
+                );
+                $date = new \DateTime();
+            }
+            // if we have an end date we need to set our use to be old
+            // TODO: when FHIR R4 5.0.1 is the standard, it has proposed to go off the 'end' date instead of the use column for an old address
+            // for ONC R4 3.1.1 we have to populate the use column as old (which removes the fact that the address was a 'home' or a 'work' address)
+            $addressPeriod->setEnd(new FHIRDateTime($date->format(\DateTime::RFC3339_EXTENDED)));
+            $address->setUse(new FHIRAddressUse(['value' => ContactAddress::USE_OLD]));
+        }
+
+        $address->setPeriod($addressPeriod);
+        $hasAddress = false;
+        $line1 = $dataRecord['line1'] ?? $dataRecord['street'] ?? null;
+        if (!empty($line1)) {
+            $address->addLine($line1);
+            $hasAddress = true;
+        }
+
+        $line2 = $dataRecord['line2'] ?? $dataRecord['street_line_2'] ?? null;
+        if (!empty($line2)) {
+            $address->addLine($line2);
+        }
+
+        if (!empty($dataRecord['city'])) {
+            $address->setCity($dataRecord['city']);
+            $hasAddress = true;
+        }
+        $district = $dataRecord['county'] ?? $dataRecord['district'] ?? null;
+        if (!empty($district)) {
+            $address->setDistrict($district);
+            $hasAddress = true;
+        }
+
+        if (!empty($dataRecord['state'])) {
+            $address->setState($dataRecord['state']);
+            $hasAddress = true;
+        }
+        if (!empty($dataRecord['postal_code'])) {
+            $address->setPostalCode($dataRecord['postal_code']);
+            $hasAddress = true;
+        }
+        if (!empty($dataRecord['country_code'])) {
+            $address->setCountry($dataRecord['country_code']);
+            $hasAddress = true;
+        }
+
+        if ($hasAddress) {
+            return $address;
+        }
+        return null;
+    }
+
+    public static function createFhirMeta(string $version, string $date): FHIRMeta
+    {
+        $meta = new FHIRMeta();
+        $meta->setVersionId(new FHIRId($version));
+        $meta->setLastUpdated(new FHIRInstant($date));
+        return $meta;
+    }
+
+    public static function createHumanNameFromRecord($dataRecord): FHIRHumanName
+    {
+        $name = new FHIRHumanName();
+        $name->setUse('official');
+
+        if (!empty($dataRecord['title'])) {
+            $name->addPrefix($dataRecord['title']);
+        }
+        if (!empty($dataRecord['lname'])) {
+            $name->setFamily($dataRecord['lname']);
+        }
+
+        if (!empty($dataRecord['fname'])) {
+            $name->addGiven($dataRecord['fname']);
+        }
+
+        if (!empty($dataRecord['mname'])) {
+            $name->addGiven($dataRecord['mname']);
+        }
+        return $name;
+    }
+
+    public static function createNullFlavorUnknownCodeableConcept()
+    {
+        return self::createCodeableConcept([
+            self::UNKNOWNABLE_CODE_NULL_FLAVOR => [
+                'code' => self::UNKNOWNABLE_CODE_NULL_FLAVOR
+                , 'description' => 'unknown'
+                , 'system' => FhirCodeSystemConstants::HL7_NULL_FLAVOR
+            ]]);
+    }
+
+    public static function createDataAbsentUnknownCodeableConcept()
+    {
+        return self::createCodeableConcept(
+            [self::UNKNOWNABLE_CODE_DATA_ABSENT => [
+                'code' => self::UNKNOWNABLE_CODE_DATA_ABSENT
+                , 'description' => 'Unknown'
+                , 'system' => FhirCodeSystemConstants::DATA_ABSENT_REASON_CODE_SYSTEM
+            ]]
+        );
+    }
+
+    public static function createDataAbsentUnknownCode(): FHIRCode
+    {
+        $code = new FHIRCode();
+        $code->setValue(self::UNKNOWNABLE_CODE_NULL_FLAVOR);
+        return $code;
+    }
+
+    /**
+     * Given a FHIRPeriod object return an array containing the timestamp in milliseconds of the start and end points
+     * of the period.  If the passed in object is null it will return null values for the 'start' and 'end' properties.
+     * If the start has no value or if the end period has no value it will return null values for the properties.
+     *
+     * @param FHIRPeriod $period The object representing the period interval.
+     * @return array Containing two keys of 'start' and 'end' representing the period.
+     */
+    public static function getPeriodTimestamps(?FHIRPeriod $period): array
+    {
+        $end = null;
+        $start = null;
+        if ($period !== null) {
+            // FHIRPeriod start and end can be either a string or a FHIRDateTime object
+            // TODO: we should look at changing the method calls to use FHIRDateTime objects
+            if (!empty($period->getEnd())) {
+                $value = is_string($period->getEnd()) ? $period->getEnd() : $period->getEnd()->getValue();
+                $end = strtotime($value);
+            }
+            if (!empty($period->getStart())) {
+                $value = is_string($period->getStart()) ? $period->getStart() : $period->getStart()->getValue();
+                $start = strtotime($value);
+            }
+        }
+        return [
+            'start' => $start,
+            'end' => $end
+        ];
+    }
+
+    public static function createNarrative($message, $status = "generated"): FHIRNarrative
+    {
+        $div = "<div xmlns='http://www.w3.org/1999/xhtml'>" . $message . "</div>";
+        $narrative = new FHIRNarrative();
+        $code = new FHIRCode();
+        $code->setValue($status);
+        $narrative->setStatus($code);
+        $narrative->setDiv($div);
+        return $narrative;
+    }
+
+    public static function getDateFormattedAsUTC(): string
+    {
+        return (new \DateTime())->format(DATE_ATOM);
+    }
+
+    public static function getLocalTimestampAsUTCDate($date): string
+    {
+        // make this assumption explicit that we are using the current timezone specified in PHP
+        // when we use strtotime or gmdate we get bad behavior when dealing with DST
+        // we really should be storing dates internally as UTC instead of local time... but until that happens we have
+        // to do this.
+        // note this is what we were using before
+        // $date = gmdate('c', strtotime($dataRecord['date']));
+        // w/ DST the date 2015-06-22 00:00:00 server time becomes 2015-06-22T04:00:00+00:00 w/o DST the server time becomes 2015-06-22T00:00:00-04:00
+        $date = new \DateTime("@" . $date, new \DateTimeZone(date('P')));
+        $utcDate = $date->format(DATE_ATOM);
+        return $utcDate;
+    }
+
+    public static function getLocalDateAsUTC($date): string
+    {
+        // make this assumption explicit that we are using the current timezone specified in PHP
+        // when we use strtotime or gmdate we get bad behavior when dealing with DST
+        // we really should be storing dates internally as UTC instead of local time... but until that happens we have
+        // to do this.
+        // note this is what we were using before
+        // $date = gmdate('c', strtotime($dataRecord['date']));
+        // w/ DST the date 2015-06-22 00:00:00 server time becomes 2015-06-22T04:00:00+00:00 w/o DST the server time becomes 2015-06-22T00:00:00-04:00
+        $date = new \DateTime($date, new \DateTimeZone(date('P')));
+        $utcDate = $date->format(DATE_ATOM);
+        return $utcDate;
+    }
+
+    public static function createOperationOutcomeSuccess(string $resourceType, int|string $id)
+    {
+        $operation = self::createOperationOutcomeResource('success', 'success');
+        // TODO: if we wanted to put the resource path we would do that here
+        return $operation;
+    }
+
+    public static function createOperationOutcomeResource(
+        $severity_value,
+        $code_value,
+        $details_value = ''
+    ): FHIROperationOutcome {
+        $resource = new FHIROperationOutcome();
+        $issue = new FHIROperationOutcomeIssue();
+        $severity = new FHIRIssueSeverity();
+        $severity->setValue($severity_value);
+        $issue->setSeverity($severity);
+        $code = new FHIRIssueType();
+        $code->setValue($code_value);
+        $issue->setCode($code);
+        if ($details_value) {
+            $details = new FHIRCodeableConcept();
+            $details->setText($details_value);
+            $issue->setDetails($details);
+        }
+        $resource->addIssue($issue);
+        return $resource;
+    }
+
+    public static function parseReference(?FHIRReference $reference)
+    {
+        if (empty($reference) || empty($reference->getReference())) {
+            return [
+                'localResource' => false,
+                'uuid' => null,
+                'type' => null,
+            ];
+        }
+        return self::parseReferenceString($reference->getReference());
+    }
+
+    /**
+     * Parses a FHIR reference string (relative or absolute URL) and extracts the resource type and UUID.
+     *
+     * Handles both relative references (e.g., "Patient/uuid-here") and absolute URLs
+     * (e.g., "https://example.org/fhir/Patient/uuid-here").
+     *
+     * @param string|null $referenceString The reference string to parse
+     * @param string|null $expectedType If provided, validates that the reference is of this type
+     * @return array{localResource: bool, uuid: string|null, type: string|null}
+     */
+    public static function parseReferenceString(?string $referenceString, ?string $expectedType = null): array
+    {
+        $parsed = [
+            'localResource' => false,
+            'uuid' => null,
+            'type' => null,
+        ];
+
+        if ($referenceString === null || $referenceString === '') {
+            return $parsed;
+        }
+
+        // parse_url() returns false on a severely malformed URL (e.g. "http://:80"), and the
+        // reference string comes straight off a client payload, so it has to be guarded.
+        $parts = parse_url($referenceString);
+        if (!is_array($parts)) {
+            $parts = [];
+        }
+        $path = $parts['path'] ?? $referenceString;
+
+        // Check if this is a local resource. A relative reference (no host) is ours by
+        // definition; an absolute one has to match this server's own FHIR base.
+        if (isset($parts['host'])) {
+            $parsed['localResource'] = self::isLocalFhirReference($parts);
+        } else {
+            $parsed['localResource'] = true;
+        }
+
+        // Extract type and uuid from path (last two segments)
+        $splitParts = explode('/', trim($path, '/'));
+        if (count($splitParts) >= 2) {
+            $parsed['uuid'] = array_pop($splitParts);
+            $parsed['type'] = array_pop($splitParts);
+        }
+
+        // An absolute reference to another server names a resource we do not hold. Most
+        // callers read ['uuid'] without consulting ['localResource'], so returning the
+        // trailing segment would let a remote reference bind to a local record whose uuid
+        // happens to collide.
+        if (!$parsed['localResource']) {
+            $parsed['uuid'] = null;
+        }
+
+        // If expectedType is provided, return null uuid if type doesn't match
+        if ($expectedType !== null && $parsed['type'] !== $expectedType) {
+            $parsed['uuid'] = null;
+        }
+
+        return $parsed;
+    }
+
+    /**
+     * True when an absolute reference addresses this server's own FHIR base.
+     *
+     * Host alone was not enough. A second OpenEMR on the same machine differs only by port or
+     * by the path it is mounted at, and a reference into it matched on host, so its trailing
+     * segment was kept and stored as one of our uuids. Scheme, host, port and the FHIR base
+     * path are all compared, against ServerConfig::getFhirUrl() rather than getOauthAddress()
+     * -- the FHIR base is what a reference to a resource on this server actually looks like.
+     *
+     * A reference that fails this check keeps localResource false, which clears its uuid
+     * below, so the failure mode is a resolution error rather than a silent mis-binding.
+     *
+     * @param array<string, mixed> $parts parse_url() output for the reference
+     */
+    private static function isLocalFhirReference(array $parts): bool
+    {
+        $base = parse_url((new ServerConfig())->getFhirUrl());
+        if (!is_array($base) || !isset($base['host'])) {
+            return false;
+        }
+
+        $referenceHost = $parts['host'] ?? null;
+        if (!is_string($referenceHost)) {
+            return false;
+        }
+        if (strtolower($referenceHost) !== strtolower($base['host'])) {
+            return false;
+        }
+
+        if (self::urlScheme($parts) !== self::urlScheme($base)) {
+            return false;
+        }
+
+        if (self::urlPort($parts) !== self::urlPort($base)) {
+            return false;
+        }
+
+        $basePath = rtrim(is_string($base['path'] ?? null) ? $base['path'] : '', '/');
+        if ($basePath === '') {
+            return true;
+        }
+        $referencePath = is_string($parts['path'] ?? null) ? $parts['path'] : '';
+
+        return str_starts_with($referencePath, $basePath . '/');
+    }
+
+    /**
+     * @param array<string, mixed> $parts
+     */
+    private static function urlScheme(array $parts): string
+    {
+        $scheme = $parts['scheme'] ?? null;
+
+        return is_string($scheme) ? strtolower($scheme) : '';
+    }
+
+    /**
+     * The explicit port, or the scheme's default so that https://host and https://host:443
+     * compare equal.
+     *
+     * @param array<string, mixed> $parts
+     */
+    private static function urlPort(array $parts): ?int
+    {
+        $port = $parts['port'] ?? null;
+        if (is_int($port)) {
+            return $port;
+        }
+        if (is_string($port) && $port !== '' && ctype_digit($port)) {
+            return (int) $port;
+        }
+
+        return match (self::urlScheme($parts)) {
+            'https' => 443,
+            'http' => 80,
+            default => null,
+        };
+    }
+
+}

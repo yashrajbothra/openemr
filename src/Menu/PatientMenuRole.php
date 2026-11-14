@@ -4,7 +4,7 @@
  * PatientMenuRole class.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Eyal Wolanowski <eyal.wolanowski@gmail.com>
  * @copyright Copyright (c) 2018 Brady Miller <brady.g.miller@gmail.com>
@@ -14,10 +14,12 @@
 
 namespace OpenEMR\Menu;
 
+use OpenEMR\BC\ServiceContainer;
 use OpenEMR\Common\Acl\AclMain;
-use OpenEMR\Services\UserService;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Menu\PatientMenuEvent;
+use OpenEMR\Services\UserService;
 
 class PatientMenuRole extends MenuRole
 {
@@ -38,7 +40,7 @@ class PatientMenuRole extends MenuRole
         //   to functions in this class.
         parent::__construct();
         $this->menu_update_map["Modules"] = "updateModulesDemographicsMenu";
-        $this->dispatcher = $GLOBALS['kernel']->getEventDispatcher();
+        $this->dispatcher = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher();
     }
 
     /**
@@ -51,42 +53,37 @@ class PatientMenuRole extends MenuRole
         // Collect the selected menu of user
         $patientMenuRole = $this->getMenuRole();
 
+        // Validate that the menu role filename is a basename only (no path traversal)
+        if ($patientMenuRole !== basename($patientMenuRole) || str_contains($patientMenuRole, '..')) {
+            ServiceContainer::getLogger()->error("Invalid menu role filename rejected", ['filename' => $patientMenuRole]);
+            die("\nInvalid menu role filename.");
+        }
+
         // Load the selected menu
-        if (preg_match("/.json$/", $patientMenuRole)) {
+        if (str_ends_with($patientMenuRole, '.json')) {
             // load custom menu (includes .json in id)
-            $menu_parsed = json_decode(file_get_contents($GLOBALS['OE_SITE_DIR'] . "/documents/custom_menus/patient_menus/" . $patientMenuRole));
+            $menu_parsed = json_decode(file_get_contents(OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/custom_menus/patient_menus/" . $patientMenuRole));
         } else {
             // load a standardized menu (does not include .json in id)
-            $menu_parsed = json_decode(file_get_contents($GLOBALS['fileroot'] . "/interface/main/tabs/menu/menus/patient_menus/" . $patientMenuRole . ".json"));
+            $menu_parsed = json_decode(file_get_contents(OEGlobalsBag::getInstance()->getKernel()->getProjectDir() . "/interface/main/tabs/menu/menus/patient_menus/" . $patientMenuRole . ".json"));
         }
         // if error, then die and report error
         if (!$menu_parsed) {
             die("\nJSON ERROR: " . json_last_error());
         }
-        //to make the url absolute to web root and to account for external urls i.e. those beginning with http or https
-        foreach ($menu_parsed as $menu_obj) {
-            if (property_exists($menu_obj, 'url')) {
-                $menu_obj -> url = $this->getAbsoluteWebRoot($menu_obj -> url);
-            }
-            if (!empty($menu_obj->children)) {
-                foreach ($menu_obj->children as $menu_obj) {
-                    if (property_exists($menu_obj, 'url')) {
-                        $menu_obj -> url = $this->getAbsoluteWebRoot($menu_obj -> url);
-                    }
-                }
-            }
-        }
+
+        $menu_parsed = $this->setPatientMenuUrl($menu_parsed);
 
         // Parse the menu JSON and build the menu. Also, tell the EventDispatcher about the event
         // so that 3rd party modules may modify the menu items
         $menu_parsed = json_decode(json_encode($menu_parsed));
         $this->menuUpdateEntries($menu_parsed);
-        $updatedPatientMenuEvent = $this->dispatcher->dispatch(PatientMenuEvent::MENU_UPDATE, new PatientMenuEvent($menu_parsed));
+        $updatedPatientMenuEvent = $this->dispatcher->dispatch(new PatientMenuEvent($menu_parsed), PatientMenuEvent::MENU_UPDATE);
 
-        $menu_restrictions = array();
+        $menu_restrictions = [];
         $tmp = $updatedPatientMenuEvent->getMenu();
         $this->menuApplyRestrictions($tmp, $menu_restrictions);
-        $updatedPatientMenuRestrictions = $this->dispatcher->dispatch(PatientMenuEvent::MENU_RESTRICT, new PatientMenuEvent($menu_restrictions));
+        $updatedPatientMenuRestrictions = $this->dispatcher->dispatch(new PatientMenuEvent($menu_restrictions), PatientMenuEvent::MENU_RESTRICT);
 
         return $updatedPatientMenuRestrictions->getMenu();
     }
@@ -94,23 +91,25 @@ class PatientMenuRole extends MenuRole
     /**
      * Build the html select element to list the PatientMenuRole options.
      *
-     * @var string $selected Current PatientMenuRole for current users.
      * @return string Html select element to list the PatientMenuRole options.
+     * @var string $selected Current PatientMenuRole for current users.
      */
-    public function displayMenuRoleSelector($selected = "")
+    public function displayMenuRoleSelector($selected = ""): string
     {
         $output = "<select name='patient_menu_role' id='patient_menu_role' class='form-control'>";
         $output .= "<option value='standard' " . (($selected == "standard") ? "selected" : "") . ">" . xlt("Standard") . "</option>";
 
-        $customMenuDir = $GLOBALS['OE_SITE_DIR'] . "/documents/custom_menus/patient_menus/";
+        $customMenuDir = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') . "/documents/custom_menus/patient_menus/";
         if (file_exists($customMenuDir)) {
             $dHandle = opendir($customMenuDir);
             while (false !== ($menuCustom = readdir($dHandle))) {
                 // Only process files that contain *.json
-                if (preg_match("/.json$/", $menuCustom)) {
+                if (str_ends_with($menuCustom, '.json')) {
                     $selectedTag = ($selected == $menuCustom) ? "selected" : "";
                     $output .= "<option value='" . attr($menuCustom) . "' " . $selectedTag . ">";
-                    // Drop the .json and translate the name
+                    // Drop the .json suffix and translate the name. Custom
+                    // menu filenames are dynamic, hence the @phpstan-ignore.
+                    // @phpstan-ignore argument.type (custom menu filenames are dynamic)
                     $output .= xlt(substr($menuCustom, 0, -5));
                     $output .= "</option>";
                 }
@@ -142,37 +141,49 @@ class PatientMenuRole extends MenuRole
 
     /**
      * load demographics created by modules system
+     *
      * @param $menu_list
      */
     protected function updateModulesDemographicsMenu(&$menu_list)
     {
         $module_query = sqlStatement("SELECT msh.*,ms.obj_name,ms.menu_name,ms.path,m.mod_ui_name,m.type FROM modules_hooks_settings AS msh
-					                LEFT OUTER JOIN modules_settings AS ms ON obj_name=enabled_hooks AND ms.mod_id=msh.mod_id
-					                LEFT OUTER JOIN modules AS m ON m.mod_id=ms.mod_id
-					                WHERE fld_type=3 AND mod_active=1 AND sql_run=1 AND attached_to='demographics' ORDER BY mod_id");
+                                    LEFT OUTER JOIN modules_settings AS ms ON obj_name=enabled_hooks AND ms.mod_id=msh.mod_id
+                                    LEFT OUTER JOIN modules AS m ON m.mod_id=ms.mod_id
+                                    WHERE fld_type=3 AND mod_active=1 AND sql_run=1 AND attached_to='demographics' ORDER BY mod_id");
 
         if (sqlNumRows($module_query)) {
+            $session = SessionWrapperFactory::getInstance()->getActiveSession();
+            $authUserID = $session->get('authUserID');
             while ($hookrow = sqlFetchArray($module_query)) {
                 if ($hookrow['type'] == 0) {
-                    $modulePath = $GLOBALS['customModDir'];
+                    $modulePath = OEGlobalsBag::getInstance()->get('customModDir');
                     $added = "";
                 } else {
                     $added = "index";
-                    $modulePath = $GLOBALS['zendModDir'];
+                    $modulePath = OEGlobalsBag::getInstance()->get('zendModDir');
                 }
 
-                if (AclMain::zhAclCheck($_SESSION['authUserID'], $hookrow['obj_name']) ?  "" : "1") {
+                if (AclMain::zhAclCheck($authUserID, $hookrow['obj_name']) ? "" : "1") {
                     continue;
                 }
 
-                $relative_link = "../../modules/" . $modulePath . "/" . $hookrow['path'];
-                $mod_nick_name = $hookrow['menu_name'] ? $hookrow['menu_name'] : 'NoName';
+                $relative_link = "../../modules/" . $modulePath . "/public/" . $hookrow['path'];
+                // Preserve the old `?:` semantics: '' AND '0' both fall through
+                // to 'NoName'. (The previous code used `$hookrow['menu_name'] ?: 'NoName'`,
+                // and `'0' ?: 'NoName'` returns 'NoName'.)
+                $menuName = $hookrow['menu_name'] ?? null;
+                $mod_nick_name = is_string($menuName) && $menuName !== '' && $menuName !== '0'
+                    ? $menuName
+                    : 'NoName';
 
                 $subEntry = new \stdClass();
                 $subEntry->requirement = 0;
                 $subEntry->target = 'main';
                 $subEntry->menu_id = $hookrow['mod_id'];
-                $subEntry->label = xlt($mod_nick_name);
+                // Assign the raw module menu name; MenuRole::menuUpdateEntries()
+                // will translate and HTML-escape it via xlt() during the
+                // recursive pass over children.
+                $subEntry->label = $mod_nick_name;
                 $subEntry->url = $relative_link;
                 $subEntry->on_click = 'top.restoreSession()';
                 $subEntry->pid = 'false';
@@ -181,13 +192,15 @@ class PatientMenuRole extends MenuRole
             }
         }
     }
+
     /**
      * displays a bootstrap4 horizontal nav bar
      */
 
     public function displayHorizNavBarMenu()
     {
-        $pid = $_SESSION['pid'];
+        $session = SessionWrapperFactory::getInstance()->getActiveSession();
+        $pid = $session->get('pid');
         $menu_restrictions = $this->getMenu();
         $li_id = 1;
         $str_top = <<<EOT
@@ -196,27 +209,27 @@ class PatientMenuRole extends MenuRole
         <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#myNavbar" aria-controls="myNavbar" aria-expanded="false" aria-label="Toggle navigation"><span class="navbar-toggler-icon"></span></button>
                 <div class="collapse navbar-collapse" id="myNavbar">
                     <ul class="navbar-nav">
-EOT;
+        EOT;
         echo $str_top . "\r\n";
-        foreach ($menu_restrictions as $key => $value) {
+        foreach ($menu_restrictions as $value) {
             if (!empty($value->children)) {
                 // create dropdown if there are children (bootstrap3 horizontal nav bar with dropdown)
-                $class = isset($value->class) ? $value->class : '';
-                $list = '<li class="dropdown"><a href="#"  id="' . attr($value->menu_id) . '" class="nav-link dropdown-toggle font-weight-bold text-body ' . attr($class) . '" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">' . text($value->label) . ' <span class="caret"></span></a>';
+                $class = $value->class ?? '';
+                $list = '<li class="dropdown"><a href="#"  id="' . attr($value->menu_id ?? $value->label) . '" class="nav-link dropdown-toggle text-body ' . attr($class) . '" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">' . text($value->label) . ' <span class="caret"></span></a>';
                 $list .= '<ul class="dropdown-menu">';
-                foreach ($value->children as $children_key => $children_value) {
+                foreach ($value->children as $children_value) {
                     $link = ($children_value->pid != "true") ? $children_value->url : $children_value->url . attr($pid);
-                    $class = isset($children_value->class) ? $children_value->class : '';
+                    $class = $children_value->class ?? '';
                     $list .= '<li class="nav-item ' . attr($class) . '" id="' . attr($children_value->menu_id) . '">';
-                    $list .= '<a class="nav-link font-weight-bold"  href="' . attr($link) . '" onclick="' . $children_value->on_click . '"> ' . text($children_value->label) . ' </a>';
+                    $list .= '<a class="nav-link text-dark"  href="' . attr($link) . '" onclick="' . $children_value->on_click . '"> ' . text($children_value->label) . ' </a>';
                     $list .= '</li>';
                 }
                 $list .= '</ul>';
             } else {
                 $link = ($value->pid != "true") ? $value->url : $value->url . attr($pid);
-                $class = isset($value->class) ? $value->class : '';
+                $class = $value->class ?? '';
                 $list = '<li class="nav-item ' . attr($class) . '" id="' . attr($value->menu_id) . '">';
-                $list .= '<a class="nav-link font-weight-bold" href="' . attr($link) . '" onclick="' . $value->on_click . '"> ' . text($value->label) . ' </a>';
+                $list .= '<a class="nav-link text-dark" href="' . attr($link) . '" onclick="' . $value->on_click . '"> ' . text($value->label) . ' </a>';
                 $list .= '</li>';
             }
             echo $list . "\r\n";
@@ -226,22 +239,50 @@ EOT;
                 </ul>
             </div>
         </nav>
-EOB;
+        EOB;
         echo $str_bot . "\r\n";
         return;
     }
 
     /**
      * make the url absolute to web root
+     *
      * @param $rel_url
      *
      * @return string
      */
     private function getAbsoluteWebRoot($rel_url)
     {
-        if ($rel_url && !strpos($rel_url, "://")) {
-            return $GLOBALS['webroot'] . "/" . $rel_url;
+        if ($rel_url && !strpos((string) $rel_url, "://")) {
+            // Normalize URL if it starts with a forward or backward slash
+            if (str_starts_with((string) $rel_url, '/') || str_starts_with((string) $rel_url, '\\')) {
+                $rel_url = ltrim((string) $rel_url, '/\\');
+            }
+            return OEGlobalsBag::getInstance()->getKernel()->getWebRoot() . "/" . $rel_url;
         }
         return $rel_url;
+    }
+
+    /**
+     * @param $menu_parsed
+     * @return mixed
+     */
+    public function setPatientMenuUrl($menu_parsed)
+    {
+        //to make the url absolute to web root and to account for external urls i.e. those beginning with http or https
+        foreach ($menu_parsed as $menu_obj) {
+            if (property_exists($menu_obj, 'url')) {
+                $menu_obj->url = $this->getAbsoluteWebRoot($menu_obj->url);
+            }
+            if (!empty($menu_obj->children)) {
+                foreach ($menu_obj->children as $menu_obj) {
+                    if (property_exists($menu_obj, 'url')) {
+                        $menu_obj->url = $this->getAbsoluteWebRoot($menu_obj->url);
+                    }
+                }
+            }
+        }
+
+        return $menu_parsed;
     }
 }

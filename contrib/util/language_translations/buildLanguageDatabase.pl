@@ -43,7 +43,7 @@ use strict;
 # like originals in the end. If this number increases, a english constant
 # was likely modified in the spreadsheet, and can then use log output
 # to localize and fix the problem.
-my $mismatchesKnown = 180;
+my $mismatchesKnown = 190;
 
 # Hold variables to calculate language database statistics
 my $totalConstants;
@@ -552,7 +552,8 @@ CREATE TABLE `lang_definitions` (
   `lang_id` int(11) NOT NULL default '0',
   `definition` mediumtext,
   UNIQUE KEY `def_id` (`def_id`),
-  KEY `cons_id` (`cons_id`)
+  KEY `cons_id` (`cons_id`),
+  KEY `lang_cons` (`lang_id`, `cons_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=".$tempCounter." ;
 \n
 --

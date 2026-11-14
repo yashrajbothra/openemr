@@ -9,7 +9,7 @@
  * claim to processing tasks, this is a place to add it.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Ken Chapple <ken@mi-squared.com>
  * @copyright Copyright (c) 2021 Ken Chapple <ken@mi-squared.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -33,7 +33,7 @@ class BillingClaim implements \JsonSerializable
      * but representation of claim using the format
      * pid-encounter
      *
-     * @var
+     * @var mixed
      */
     protected $id;
 
@@ -53,7 +53,7 @@ class BillingClaim implements \JsonSerializable
     /**
      * x-12 partner ID
      *
-     * @var
+     * @var mixed
      */
     protected $partner;
 
@@ -66,7 +66,7 @@ class BillingClaim implements \JsonSerializable
     /**
      * Primary, Secondary or Tertiary insurance
      *
-     * @var
+     * @var mixed
      */
     protected $payor_type;
 
@@ -89,7 +89,7 @@ class BillingClaim implements \JsonSerializable
     protected $target;
 
     /**
-     * If this is the last claim in the processing queue, the this
+     * If this is the last claim in the processing queue, then this
      * is true otherwise it's false. It is set by the BillingProcessor
      * object while preparing claims.
      *
@@ -97,13 +97,21 @@ class BillingClaim implements \JsonSerializable
      */
     protected $is_last;
 
-    public function __construct($claimId, $partner_and_payor)
-    {
+    /**
+     * @param mixed $claimId
+     * @param mixed $partner_and_payor
+     * @param string $action processing task action
+     */
+    public function __construct(
+        $claimId,
+        $partner_and_payor,
+        public $action
+    ) {
         // Assume this is not the last claim in the "loop" unless explicitly set.
         $this->is_last = false;
 
         // The encounter and PID are in the claimId separated by '-' so parse them out
-        $ta = explode("-", $claimId);
+        $ta = explode("-", (string) $claimId);
         $this->id = $claimId;
         $this->pid = $ta[0];
         $this->encounter = $ta[1];
@@ -111,10 +119,10 @@ class BillingClaim implements \JsonSerializable
         $this->partner = $partner_and_payor['partner'];
 
         // The payor ID is in the 'payer' part, the first character is the payer type
-        $this->payor_id = substr($partner_and_payor['payer'], 1);
+        $this->payor_id = substr((string) $partner_and_payor['payer'], 1);
 
         // The payor type comes in on the payor ID part as a single character prefix
-        $payor_type_char = substr(strtoupper($partner_and_payor['payer']), 0, 1);
+        $payor_type_char = substr(strtoupper((string) $partner_and_payor['payer']), 0, 1);
         if ($payor_type_char == 'P') {
             $this->payor_type = self::PRIMARY;
         } elseif ($payor_type_char == 'S') {
@@ -131,7 +139,7 @@ class BillingClaim implements \JsonSerializable
         if (!empty($result['processing_format'])) {
             $target = $result['processing_format'];
         }
-        $this->target = $target;
+        $this->target = $target ?? '';
     }
 
     /**
@@ -183,6 +191,19 @@ class BillingClaim implements \JsonSerializable
     }
 
     /**
+     * The insurance company selected for this claim in the billing manager, or
+     * null when none was: the payer drop-down's "Unassigned" option posts -1,
+     * which getPayorId() turns into "1".
+     */
+    public function getSelectedPayerId(): ?string
+    {
+        $isPayerLevel = in_array($this->payor_type, [self::PRIMARY, self::SECONDARY, self::TERTIARY], true);
+        return $isPayerLevel && is_string($this->payor_id) && $this->payor_id !== ''
+            ? $this->payor_id
+            : null;
+    }
+
+    /**
      * @return mixed
      */
     public function getPayorType()
@@ -223,7 +244,7 @@ class BillingClaim implements \JsonSerializable
         $this->is_last = $is_last;
     }
 
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $vars = get_object_vars($this);
         return $vars;

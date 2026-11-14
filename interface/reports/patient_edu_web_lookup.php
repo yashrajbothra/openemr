@@ -4,39 +4,52 @@
  * Open websearch for patient education materials
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Tony McCormick <tony@mi-squared.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Roberto Vasquez <robertogagliotta@gmail.com>
+ * @author    Robert Down <robertdown@live.com>
  * @copyright Copyright (C) 2011 Tony McCormick <tony@mi-squared.com>
  * @copyright Copyright (C) 2011-2018 Brady Miller   <brady.g.miller@gmail.com>
  * @copyright Copyright (C) 2017 Roberto Vasquez <robertogagliotta@gmail.com>
- * @license   https://github.com/openemr/openemr/blob/master/LICENSE CNU General Public License 3
+ * @copyright Copyright (c) 2022-2023 Robert Down <robertdown@live.com>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  *
  */
 
 //Include required scripts/libraries
 require_once("../globals.php");
 
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Services\ListService;
 
+// Patient-education lookup is driven from the open-chart menu; align the
+// permission check with the surrounding `patients/med` chart views.
+if (!AclMain::aclCheckCore('patients', 'med')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for patients/med: Patient Education Web Lookup", xl("Patient Education Web Lookup"));
+}
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 if (!empty($_POST)) {
-    if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-        CsrfUtils::csrfNotVerified();
-    }
+    CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 }
 
 // Reference website links
-$websites = array(
-    'Medline'   => 'http://vsearch.nlm.nih.gov/vivisimo/cgi-bin/query-meta?v%3Aproject=medlineplus&query=[%]&x=12&y=15',
-    'eMedicine' => 'http://search.medscape.com/reference-search?newSearchHeader=1&queryText=[%]',
-    'WebMD'     => 'http://www.webmd.com/search/search_results/default.aspx?query=[%]&sourceType=undefined'
-);
+$listService = new ListService();
+$options = $listService->getOptionsByListName('external_patient_education');
+
+$websites = [];
+foreach ($options as $opt) {
+    $websites[$opt['title']] = $opt['notes'];
+}
 
 // Collect variables
-$form_lookup_at = (isset($_POST['form_lookup_at'])) ? $_POST['form_lookup_at'] : '';
-$form_diagnosis = (isset($_POST['form_diagnosis'])) ? $_POST['form_diagnosis'] : '';
+$form_lookup_at = $_POST['form_lookup_at'] ?? '';
+$form_diagnosis = $_POST['form_diagnosis'] ?? '';
 ?>
 
 <html>
@@ -63,19 +76,17 @@ $form_diagnosis = (isset($_POST['form_diagnosis'])) ? $_POST['form_diagnosis'] :
         <div class="row">
             <div class="col-12">
                 <form method='post' action='patient_edu_web_lookup.php' id='theform' class='form-horizontal' onsubmit='return top.restoreSession()'>
-                    <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>" />
+                    <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>" />
                     <div class="form-group">
                         <label for='form_lookup_at' class='control-label col-sm-2'><?php echo xlt('Patient Resource'); ?></label>
                         <div class='col-sm-12'>
                             <select name='form_lookup_at' id='form_lookup_at'  class='form-control'>
                                 <?php
                                 foreach ($websites as $key => $value) {
-                                    echo "    <option value='" . attr($key) . "'";
-                                    if ($key == $form_lookup_at) {
-                                        echo ' selected';
-                                    }
-
-                                    echo ">" .  text($key) . "</option>\n";
+                                    $key_attr = attr($key);
+                                    $display = text($key);
+                                    $selected = ($key == $form_lookup_at) ? "selected" : "";
+                                    echo "<option value='{$key_attr}' {$selected}>$display</option>\n";
                                 }
                                 ?>
                             </select>

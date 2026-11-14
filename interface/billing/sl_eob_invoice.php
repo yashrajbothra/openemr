@@ -6,7 +6,7 @@
  * see sl_eob_process.php.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Roberto Vasquez <robertogagliotta@gmail.com>
  * @author    Terry Hill <terry@lillysystems.com>
@@ -20,22 +20,28 @@
  */
 
 require_once("../globals.php");
-require_once("$srcdir/patient.inc");
-require_once("$srcdir/forms.inc");
 require_once("../../custom/code_types.inc.php");
-require_once "$srcdir/user.inc";
-require_once("$srcdir/payment.inc.php");
 
 use OpenEMR\Billing\InvoiceSummary;
 use OpenEMR\Billing\SLEOB;
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
-use OpenEMR\Common\Logging\EventAuditLogger;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Common\Utils\FormatMoney;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+if (!AclMain::aclCheckCore('acct', 'eob', '', 'write')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for acct/eob: EOB Posting - Invoice", xl("EOB Posting - Invoice"));
+}
+
+$srcDir = OEGlobalsBag::getInstance()->getSrcDir();
 
 $debug = 0; // set to 1 for debugging mode
-$save_stay = (!empty($_REQUEST['form_save']) && ($_REQUEST['form_save'] == '1')) ? true : false;
+$save_stay = !empty($_REQUEST['form_save']) && ($_REQUEST['form_save'] == '1');
 $from_posting = (0 + ($_REQUEST['isPosting'] ?? null)) ? 1 : 0;
-$g_posting_adj_disable = $GLOBALS['posting_adj_disable'] ? 'checked' : '';
+$g_posting_adj_disable = OEGlobalsBag::getInstance()->getBoolean('posting_adj_disable') ? 'checked' : '';
 if ($from_posting) {
     $posting_adj_disable = prevSetting('sl_eob_search.', 'posting_adj_disable', 'posting_adj_disable', $g_posting_adj_disable);
 } else {
@@ -46,15 +52,6 @@ if ($from_posting) {
 $ALLOW_DELETE = true;
 
 $info_msg = "";
-
-// Format money for display.
-//
-function bucks($amount)
-{
-    if ($amount) {
-        return sprintf("%.2f", $amount);
-    }
-}
 
 ?>
 <html>
@@ -69,10 +66,10 @@ function bucks($amount)
             return true;
         }
 
-        function goEncounterSummary(pid) {
+        function goEncounterSummary(e, pid) {
             if(pid) {
                 if(typeof opener.toEncSummary  === 'function') {
-                    opener.toEncSummary(pid);
+                    opener.toEncSummary(e, pid);
                 }
             }
             doClose();
@@ -89,8 +86,12 @@ function bucks($amount)
             const pelement = f['form_line[' + code + '][pay]'];
             const aelement = f['form_line[' + code + '][adj]'];
             const relement = f['form_line[' + code + '][reason]'];
-            const tmp = belement.value - pelement.value;
-            aelement.value = Number(tmp).toFixed(2);
+            // The balance is rendered with FormatMoney::getBucks(), which inserts a
+            // thousands separator, so it must be parsed rather than coerced.
+            const bal = parseFloat(String(belement.value).replace(/,/g, '')) || 0;
+            const pay = parseFloat(String(pelement.value).replace(/,/g, '')) || 0;
+            const tmp = bal - pay;
+            aelement.value = tmp.toFixed(2);
             if (aelement.value && !relement.value) {
                 relement.selectedIndex = 1;
             }
@@ -117,14 +118,14 @@ function bucks($amount)
                 };
                 let pfx = ename.substring(0, pfxlen);
                 let code = pfx.substring(pfx.indexOf('[') + 1, pfxlen - 1);
-                let cPay = parseFloat(f[pfx + '[pay]'].value).toFixed(2);
-                let cAdjust = parseFloat(f[pfx + '[adj]'].value).toFixed(2);
+                let cPay = parseFloat(f[pfx + '[pay]'].value);
+                let cAdjust = parseFloat(f[pfx + '[adj]'].value);
 
                 if ((cPay !== 0) || cAdjust !== 0) {
                     allempty = false;
                 }
                 if(adjDisable) {
-                    if ((cAdjust == 0 && ins_done.value == 'changed')) {
+                    if ((cAdjust == 0 && f['ins_done'].value == 'changed')) {
                         allempty = false;
                     }
                 }
@@ -230,15 +231,13 @@ function bucks($amount)
                 <?php $datetimepicker_timepicker = false; ?>
                 <?php $datetimepicker_showseconds = false; ?>
                 <?php $datetimepicker_formatInput = true; ?>
-                <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+                <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
                 <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
             });
+            $("#ins_done_group").on("change", "input[name='form_done']", function() {
+                $("#ins_done").val('changed');
+            });
         });
-
-        $("#ins_done").on("change", function() {
-            $("#ins_done").val('changed');
-        });
-
     </script>
     <style>
         @media only screen and (max-width: 768px) {
@@ -271,19 +270,19 @@ function bucks($amount)
 </head>
 <body>
 <?php
-$trans_id = 0 + $_GET['id'];
+$trans_id = (int) $_GET['id'];
 if (!$trans_id) {
     die(xlt("You cannot access this page directly."));
 }
 
 // A/R case, $trans_id matches form_encounter.id.
-$ferow = sqlQuery("SELECT e.*, p.fname, p.mname, p.lname FROM form_encounter AS e, patient_data AS p WHERE e.id = ? AND p.pid = e.pid", array($trans_id));
+$ferow = sqlQuery("SELECT e.*, p.fname, p.mname, p.lname FROM form_encounter AS e, patient_data AS p WHERE e.id = ? AND p.pid = e.pid", [$trans_id]);
 if (empty($ferow)) {
     die("There is no encounter with form_encounter.id = '" . text($trans_id) . "'.");
 }
-$patient_id = 0 + $ferow['pid'];
-$encounter_id = 0 + $ferow['encounter'];
-$svcdate = substr($ferow['date'], 0, 10);
+$patient_id = (int) $ferow['pid'];
+$encounter_id = (int) $ferow['encounter'];
+$svcdate = substr((string) $ferow['date'], 0, 10);
 $form_payer_id = (!empty($_POST['form_payer_id'])) ? (0 + $_POST['form_payer_id']) : 0;
 $form_reference = $_POST['form_reference'] ?? null;
 $form_check_date   = fixDate(($_POST['form_check_date'] ?? ''), date('Y-m-d'));
@@ -295,11 +294,10 @@ if (preg_match('/^Ins(\d)/i', ($_POST['form_insurance'] ?? ''), $matches)) {
     $payer_type = $matches[1];
 }
 
-if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POST['isLastClosed'])) {
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POST['isLastClosed']) || !empty($_POST['enc_billing_note'])) {
     if (!empty($_POST['form_save'])) {
-        if (!CsrfUtils::verifyCsrfToken($_POST["csrf_token_form"])) {
-            CsrfUtils::csrfNotVerified();
-        }
+        CsrfUtils::checkCsrfInput(INPUT_POST, dieOnFail: true);
 
         if ($debug) {
             echo "<p><b>" . xlt("This module is in test mode. The database will not be changed.") . "</b><p>\n";
@@ -317,7 +315,7 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
         if ($ALLOW_DELETE && !$debug) {
             if (!empty($_POST['form_del']) && is_array($_POST['form_del'])) {
                 foreach ($_POST['form_del'] as $arseq => $dummy) {
-                    row_modify(
+                    payment_row_modify(
                         "ar_activity",
                         "deleted = NOW()",
                         "pid = '" . add_escape_custom($patient_id) .
@@ -331,10 +329,10 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
 
         $paytotal = 0;
         foreach ($_POST['form_line'] as $code => $cdata) {
-            $thispay = trim($cdata['pay']);
-            $thisadj = trim($cdata['adj']);
-            $thisins = trim($cdata['ins']);
-            $thiscodetype = trim($cdata['code_type']);
+            $thispay = trim((string) $cdata['pay']);
+            $thisadj = trim((string) $cdata['adj']);
+            $thisins = trim((string) $cdata['ins']);
+            $thiscodetype = trim((string) $cdata['code_type']);
             $reason = $cdata['reason'];
 
 // Get the adjustment reason type.  Possible values are:
@@ -345,12 +343,12 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
 // 5 = Comment
             $reason_type = '1';
             if ($reason) {
-                $tmp = sqlQuery("SELECT option_value FROM list_options WHERE list_id = 'adjreason' AND activity = 1 AND option_id = ?", array($reason));
+                $tmp = sqlQuery("SELECT option_value FROM list_options WHERE list_id = 'adjreason' AND activity = 1 AND option_id = ?", [$reason]);
                 if (empty($tmp['option_value'])) {
 // This should not happen but if it does, apply old logic.
-                    if (preg_match("/To copay/", $reason)) {
+                    if (preg_match("/To copay/", (string) $reason)) {
                         $reason_type = 2;
-                    } elseif (preg_match("/To ded'ble/", $reason)) {
+                    } elseif (preg_match("/To ded'ble/", (string) $reason)) {
                         $reason_type = 3;
                     }
                     $info_msg .= xl("No adjustment reason type found for") . " \"$reason\". ";
@@ -364,7 +362,7 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
             }
 
             if (0.0 + $thispay) {
-                SLEOB::arPostPayment($patient_id, $encounter_id, $session_id, $thispay, $code, $payer_type, '', $debug, '', $thiscodetype);
+                SLEOB::arPostPayment($patient_id, $encounter_id, $session_id, $thispay, $code, $payer_type, '', $thiscodetype);
                 $paytotal += $thispay;
             }
 
@@ -393,19 +391,19 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
 // An adjustment reason including "Ins" is assumed to be assigned by
 // insurance, and in that case we identify which one by appending
 // Ins1, Ins2 or Ins3.
-                    if (strpos(strtolower($reason), 'ins') != false) {
+                    if (str_contains(strtolower((string) $reason), 'ins')) {
                         $reason .= ' ' . $_POST['form_insurance'];
                     }
                 }
-                SLEOB::arPostAdjustment($patient_id, $encounter_id, $session_id, $thisadj, $code, $payer_type, $reason, $debug, '', $thiscodetype);
+                SLEOB::arPostAdjustment($patient_id, $encounter_id, $session_id, $thisadj, $code, $payer_type, $reason, $thiscodetype);
             }
         }
 
 // Maintain which insurances are marked as finished.
 
         $form_done = 0 + $_POST['form_done'];
-        $form_stmt_count = 0 + $_POST['form_stmt_count'];
-        sqlStatement("UPDATE form_encounter SET last_level_closed = ?, stmt_count = ? WHERE pid = ? AND encounter = ?", array($form_done, $form_stmt_count, $patient_id, $encounter_id));
+        $form_stmt_count = 0 + (int) $_POST['form_stmt_count'];
+        sqlStatement("UPDATE form_encounter SET last_level_closed = ?, stmt_count = ? WHERE pid = ? AND encounter = ?", [$form_done, $form_stmt_count, $patient_id, $encounter_id]);
 
         if (!empty($_POST['form_secondary'])) {
             SLEOB::arSetupSecondary($patient_id, $encounter_id, $debug);
@@ -426,13 +424,24 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
     if (!$debug && !$save_stay && !$_POST['isLastClosed']) {
         echo "doClose();\n";
     }
-    if (!$debug && ($save_stay || $_POST['isLastClosed'])) {
+    if (!$debug && ($save_stay || $_POST['isLastClosed'] || $_POST['enc_billing_note'])) {
         if ($_POST['isLastClosed']) {
             // save last closed level
             $form_done = 0 + $_POST['form_done'];
             $form_stmt_count = 0 + $_POST['form_stmt_count'];
-            sqlStatement("UPDATE form_encounter SET last_level_closed = ?, stmt_count = ? WHERE pid = ? AND encounter = ?", array($form_done, $form_stmt_count, $patient_id, $encounter_id));
+            sqlStatement("UPDATE form_encounter SET last_level_closed = ?, stmt_count = ? WHERE pid = ? AND encounter = ?", [$form_done, $form_stmt_count, $patient_id, $encounter_id]);
+            // also update billing for aging
+            sqlStatement("UPDATE billing SET bill_date = ? WHERE pid = ? AND encounter = ?", [$form_deposit_date, $patient_id, $encounter_id]);
+            if (!empty($_POST['form_secondary'])) {
+                SLEOB::arSetupSecondary($patient_id, $encounter_id, $debug);
+            }
         }
+
+        if ($_POST['enc_billing_note']) {
+            // save enc billing note
+            sqlStatement("UPDATE form_encounter SET billing_note = ? WHERE pid = ? AND encounter = ?", [$_POST['enc_billing_note'], $patient_id, $encounter_id]);
+        }
+
         // will reload page w/o reposting
         echo "location.replace(location)\n";
     }
@@ -444,7 +453,8 @@ if (!empty($_POST['form_save']) || !empty($_POST['form_cancel']) || !empty($_POS
 
 // Get invoice charge details.
 $codes = InvoiceSummary::arGetInvoiceSummary($patient_id, $encounter_id, true);
-$pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1", array($patient_id));
+$pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1", [$patient_id]);
+$bnrow = sqlQuery("select billing_note from form_encounter where pid = ? AND encounter = ? limit 1", [$patient_id, $encounter_id]);
 ?>
 
 <div class="container-fluid">
@@ -453,7 +463,7 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
     </div>
     <div class="container-fluid">
         <form class="form" action='sl_eob_invoice.php?id=<?php echo attr_url($trans_id); ?>' method='post' onsubmit='return validate(this)'>
-            <input type="hidden" name="csrf_token_form" value="<?php echo attr(CsrfUtils::collectCsrfToken()); ?>"/>
+            <input type="hidden" name="csrf_token_form" value="<?php echo CsrfUtils::collectCsrfToken(session: $session); ?>"/>
             <input type="hidden" name="isPosting" value="<?php echo attr($from_posting); ?>"/>
             <input type="hidden" name="isLastClosed" value="" />
             <fieldset>
@@ -470,12 +480,12 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                         <label class="col-form-label" for="form_provider"><?php echo xlt('Provider'); ?>:</label>
                         <?php
                         $tmp = sqlQuery("SELECT fname, mname, lname " .
-                            "FROM users WHERE id = ?", array($ferow['provider_id']));
+                            "FROM users WHERE id = ?", [$ferow['provider_id']]);
                         $provider = text($tmp['fname']) . ' ' . text($tmp['mname']) . ' ' . text($tmp['lname']);
                         $tmp = sqlQuery("SELECT bill_date FROM billing WHERE " .
                             "pid = ? AND encounter = ? AND " .
-                            "activity = 1 ORDER BY fee DESC, id ASC LIMIT 1", array($patient_id, $encounter_id));
-                        $billdate = substr(($tmp['bill_date'] . "Not Billed"), 0, 10);
+                            "activity = 1 ORDER BY fee DESC, id ASC LIMIT 1", [$patient_id, $encounter_id]);
+                        $billdate = substr(($tmp['bill_date'] ?? '' . "Not Billed"), 0, 10);
                         ?>
                         <input type="text" class="form-control" id='form_provider'
                                name='form_provider' value="<?php echo attr($provider); ?>" disabled />
@@ -483,7 +493,7 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                     <div class="form-group col-lg">
                         <label class="col-form-label" for="form_invoice"><?php echo xlt('Invoice'); ?>:</label>
                         <input type="text" class="form-control" id='form_provider'
-                               name='form_provider' value='<?php echo attr($patient_id) . "." . attr($encounter_id); ?>'
+                               name='form_provider' value='<?php echo attr($patient_id) . "-" . attr($encounter_id); ?>'
                                disabled />
                     </div>
                     <div class="form-group col-lg">
@@ -494,18 +504,30 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                     <div class="card bg-light col-lg-4">
                         <div class="card-title mx-auto"><?php echo xlt('Insurance'); ?></div>
                         <?php
+                        $payer_names = [];
                         for ($i = 1; $i <= 3; ++$i) {
                             $payerid = SLEOB::arGetPayerID($patient_id, $svcdate, $i);
                             if ($payerid) {
-                                $tmp = sqlQuery("SELECT name FROM insurance_companies WHERE id = ?", array($payerid));
-                                echo "$i: " . $tmp['name'] . "<br />";
+                                $tmp = sqlQuery("SELECT name FROM insurance_companies WHERE id = ?", [$payerid]);
+                                $name = $tmp['name'] ?? '';
+                                $payer_names[$i] = is_string($name) ? $name : '';
+                                echo text("$i: " . $payer_names[$i]) . "<br />";
                             }
                         }
                         ?>
                     </div>
                 </div>
-                <div class="form-group mt-3">
-                     <textarea name="insurance_name" id="insurance_name" class="form-control" cols="5" rows="2" readonly><?php echo attr($insurance ?? ''); ?></textarea>
+                <div class="form-row">
+                    <div class="form-group col-lg">
+                        <label class="col-form-label" for="pt_billing_note"><?php echo xlt('Patient Billing Note'); ?>:</label>
+                        <textarea name="pt_billing_note" id="pt_billing_note" class="form-control" cols="5" rows="1" readonly><?php echo text($pdrow['billing_note'] ?? ''); ?></textarea>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group col-lg">
+                        <label class="col-form-label" for="enc_billing_note"><?php echo xlt('Encounter Billing Note'); ?>:</label>
+                        <textarea name="enc_billing_note" id="enc_billing_note" class="form-control" cols="5" rows="2"><?php echo text($bnrow['billing_note'] ?? ''); ?></textarea>
+                    </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group col-lg">
@@ -564,7 +586,8 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                             <input name='form_eobs' type='hidden' value='<?php echo attr($arrow['shipvia'] ?? '') ?>'/>
                         </div>
                     </div>
-                    <div class="form-group col-lg" id='ins_done'>
+                    <div class="form-group col-lg" id='ins_done_group'>
+                        <input type="hidden" name="ins_done" id="ins_done" value="" />
                         <label class="col-form-label" for=""><?php echo xlt('Done with'); ?>:</label>
                         <a class="btn btn-save bg-light text-primary"
                             onclick="document.forms[0].isLastClosed.value='3'; document.forms[0].submit()"><?php echo xlt("Save Level"); ?>
@@ -574,13 +597,19 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                             // Write a checkbox for each insurance.  It is to be checked when
                             // we no longer expect any payments from that company for the claim.
                             $last_level_closed = 0 + $ferow['last_level_closed'];
-                            foreach (array(0 => 'None', 1 => 'Ins1', 2 => 'Ins2', 3 => 'Ins3') as $key => $value) {
-                                if ($key && !SLEOB::arGetPayerID($patient_id, $svcdate, $key)) {
+                            foreach ([0 => 'None', 1 => 'Ins1', 2 => 'Ins2', 3 => 'Ins3'] as $key => $value) {
+                                if ($key && !isset($payer_names[$key])) {
                                     continue;
+                                }
+                                $label = $key ? $value : xl('None');
+                                if ($key && $payer_names[$key] !== '') {
+                                    // Keep the level prefix so it stays identifiable
+                                    // when one carrier covers more than one level.
+                                    $label .= ': ' . $payer_names[$key];
                                 }
                                 $checked = ($last_level_closed == $key) ? " checked" : "";
                                 echo "<label class='radio-inline'>";
-                                echo "<input type='radio' name='form_done' value='" . attr($key) . "'$checked />" . text($value);
+                                echo "<input type='radio' name='form_done' value='" . attr($key) . "'$checked />" . text($label);
                                 echo "</label>";
                             }
                             ?>
@@ -626,14 +655,14 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                             $dispcode = $code;
 
                             // remember the index of the first entry whose code is not "CO-PAY", i.e. it's a legitimate proc code
-                            if ($firstProcCodeIndex == -1 && strcmp($code, "CO-PAY") != 0) {
+                            if ($firstProcCodeIndex == -1 && strcmp((string) $code, "CO-PAY") != 0) {
                                 $firstProcCodeIndex = $encount;
                             }
 
                             // this sorts the details more or less chronologically:
                             ksort($cdata['dtl']);
                             foreach ($cdata['dtl'] as $dkey => $ddata) {
-                                $ddate = substr($dkey, 0, 10);
+                                $ddate = substr((string) $dkey, 0, 10);
                                 if (preg_match('/^(\d\d\d\d)(\d\d)(\d\d)\s*$/', $ddate, $matches)) {
                                     $ddate = $matches[1] . '-' . $matches[2] . '-' . $matches[3];
                                 }
@@ -649,7 +678,7 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                                 ?>
                                 <tr>
                                     <td class="detail" style="background:<?php echo $dispcode ? 'lightyellow' : ''; ?>"><?php echo text($dispcode); $dispcode = "" ?></td>
-                                    <td class="detail"><?php echo text(bucks($tmpchg)); ?></td>
+                                    <td class="detail"><?php echo text(FormatMoney::getBucks($tmpchg)); ?></td>
                                     <td class="detail">&nbsp;</td>
                                     <td class="detail">
                                         <?php
@@ -664,8 +693,8 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                                         ?>
                                     </td>
                                     <td class="detail"><?php echo text($ddate); ?></td>
-                                    <td class="detail"><?php echo text(bucks($ddata['pmt'] ?? '')); ?></td>
-                                    <td class="detail"><?php echo text(bucks($tmpadj)); ?></td>
+                                    <td class="detail"><?php echo text(FormatMoney::getBucks($ddata['pmt'] ?? '')); ?></td>
+                                    <td class="detail"><?php echo text(FormatMoney::getBucks($tmpadj ?? '')); ?></td>
                                     <td class="detail">&nbsp;</td>
                                     <td class="detail"><?php echo text($ddata['rsn'] ?? ''); ?></td>
                                     <?php
@@ -691,18 +720,18 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                                 <td class="last_detail">&nbsp;</td>
                                 <td class="last_detail">
                                     <input name="form_line[<?php echo attr($code); ?>][bal]" type="hidden"
-                                           value="<?php echo attr(bucks($cdata['bal'])); ?>" />
+                                           value="<?php echo attr(FormatMoney::getBucks($cdata['bal'] ?? '')); ?>" />
                                     <input name="form_line[<?php echo attr($code); ?>][ins]" type="hidden"
                                            value="<?php echo attr($cdata['ins'] ?? ''); ?>" />
                                     <input name="form_line[<?php echo attr($code); ?>][code_type]" type="hidden"
-                                           value="<?php echo attr($cdata['code_type']); ?>" /> <?php echo text(sprintf("%.2f", $cdata['bal'])); ?>
+                                           value="<?php echo attr($cdata['code_type'] ?? ''); ?>" /> <?php echo text(FormatMoney::getBucks($cdata['bal']) ?: '0.00'); ?>
                                     &nbsp;
                                 </td>
                                 <td class="last_detail"></td>
                                 <td class="last_detail"></td>
                                 <td class="last_detail">
                                     <input name="form_line[<?php echo attr($code); ?>][pay]"
-                                           onkeyup="updateFields(document.forms[0]['form_line[<?php echo attr($code); ?>][pay]'], document.forms[0]['form_line[<?php echo attr($code); ?>][adj]'], document.forms[0]['form_line[<?php echo attr($code); ?>][bal]'], document.forms[0]['form_line[CO-PAY][bal]'], <?php echo ($firstProcCodeIndex == $encount) ? 1 : 0 ?>)"
+                                           onkeyup="updateFields(document.forms[0][<?php echo attr_js('form_line[' . $code . '][pay]'); ?>], document.forms[0][<?php echo attr_js('form_line[' . $code . '][adj]'); ?>], document.forms[0][<?php echo attr_js('form_line[' . $code . '][bal]'); ?>], document.forms[0]['form_line[CO-PAY][bal]'], <?php echo ($firstProcCodeIndex == $encount) ? 1 : 0 ?>)"
                                            onfocus="this.select()" autofocus size="10" type="text" class="form-control"
                                            value="0.00" />
                                 </td>
@@ -758,7 +787,7 @@ $pdrow = sqlQuery("select billing_note from patient_data where pid = ? limit 1",
                     </div>
                     <?php if ($from_posting) { ?>
                         <button type='button' class="btn btn-secondary btn-view float-right" name='form_goto' id="btn-goto"
-                            onclick="goEncounterSummary(<?php echo attr_js($patient_id) ?>)"><?php echo xlt("Past Encounters"); ?></button>
+                            onclick="goEncounterSummary(event, <?php echo attr_js($patient_id) ?>)"><?php echo xlt("Past Encounters"); ?></button>
                     <?php } ?>
                 </div>
             </div>

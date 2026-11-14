@@ -4,23 +4,23 @@
  * This class represents the task that compiles claims into a UB04 X12 batch file
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Ken Chapple <ken@mi-squared.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Jerry Padgett <sjpadgett@gmail.com>
  * @copyright Copyright (c) 2021 Ken Chapple <ken@mi-squared.com>
  * @copyright Copyright (c) 2014-2020 Brady Miller <brady.g.miller@gmail.com>
- * @copyright Copyright (c) 2017-2020 Jerry Padgett <sjpadgett@gmail.com>
+ * @copyright Copyright (c) 2017-2024 Jerry Padgett <sjpadgett@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
 namespace OpenEMR\Billing\BillingProcessor\Tasks;
 
+use OpenEMR\Billing\BillingProcessor\BillingClaim;
+use OpenEMR\Billing\BillingProcessor\BillingClaimBatch;
 use OpenEMR\Billing\BillingProcessor\GeneratorCanValidateInterface;
 use OpenEMR\Billing\BillingProcessor\GeneratorInterface;
 use OpenEMR\Billing\BillingProcessor\LoggerInterface;
-use OpenEMR\Billing\BillingProcessor\BillingClaim;
-use OpenEMR\Billing\BillingProcessor\BillingClaimBatch;
 use OpenEMR\Billing\BillingProcessor\Traits\WritesToBillingLog;
 use OpenEMR\Billing\BillingUtilities;
 use OpenEMR\Billing\X125010837I;
@@ -32,8 +32,8 @@ class GeneratorUB04X12 extends AbstractGenerator implements GeneratorInterface, 
     use WritesToBillingLog;
 
     // These two are specific to UB04
-    protected $template = array();
-    protected $ub04id = array();
+    protected $template = [];
+    protected $ub04id = [];
 
     protected $batch;
 
@@ -41,7 +41,16 @@ class GeneratorUB04X12 extends AbstractGenerator implements GeneratorInterface, 
     {
         // Do the UB04 processing
         $log = '';
-        $segs = explode("~\n", X125010837I::generateX12837I($claim->getPid(), $claim->getEncounter(), $log, $this->ub04id));
+        $segs = explode(
+            "~\n",
+            (string) X125010837I::generateX12837I(
+                $claim->getPid(),
+                $claim->getEncounter(),
+                $claim->getPartner(),
+                $log,
+                $this->ub04id
+            )
+        );
         $this->appendToLog($log);
         $this->batch->append_claim($segs);
 
@@ -60,6 +69,8 @@ class GeneratorUB04X12 extends AbstractGenerator implements GeneratorInterface, 
 
     public function validateOnly(BillingClaim $claim)
     {
+        $this->printToScreen(xl("Successfully validated claim") . ": " . $claim->getId());
+        $this->ub04id = get_ub04_array($claim->getPid(), $claim->getEncounter());
         return $this->updateBatch($claim);
     }
 
@@ -96,7 +107,7 @@ class GeneratorUB04X12 extends AbstractGenerator implements GeneratorInterface, 
      */
     public function generate(BillingClaim $claim)
     {
-        $this->validateAndClear();
+        $this->validateAndClear($claim);
 
         $tmp = BillingUtilities::updateClaim(
             false,
@@ -124,7 +135,7 @@ class GeneratorUB04X12 extends AbstractGenerator implements GeneratorInterface, 
         $this->batch->append_claim_close();
 
         $format_bat = str_replace('~', PHP_EOL, $this->batch->getBatContent());
-        $wrap = "<!DOCTYPE html><html><head></head><body><div style='overflow: hidden;'><pre>" . text($format_bat) . "</pre></div></body></html>";
+        $wrap = "<!DOCTYPE html><html><head></head><body class='bg-light text-dark'><div class='bg-light text-dark' style='overflow: hidden;'><pre>" . text($format_bat) . "</pre></div></body></html>";
         echo $wrap;
     }
 
@@ -140,7 +151,7 @@ class GeneratorUB04X12 extends AbstractGenerator implements GeneratorInterface, 
 
         // Tell the billing_process.php script to initiate a download of this file
         // that's in the edi directory
-        $this->logger->setLogCompleteCallback(function () {
+        $this->logger->setLogCompleteCallback(function (): void {
             // This uses our parent's method to print the JS that automatically initiates
             // the download of this file, after the screen bill_log messages have printed
             $this->printDownloadClaimFileJS($this->batch->getBatFilename());

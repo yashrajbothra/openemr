@@ -1,14 +1,26 @@
 <?php
 
-// This program is free software; you can redistribute it and/or
-// modify it under the terms of the GNU General Public License
-// as published by the Free Software Foundation; either version 2
-// of the License, or (at your option) any later version.
+/**
+ * The sqlconf.php file is the central place to load the SITE_ID SQL credentials. It allows allows modules to manage the
+ * credential variables
+ *
+ * @package   OpenEMR
+ * @link      https://www.open-emr.org
+ * @author    Robert Down <robertdown@live.com>
+ * @copyright Copyright (c) 2022-2023 Robert Down <robertdown@live.com>
+ * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
+ */
 
-//  OpenEMR
-//  MySQL Config
-//  Needed by sql.inc
+use OpenEMR\Common\System\MissingSiteException;
+use OpenEMR\Core\OEGlobalsBag;
 
-// Database parameters are now site-specific.
-// $GLOBALS['OE_SITE_DIR'] is set in interface/globals.php.
-require_once $GLOBALS['OE_SITE_DIR'] . "/sqlconf.php";
+$siteDir = OEGlobalsBag::getInstance()->get('OE_SITE_DIR') ?? '';
+if (empty($siteDir)) {
+    if (!defined('OPENEMR_STATIC_ANALYSIS') || !OPENEMR_STATIC_ANALYSIS) {
+        throw new MissingSiteException();
+    }
+    // GLOBALS may not be defined consistently during static analysis.
+    $siteDir = __DIR__ . '/../sites/default';
+}
+
+require_once $siteDir . "/sqlconf.php";

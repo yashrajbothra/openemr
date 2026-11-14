@@ -6,7 +6,7 @@
  * the writer.  This allows the script to be processed in an asynchronous fashion.  The Writer tracks the last processed
  * fhir resource which can be used by callers to resume or retry a resource in the stream.
  * @package openemr
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Stephen Nielson <stephen@nielson.org>
  * @copyright Copyright (c) 2021 Stephen Nielson <stephen@nielson.org>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -14,6 +14,7 @@
 
 namespace OpenEMR\FHIR\Export;
 
+use OpenEMR\BC\ServiceContainer;
 use OpenEMR\FHIR\R4\FHIRResource;
 
 class ExportStreamWriter
@@ -22,11 +23,6 @@ class ExportStreamWriter
      * @var bool true if we have written at least one byte of data to it, false otherwise
      */
     private $hasWrittenBytes = false;
-
-    /**
-     * @var resource
-     */
-    private $stream;
 
     /**
      * The last resource identifier that was processed by this export writer.  This allows callers to resume / retry
@@ -44,9 +40,11 @@ class ExportStreamWriter
      */
     private $recordsWritten;
 
-    public function __construct($stream, \DateTime $shutdownTime)
+    /**
+     * @param resource $stream
+     */
+    public function __construct(private $stream, \DateTime $shutdownTime)
     {
-        $this->stream = $stream;
         $this->shutdownTime = $shutdownTime->getTimestamp();
         $this->recordsWritten = 0;
     }
@@ -70,10 +68,10 @@ class ExportStreamWriter
 
             // need to make sure we don't have a newline on the last record
             if ($this->hasWrittenBytes) {
-                fputs($this->stream, "\n");
-                fputs($this->stream, $data);
+                fwrite($this->stream, "\n");
+                fwrite($this->stream, $data);
             } else {
-                fputs($this->stream, $data);
+                fwrite($this->stream, $data);
                 $this->hasWrittenBytes = true;
             }
 
@@ -81,11 +79,16 @@ class ExportStreamWriter
             $this->incrementRecordCount();
             $this->lastProcessedId = $resource->getId();
             if ($this->willShutdown()) {
+                ServiceContainer::getLogger()->debug(
+                    "ExportStreamWriter->append() reached shutdown time limit for export",
+                    ['lastProcessedId' => $this->lastProcessedId, 'resource' => $resource->get_fhirElementName()]
+                );
+
                 throw new ExportWillShutdownException("Export time has exceeded shutdown limit", 0, $this->lastProcessedId);
             }
         } catch (\JsonException $exception) {
             throw new ExportCannotEncodeException("Failed to encode resource for export", 0, $this->lastProcessedId, $exception);
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             throw new ExportException("Unknown error in writing to stream", 0, $this->lastProcessedId, $exception);
         }
     }
@@ -103,7 +106,7 @@ class ExportStreamWriter
      * @return string The contents contained in the stream
      * @throws ExportException Thrown if the stream contents cannot be read.
      */
-    public function getContents()
+    public function getContents(): string
     {
         $this->flush();
 
@@ -133,7 +136,7 @@ class ExportStreamWriter
      * Checks if the max execution time for this writer has been reached and the writer will shut down.
      * @return bool
      */
-    public function willShutdown()
+    public function willShutdown(): bool
     {
         // TODO: we could register a shutdown function and check against that here if we wanted to truly ensure a
         // proper stream writing.

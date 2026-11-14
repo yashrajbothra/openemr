@@ -2,26 +2,35 @@
 
 namespace OpenEMR\Tests\Services\FHIR;
 
-use PHPUnit\Framework\TestCase;
-use OpenEMR\Tests\Fixtures\FixtureManager;
-use OpenEMR\Services\FHIR\FhirPatientService;
+use OpenEMR\Common\Uuid\UuidRegistry;
 use OpenEMR\FHIR\R4\FHIRDomainResource\FHIRPatient;
+use OpenEMR\Services\FHIR\FhirPatientService;
+use OpenEMR\Tests\Fixtures\FixtureManager;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 
 /**
  * FHIR Patient Service Query Tests
- * @coversDefaultClass OpenEMR\Services\FHIR\FhirPatientService
+ *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Dixon Whitmire <dixonwh@gmail.com>
  * @copyright Copyright (c) 2020 Dixon Whitmire <dixonwh@gmail.com>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  *
  */
+
 class FhirPatientServiceQueryTest extends TestCase
 {
     private $fixtureManager;
     private $patientFixture;
     private $fhirPatientFixture;
+
+    /**
+     * @var FhirPatientService
+     */
     private $fhirPatientService;
 
     protected function setUp(): void
@@ -29,6 +38,7 @@ class FhirPatientServiceQueryTest extends TestCase
         $this->fixtureManager = new FixtureManager();
         $this->fixtureManager->installPatientFixtures();
         $this->fhirPatientService = new FhirPatientService();
+        $this->fhirPatientService->setSystemLogger($this->createMock(LoggerInterface::class));
     }
 
     protected function tearDown(): void
@@ -52,20 +62,82 @@ class FhirPatientServiceQueryTest extends TestCase
         }
     }
 
-    /**
-     * PHPUnit Data Provider for FHIR patient searches
-     */
-    public function searchParameterDataProvider()
+    /** @codeCoverageIgnore Data providers run before coverage instrumentation starts. */
+    public static function searchParameter(): array
     {
+
         return [
-            ['address', 'Avenue'],
-            ['address', '90210'],
-            ['address', 'San Diego'],
-            ['address', 'CA'],
-            ['address-city', 'San Diego'],
-            ['address-postalcode', '90210'],
-            ['address-state', 'CA'],
-            ['birthdate', '1960-01-01'],
+            ['identifier', 'test-fixture-789456'],
+            ['gender', 'male'],
+            ['gender', 'female'],
+            ['gender', 'unknown'], // handle unknown gender's
+
+            // need to do a bunch of identifier tests to make sure our token searching is working.
+
+            ['address:contains', 'Avenue'],
+            ['address:prefix', '789'],
+            ['address', '789'], // default is :prefix
+            ['address:contains', 'Diego'],
+            ['address:exact', '400 West Broadway'],
+
+            // name searches
+            ['name', 'Ilias'], // first name
+            ['name', 'Ilias'],
+            ['name', 'Johnny'],
+            ['name', 'Jenane'],
+            ['name', 'Mr.'], // title
+
+            // if someone does a full timestamp birthdate, this tests the full timestamp parser even though
+            // birthdate is just a date not a datetime
+            ['birthdate', '1960-01-01T13:25:60'],
+
+            // now combinations of birthdates
+            ['birthdate', '1945'], // search by year
+            ['birthdate', '1945-02'], // search by year, month
+            ['birthdate', '1945-02-14'], // search by year, month, day
+
+            // now let's do it with our equality search which should be the same
+            ['birthdate', 'eq1945'], // search by year
+            ['birthdate', 'eq1945-02'], // search by year, month
+            ['birthdate', 'eq1945-02-14'], // search by year, month, day
+
+            // now inequality search
+            ['birthdate', 'ne1945'], // search by year
+            ['birthdate', 'ne1945-02'], // search by year, month
+            ['birthdate', 'ne1945-02-14'], // search by year, month, day
+
+            // now we will do less than, only 1 patient in data set has DOB of 1933-03-22
+            ['birthdate', 'lt1934'], // search by year
+            ['birthdate', 'lt1933-04'], // search by year, month
+            ['birthdate', 'lt1933-03-23'], // search by year, month, day
+
+            // now we will do ends before, only 1 patient in data set has DOB of 1933-03-22
+            ['birthdate', 'eb1934'], // search by year
+            ['birthdate', 'eb1933-04'], // search by year, month
+            ['birthdate', 'eb1933-03-23'], // search by year, month, day
+
+            // now we will do greater than, only 1 patient in data set has DOB of 1977-05-02
+            ['birthdate', 'gt1976'], // search by year
+            ['birthdate', 'gt1977-04'], // search by year, month
+            ['birthdate', 'gt1977-05-01'], // search by year, month, day
+
+            // now we will do starts after, only 1 patient in data set has DOB of 1977-05-02
+            ['birthdate', 'sa1976'], // search by year
+            ['birthdate', 'sa1977-04'], // search by year, month
+            ['birthdate', 'sa1977-05-01'], // search by year, month, day
+
+            // now we will do less than or equal to, only 1 patient in data set has DOB of 1933-03-22
+            ['birthdate', 'le1933'], // search by year
+            ['birthdate', 'le1933-03'], // search by year, month
+            ['birthdate', 'le1933-03-22'], // search by year, month, day
+
+            // now we will do greater than or equal to, only 1 patient in data set has DOB of 1977-05-02
+            ['birthdate', 'ge1977'], // search by year
+            ['birthdate', 'ge1977-05'], // search by year, month
+            ['birthdate', 'ge1977-05-02'], // search by year, month, day
+
+            // range searches for dates.
+
             ['email', 'info@pennfirm.com'],
             ['family', 'Moses'],
             ['gender', 'male'],
@@ -84,40 +156,67 @@ class FhirPatientServiceQueryTest extends TestCase
         ];
     }
 
-    /**
-     * Tests getAll queries
-     * @covers ::getAll
-     * @covers ::searchForOpenEMRRecords
-     * @dataProvider searchParameterDataProvider
-     */
-    public function testGetAll($parameterName, $parameterValue)
+    /** @codeCoverageIgnore Data providers run before coverage instrumentation starts. */
+    public static function searchParameterCompound(): array
+    {
+        return [
+            ['birthdate', 'le1960-01-01', 'name:contains', 'lias'], // check operators and comparators work combined
+            ['birthdate', '1945', 'name', 'Moses'], // check defaults work
+            ['birthdate', '1945', 'family', 'Moses'], // check birthdate+family works
+            ['name', 'Ilias', 'birthdate', '1933-03'], // check name+birthdate work
+            ['gender', 'female', 'name', 'Ilias'], // check gender+name works
+            ['birthdate', '1933-03', 'gender', 'female'], // check birthdate+gender works
+            ['name', 'Moses', 'gender', 'male'],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('searchParameter')]
+    public function testGetAll($parameterName, $parameterValue): void
     {
         $fhirSearchParameters = [$parameterName => $parameterValue];
         $processingResult = $this->fhirPatientService->getAll($fhirSearchParameters);
         $this->assertGetAllSearchResults($processingResult);
     }
 
-    /**
-     * @covers ::getOne
-     */
-    public function testGetOne()
+    #[Test]
+    public function testGetAllWithUuid(): void
     {
-        $actualResult = $this->fhirPatientService->getAll(['state' => 'CA']);
-        $this->assertGreaterThan(0, $actualResult->getData());
+        $select = "SELECT `uuid` FROM `patient_data` WHERE `pubpid`=?";
+        $result = sqlStatement($select, ['test-fixture-789456']);
+        $patient = sqlFetchArray($result);
+        $fhirSearchParameters = ['_id' => UuidRegistry::uuidToString($patient['uuid'])];
+        $processingResult = $this->fhirPatientService->getAll($fhirSearchParameters);
+        $this->assertGetAllSearchResults($processingResult);
+    }
 
-        $expectedId = $actualResult->getData()[0]->getId();
+    #[Test]
+    #[DataProvider('searchParameterCompound')]
+    public function testGetAllCompound($parameter1, $parameter1Value, $parameter2, $parameter2Value): void
+    {
+        $fhirSearchParameters = [$parameter1 => $parameter1Value, $parameter2 => $parameter2Value];
+        $processingResult = $this->fhirPatientService->getAll($fhirSearchParameters);
+        $this->assertGetAllSearchResults($processingResult);
+    }
+
+    #[Test]
+    public function testGetOne(): void
+    {
+        $actualResult = $this->fhirPatientService->getAll([]);
+        $this->assertNotEmpty($actualResult->getData(), "Get All should have returned a result");
+
+        $this->assertInstanceOf(FhirPatient::class, $actualResult->getData()[0], "Instance returned should have been the correct patient class");
+        $expectedId = $actualResult->getData()[0]->getId()->getValue();
 
         $actualResult = $this->fhirPatientService->getOne($expectedId);
         $this->assertGreaterThan(0, $actualResult->getData());
-        $actualId = $actualResult->getData()[0]->getId();
+        $actualId = $actualResult->getData()[0]->getId()->getValue();
 
         $this->assertEquals($expectedId, $actualId);
     }
 
-       /**
-     * @covers ::getOne with an invalid uuid
-     */
-    public function testGetOneInvalidUuid()
+    #[Test]
+    public function testGetOneInvalidUuid(): void
     {
         $actualResult = $this->fhirPatientService->getOne('not-a-uuid');
         $this->assertGreaterThan(0, count($actualResult->getValidationMessages()));

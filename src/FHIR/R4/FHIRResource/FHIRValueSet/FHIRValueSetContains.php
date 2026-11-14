@@ -341,7 +341,7 @@ class FHIRValueSetContains extends FHIRBackboneElement implements \JsonSerializa
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -349,7 +349,7 @@ class FHIRValueSetContains extends FHIRBackboneElement implements \JsonSerializa
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->system)) {
@@ -386,15 +386,13 @@ class FHIRValueSetContains extends FHIRBackboneElement implements \JsonSerializa
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<ValueSetContains xmlns="http://hl7.org/fhir"></ValueSetContains>');
-        }
+        $sxe ??= new \SimpleXMLElement('<ValueSetContains xmlns="http://hl7.org/fhir"></ValueSetContains>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->system)) {
             $this->system->xmlSerialize(true, $sxe->addChild('system'));

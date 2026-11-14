@@ -8,7 +8,7 @@
  * if the setting in Globals > Billing is set for "Prints the CMS 1500 on the Preprinted form"
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Ken Chapple <ken@mi-squared.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @author    Jerry Padgett <sjpadgett@gmail.com>
@@ -20,13 +20,17 @@
 
 namespace OpenEMR\Billing\BillingProcessor\Tasks;
 
+use OpenEMR\Billing\BillingProcessor\BillingClaim;
 use OpenEMR\Billing\BillingProcessor\GeneratorCanValidateInterface;
 use OpenEMR\Billing\BillingProcessor\GeneratorInterface;
 use OpenEMR\Billing\BillingProcessor\LoggerInterface;
-use OpenEMR\Billing\BillingProcessor\BillingClaim;
 use OpenEMR\Billing\Hcfa1500;
+use OpenEMR\Core\OEGlobalsBag;
 
-class GeneratorHCFA_PDF_IMG extends GeneratorHCFA_PDF implements GeneratorInterface, GeneratorCanValidateInterface, LoggerInterface
+class GeneratorHCFA_PDF_IMG extends GeneratorHCFA_PDF implements
+    GeneratorInterface,
+    GeneratorCanValidateInterface,
+    LoggerInterface
 {
     /**
      * The only difference between this and the parent PDF generator
@@ -34,7 +38,7 @@ class GeneratorHCFA_PDF_IMG extends GeneratorHCFA_PDF implements GeneratorInterf
      * claim form.
      *
      * Whether this action is available is configured in Globals > Billing
-     * withe checkbox "Prints the CMS 1500 on the Preprinted form"
+     * with checkbox "Prints the CMS 1500 on the Preprinted form"
      *
      * @param BillingClaim $claim
      */
@@ -42,20 +46,22 @@ class GeneratorHCFA_PDF_IMG extends GeneratorHCFA_PDF implements GeneratorInterf
     {
         $log = '';
         $hcfa = new Hcfa1500();
-        $lines = $hcfa->genHcfa1500($claim->getPid(), $claim->getEncounter(), $log);
-        $hcfa_image = $GLOBALS['images_static_absolute'] . "/cms1500.png";
+        $lines = $hcfa->genHcfa1500($claim->getPid(), $claim->getEncounter(), $log, $claim->getSelectedPayerId());
+        $hcfa_image = OEGlobalsBag::getInstance()->getKernel()->getImagesAbsolute() . "/cms1500.png";
         $this->appendToLog($log);
         $alines = explode("\014", $lines); // form feeds may separate pages
         foreach ($alines as $tmplines) {
-            if ($claim_count++) {
+            if ($this->createNewPage) {
                 $this->pdf->ezNewPage();
+            } else {
+                $this->createNewPage = true;
             }
             $this->pdf->ezSetY($this->pdf->ez['pageHeight'] - $this->pdf->ez['topMargin']);
             $this->pdf->addPngFromFile("$hcfa_image", 0, 0, 612, 792);
-            $this->pdf->ezText($tmplines, 12, array(
+            $this->pdf->ezText($tmplines, 12, [
                 'justification' => 'left',
                 'leading' => 12
-            ));
+            ]);
         }
     }
 }

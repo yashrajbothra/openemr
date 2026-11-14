@@ -14,8 +14,8 @@
  * of the License, or (at your option) any later version.
  */
 
+use OpenEMR\Core\OEGlobalsBag;
 use OpenEMR\Events\PatientDocuments\PatientDocumentEvent;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\EventDispatcher\GenericEvent;
 
 /**
@@ -30,27 +30,27 @@ use Symfony\Component\EventDispatcher\GenericEvent;
  * {dispatchPatientDocumentEvent event="javascript_ready_fax_dialog"}
  * {dispatchPatientDocumentEvent event="actions_render_fax_anchor"}
  *
- * @param array
- * @param Smarty
+ * @param array $params
+ * @param mixed $smarty
  */
 
 
-function smarty_function_dispatchPatientDocumentEvent($params, &$smarty)
+function smarty_function_dispatchPatientDocumentEvent($params, &$smarty): void
 {
     if (empty($params['event'])) {
-        $smarty->trigger_error("dispatchPatientDocumentEvent: missing 'event' parameter");
+        trigger_error("dispatchPatientDocumentEvent: missing 'event' parameter", E_USER_WARNING);
         return;
     } else {
         $event = $params['event'];
     }
 
-    $eventDispatcher = $GLOBALS['kernel']->getEventDispatcher();
+    $eventDispatcher = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher();
     if ($event == "javascript_ready_fax_dialog") {
-        $eventDispatcher->dispatch(PatientDocumentEvent::JAVASCRIPT_READY_FAX_DIALOG, new GenericEvent());
+        $eventDispatcher->dispatch(new GenericEvent(), PatientDocumentEvent::JAVASCRIPT_READY_FAX_DIALOG);
     } elseif ($event == "actions_render_fax_anchor") {
-        $eventDispatcher->dispatch(PatientDocumentEvent::ACTIONS_RENDER_FAX_ANCHOR, new GenericEvent());
+        $eventDispatcher->dispatch(new GenericEvent(), PatientDocumentEvent::ACTIONS_RENDER_FAX_ANCHOR);
     } else {
-        $smarty->trigger_error("dispatchPatientDocumentEvent: invalid 'event' parameter");
+        trigger_error("dispatchPatientDocumentEvent: invalid 'event' parameter", E_USER_WARNING);
         return;
     }
 }

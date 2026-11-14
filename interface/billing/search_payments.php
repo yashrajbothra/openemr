@@ -6,7 +6,7 @@
 *
 *
 * @package   OpenEMR
-* @link      http://www.open-emr.org
+* @link      https://www.open-emr.org
 * @author    Eldho Chacko <eldho@zhservices.com>
 * @author    Paul Simon K <paul@zhservices.com>
 * @author    Brady Miller <brady.g.miller@gmail.com>
@@ -19,12 +19,27 @@
 
 require_once("../globals.php");
 require_once("../../custom/code_types.inc.php");
-require_once("$srcdir/patient.inc");
-require_once("$srcdir/options.inc.php");
-require_once("$srcdir/payment.inc.php");
 
+use OpenEMR\BC\Utilities;
+use OpenEMR\Common\Acl\AccessDeniedHelper;
+use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\Billing\Payments\DeletePayment;
 use OpenEMR\OeUI\OemrUI;
+
+$srcDir = OEGlobalsBag::getInstance()->getSrcDir();
+require_once($srcDir . '/options.inc.php');
+
+$ResultSearch = null;
+$PaymentDateString = '';
+$StringSessionId = '';
+
+if (!AclMain::aclCheckCore('acct', 'bill', '', 'write') && !AclMain::aclCheckCore('acct', 'eob', '', 'write')) {
+    AccessDeniedHelper::denyWithTemplate("ACL check failed for acct/bill or acct/eob: Search Payment", xl("Search Payment"));
+}
+
+$eventDispatcher = OEGlobalsBag::getInstance()->getKernel()->getEventDispatcher();
 
 //===============================================================================
 //Deletion of payment and its corresponding distributions.
@@ -32,7 +47,7 @@ use OpenEMR\OeUI\OemrUI;
 set_time_limit(0);
 if (isset($_POST["mode"])) {
     if ($_POST["mode"] == "DeletePayments") {
-        $DeletePaymentId = isset($_POST['DeletePaymentId']) ? trim($_POST['DeletePaymentId']) : '';
+        $DeletePaymentId = isset($_POST['DeletePaymentId']) ? trim((string) $_POST['DeletePaymentId']) : '';
         $ResultSearch = sqlStatement(
             "SELECT distinct encounter, pid from ar_activity where deleted IS NULL AND session_id = ?",
             [$DeletePaymentId]
@@ -44,10 +59,11 @@ if (isset($_POST["mode"])) {
                 sqlStatement("update form_encounter set last_level_closed=last_level_closed - 1 where pid =? and encounter=?", [$PId, $Encounter]);
             }
         }
-
+        //dispatch this payment is being deleted trigger refund process
+        $eventDispatcher->dispatch(new DeletePayment($DeletePaymentId), DeletePayment::ACTION_DELETE_PAYMENT);
     //delete and log that action
-        row_delete("ar_session", "session_id ='" . add_escape_custom($DeletePaymentId) . "'");
-        row_modify("ar_activity", "deleted = NOW()", "deleted IS NULL AND session_id = '" . add_escape_custom($DeletePaymentId) . "'");
+        payment_row_delete("ar_session", "session_id ='" . add_escape_custom($DeletePaymentId) . "'");
+        payment_row_modify("ar_activity", "deleted = NOW()", "deleted IS NULL AND session_id = '" . add_escape_custom($DeletePaymentId) . "'");
         $Message = 'Delete';
     //------------------
         $_POST["mode"] = "SearchPayment";
@@ -57,21 +73,21 @@ if (isset($_POST["mode"])) {
 //Search section.
 //===============================================================================
     if ($_POST["mode"] == "SearchPayment") {
-        $FromDate = isset($_POST['FromDate']) ? trim($_POST['FromDate']) : '';
-        $ToDate = isset($_POST['ToDate']) ? trim($_POST['ToDate']) : '';
-        $PaymentMethod = isset($_POST['payment_method']) ? trim($_POST['payment_method']) : '';
-        $CheckNumber = isset($_POST['check_number']) ? trim($_POST['check_number']) : '';
-        $PaymentAmount = isset($_POST['payment_amount']) ? trim($_POST['payment_amount']) : '';
-        $PayingEntity = isset($_POST['type_name']) ? trim($_POST['type_name']) : '';
-        $PaymentCategory = isset($_POST['adjustment_code']) ? trim($_POST['adjustment_code']) : '';
-        $PaymentFrom = isset($_POST['hidden_type_code']) ? trim($_POST['hidden_type_code']) : '';
-        $PaymentStatus = isset($_POST['PaymentStatus']) ? trim($_POST['PaymentStatus']) : '';
-        $PaymentSortBy = isset($_POST['PaymentSortBy']) ? trim($_POST['PaymentSortBy']) : '';
-        $PaymentDate = isset($_POST['payment_date']) ? trim($_POST['payment_date']) : '';
+        $FromDate = isset($_POST['FromDate']) ? trim((string) $_POST['FromDate']) : '';
+        $ToDate = isset($_POST['ToDate']) ? trim((string) $_POST['ToDate']) : '';
+        $PaymentMethod = isset($_POST['payment_method']) ? trim((string) $_POST['payment_method']) : '';
+        $CheckNumber = isset($_POST['check_number']) ? trim((string) $_POST['check_number']) : '';
+        $PaymentAmount = isset($_POST['payment_amount']) ? trim((string) $_POST['payment_amount']) : '';
+        $PayingEntity = isset($_POST['type_name']) ? trim((string) $_POST['type_name']) : '';
+        $PaymentCategory = isset($_POST['adjustment_code']) ? trim((string) $_POST['adjustment_code']) : '';
+        $PaymentFrom = isset($_POST['hidden_type_code']) ? trim((string) $_POST['hidden_type_code']) : '';
+        $PaymentStatus = isset($_POST['PaymentStatus']) ? trim((string) $_POST['PaymentStatus']) : '';
+        $PaymentSortBy = isset($_POST['PaymentSortBy']) ? trim((string) $_POST['PaymentSortBy']) : '';
+        $PaymentDate = isset($_POST['payment_date']) ? trim((string) $_POST['payment_date']) : '';
         $QueryString = "Select * from  ar_session where  ";
         $And = '';
 
-        $sqlBindArray = array();
+        $sqlBindArray = [];
 
         if ($PaymentDate == 'date_val') {
             $PaymentDateString = ' check_date ';
@@ -188,14 +204,10 @@ if (isset($_POST["mode"])) {
         }
 
         if ($PaymentSortBy != '') {
-            $SortFieldOld = isset($_POST['SortFieldOld']) ? trim($_POST['SortFieldOld']) : '';
-            $Sort = isset($_POST['Sort']) ? trim($_POST['Sort']) : '';
+            $SortFieldOld = isset($_POST['SortFieldOld']) ? trim((string) $_POST['SortFieldOld']) : '';
+            $Sort = isset($_POST['Sort']) ? trim((string) $_POST['Sort']) : '';
             if ($SortFieldOld == $PaymentSortBy) {
-                if ($Sort == 'DESC' || $Sort == '') {
-                    $Sort = 'ASC';
-                } else {
-                    $Sort = 'DESC';
-                }
+                $Sort = $Sort == 'DESC' || $Sort == '' ? 'ASC' : 'DESC';
             } else {
                 $Sort = 'ASC';
             }
@@ -215,8 +227,8 @@ if (isset($_POST["mode"])) {
 <title><?php echo xlt("Search Payment") ?></title>
 <?php Header::setupHeader(['datetime-picker']); ?>
 
-<?php include_once("{$GLOBALS['srcdir']}/payment_jav.inc.php"); ?>
-<?php include_once("{$GLOBALS['srcdir']}/ajax/payment_ajax_jav.inc.php"); ?>
+<?php include_once(OEGlobalsBag::getInstance()->getSrcDir() . "/payment_jav.inc.php"); ?>
+<?php include_once(OEGlobalsBag::getInstance()->getSrcDir() . "/ajax/payment_ajax_jav.inc.php"); ?>
 
 <script>
     function refreshSearch() {
@@ -247,7 +259,7 @@ if (isset($_POST["mode"])) {
             <?php $datetimepicker_timepicker = false; ?>
             <?php $datetimepicker_showseconds = false; ?>
             <?php $datetimepicker_formatInput = true; ?>
-            <?php require($GLOBALS['srcdir'] . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
+            <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/jquery-datetimepicker-2-5-4.js.php'); ?>
             <?php // can add any additional javascript settings to datetimepicker here; need to prepend first setting with a comma ?>
         });
     });
@@ -328,17 +340,17 @@ if (isset($_POST["mode"])) {
 }
 </style>
 <?php
-$arrOeUiSettings = array(
+$arrOeUiSettings = [
 'heading_title' => xl('Payments'),
 'include_patient_name' => false,// use only in appropriate pages
 'expandable' => true,
-'expandable_files' => array("search_payments_xpd", "new_payment_xpd", "era_payments_xpd"),//all file names need suffix _xpd
+'expandable_files' => ["search_payments_xpd", "new_payment_xpd", "era_payments_xpd"],//all file names need suffix _xpd
 'action' => "",//conceal, reveal, search, reset, link or back
 'action_title' => "",
 'action_href' => "",//only for actions - reset, link or back
 'show_help_icon' => false,
 'help_file_name' => ""
-);
+];
 $oemr_ui = new OemrUI($arrOeUiSettings);
 ?>
 </head>
@@ -492,11 +504,7 @@ $oemr_ui = new OemrUI($arrOeUiSettings);
                                         }
                                         //=============================================
                                         $CountIndex++;
-                                        if ($CountIndex % 2 == 1) {
-                                            $bgcolor = '#ddddff';
-                                        } else {
-                                            $bgcolor = '#ffdddd';
-                                        }
+                                        $bgcolor = $CountIndex % 2 == 1 ? '#ddddff' : '#ffdddd';
                                         ?>
                                         <tr bgcolor='<?php echo attr($bgcolor); ?>' class="text">
                                             <td>
@@ -506,7 +514,7 @@ $oemr_ui = new OemrUI($arrOeUiSettings);
                                                 <a class="medium_modal" href="edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>"><?php echo text($RowSearch['session_id']); ?></a>
                                             </td>
                                             <td>
-                                                <a class="medium_modal" href='edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>'"><?php echo $RowSearch['check_date'] == '0000-00-00' ? '&nbsp;' : text(oeFormatShortDate($RowSearch['check_date'])); ?></a>
+                                                <a class="medium_modal" href='edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>'"><?php echo Utilities::isDateEmpty($RowSearch['check_date']) ? '&nbsp;' : text(oeFormatShortDate($RowSearch['check_date'])); ?></a>
                                             </td>
                                             <td>
                                                 <a class="medium_modal" href='edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>'">
@@ -525,8 +533,8 @@ $oemr_ui = new OemrUI($arrOeUiSettings);
                                                 ?></a>
                                             </td>
                                             <td>
-                                                <!--<a class='iframe medium_modal' href="edit_payment.php?payment_id=<?php echo htmlspecialchars($RowSearch['session_id']); ?>"><?php echo $Payer == '' ? '&nbsp;' : htmlspecialchars($Payer); ?></a>-->
-                                                <a class="medium_modal" data-target="#myModal1" data-toggle="modal" onclick="loadiframe('edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>"><?php echo $Payer == '' ? '&nbsp;' : text($Payer); ?></a><!--link to iframe-->
+                                                <!--<a class='iframe medium_modal' href="edit_payment.php?payment_id=<?php echo htmlspecialchars((string) $RowSearch['session_id']); ?>"><?php echo $Payer == '' ? '&nbsp;' : htmlspecialchars((string) $Payer); ?></a>-->
+                                                <a class="medium_modal" href='edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>')"><?php echo $Payer == '' ? '&nbsp;' : text($Payer); ?></a><!--link to iframe-->
                                             </td>
                                             <td>
                                                 <a class="medium_modal" href='edit_payment.php?payment_id=<?php echo attr_url($RowSearch['session_id']); ?>'><?php echo $RowSearch['payer_id'] * 1 > 0 ? text($RowSearch['payer_id']) : '&nbsp;'; ?></a>
@@ -601,10 +609,5 @@ $oemr_ui = new OemrUI($arrOeUiSettings);
         </div>
     </div><!--end of container div-->
 <?php $oemr_ui->oeBelowContainerDiv(); ?>
-<script>
-function loadiframe(htmlHref) { //load iframe
-    document.getElementById('targetiframe1').src = htmlHref;
-}
-</script>
 </body>
 </html>

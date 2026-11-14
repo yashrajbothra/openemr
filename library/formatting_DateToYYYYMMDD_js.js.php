@@ -16,12 +16,14 @@
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
+use OpenEMR\Core\OEGlobalsBag;
+
 ?>
 
 function DateToYYYYMMDD_js(value){
     var value = value.replace(/\//g,'-');
     var parts = value.split('-');
-    var date_display_format = <?php echo js_escape((empty($GLOBALS['date_display_format']) ? 0 : $GLOBALS['date_display_format'])) ?>;
+    var date_display_format = <?php echo js_escape((empty(OEGlobalsBag::getInstance()->get('date_display_format')) ? 0 : OEGlobalsBag::getInstance()->get('date_display_format'))) ?>;
 
     if (date_display_format == 1)      // mm/dd/yyyy, note year is added below
         value = parts[2] + '-' + parts[0]  + '-' + parts[1];
@@ -32,13 +34,20 @@ function DateToYYYYMMDD_js(value){
 }
 
 function TimeToHHMMSS_js(value){
-    //For now, just return the Value, since input fields are not formatting time.
-    // This can be upgraded if decided to format input time fields.
+    if (value.trim() == '') {
+        return '';
+    }
+
+    var is_pm = value.trim().toUpperCase().indexOf('PM');
+    if (is_pm > 0) {
+        let d = new Date("1970-01-01 " + value);
+        let value = d.setHours(d.getHours() + 12).toTimeString();
+    }
     return value.trim();
 }
 
 function DateToYYYYMMDDHHMMSS_js(value){
-    if (typeof value === 'undefined') {
+    if (typeof value === 'undefined' || value.trim() == '') {
         return undefined;
     }
     var parts = value.split(' ');

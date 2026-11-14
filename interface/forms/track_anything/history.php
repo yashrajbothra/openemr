@@ -4,23 +4,33 @@
  * Encounter form to track any clinical parameter.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Joe Slam <trackanything@produnis.de>
  * @author    Brady Miller <brady.g.miller@gmail.com>
+ * @author    Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2014 Joe Slam <trackanything@produnis.de>
  * @copyright Copyright (c) 2019 Brady Miller <brady.g.miller@gmail.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-require_once(__DIR__ . "/../../globals.php");
-require_once($GLOBALS["srcdir"] . "/api.inc");
+declare(strict_types=1);
 
+require_once(__DIR__ . "/../../globals.php");
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Session\PatientSessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$pid = PatientSessionUtil::getPid();
+$web_root = OEGlobalsBag::getInstance()->getWebRoot();
 
 $returnurl = 'encounter_top.php';
-if (!$formid) {
-    $formid = $_POST['formid']; // call from track_anything encounter
+$fromencounter = 0;
+if (empty($formid)) {
+    $formid = $_POST['formid'] ?? null; // call from track_anything encounter
     $fromencounter = 1;
     if (!$formid) {
         $formid = $_GET['formid']; // call from demographic-widget "track_anything_fragement.php"
@@ -28,13 +38,13 @@ if (!$formid) {
     }
 }
 
-if ($_POST['fromencounter'] != '') {
+if (!empty($_POST['fromencounter'])) {
     $fromencounter = $_POST['fromencounter'];
 }
 
 // get $_POSTed vars
 //----------------------
-$ASC_DESC = $_POST['ASC_DESC'];
+$ASC_DESC = $_POST['ASC_DESC'] ?? null;
 
 if (!$ASC_DESC) {
     $ASC_DESC = "DESC"; # order DESC by default
@@ -46,32 +56,38 @@ if (!$ASC_DESC) {
 // set up some vars
 //-------------------
 $items_c        = 0;        # (count how many items are tracked)
-$items_n        = array();  # (save items names)
+$items_n        = [];  # (save items names)
 $row_gl         = 0;        # (global count of data_rows)
 $row_lc         = 0;        # (local count of data_rows)
 $hidden_loop    = '';       # (collects all <input type='hidden'> entries )
-$date_global    = array();  # (collects items datetime for global rows)
-$value_global   = array();  # (collects items' values [global array])
-$date_local     = array();  # (collects items' datetime for local row)
-$value_local    = array();  # (collects item's values [local array])
+$date_global    = [];  # (collects items datetime for global rows)
+$value_global   = [];  # (collects items' values [global array])
+$date_local     = [];  # (collects items' datetime for local row)
+$value_local    = [];  # (collects item's values [local array])
 $save_item_flag = 0;        # flag to get item_names
 $localplot      = 0;        # flag if local plot-button is shown
-$localplot_c    = array();  # dummy counter for localplot
+$localplot_c    = [];  # dummy counter for localplot
 $globalplot     = 0;        # flag if global plot-button is shown
-$globalplot_c   = array();  # flag if global plot-button is shown
+$globalplot_c   = [];  # flag if global plot-button is shown
 $track_count    = 0;        # counts tracks and generates div-ids
+$row            = 0;        # cumulative data-row counter (used at $row++ inside loop)
 //-----------end setup vars
+
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
 
 echo "<html><head>";
 // Javascript support and Javascript-functions
 //******* **********************************
 ?>
 
-<?php require $GLOBALS['srcdir'] . '/js/xl/dygraphs.js.php'; ?>
+<?php require OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/dygraphs.js.php'; ?>
 
 <?php Header::setupHeader('dygraphs'); ?>
 
-<link rel="stylesheet" href="style.css">
+<title><?php echo xlt('Tracker')?></title>
+
+
+<link rel="stylesheet" href="style.css?v=<?php echo attr_url(OEGlobalsBag::getInstance()->getString('v_js_includes')); ?>">
 
 <script>
 //-------------- checkboxes checked checker --------------------
@@ -102,7 +118,7 @@ function plot_graph(checkedBoxes, theitems, thetrack, thedates, thevalues, track
                      items:  theitems,
                      track:  thetrack,
                      thecheckboxes: checkedBoxes,
-                     csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken()); ?>
+                     csrf_token_form: <?php echo js_escape(CsrfUtils::collectCsrfToken(session: $session)); ?>
                    },
              dataType: "json",
              success: function(returnData){
@@ -161,7 +177,7 @@ echo "<input type='hidden' name='fromencounter' value='" . attr($fromencounter) 
 // go to encounter or go to demographics
 //---------------------------------------------
 if ($fromencounter == 1) {
-    echo "<td>&nbsp;&nbsp;&nbsp;<a class='btn btn-primary' href='" . $GLOBALS['webroot'] . "/interface/patient_file/encounter/$returnurl' onclick='top.restoreSession()'><span>" . xlt('Back to encounter') . "</span></a></td>";
+    echo "<td>&nbsp;&nbsp;&nbsp;<a class='btn btn-primary' href='" . OEGlobalsBag::getInstance()->getWebRoot() . "/interface/patient_file/encounter/$returnurl' onclick='top.restoreSession()'><span>" . xlt('Back to encounter') . "</span></a></td>";
 }
 
 if ($fromencounter == 0) {
@@ -183,7 +199,7 @@ $spell .= "FROM form_track_anything ";
 $spell .= "INNER JOIN form_track_anything_type ON form_track_anything.procedure_type_id = form_track_anything_type.track_anything_type_id ";
 $spell .= "WHERE id = ? AND form_track_anything_type.active = 1";
 //---
-$myrow = sqlQuery($spell, array($formid));
+$myrow = sqlQuery($spell, [$formid]);
     $the_procedure = $myrow["the_id"];
     $the_procedure_name = $myrow["the_name"];
 
@@ -211,16 +227,16 @@ $spell .= "AND forms.formdir = 'track_anything' AND forms.pid = ? ";
 $spell .= "GROUP BY id ";
 $spell .= "ORDER BY sortdate " . escape_sort_order($ASC_DESC);
 //---
-$query = sqlStatement($spell, array($the_procedure,$pid));
+$query = sqlStatement($spell, [$the_procedure,$pid]);
 while ($myrow = sqlFetchArray($query)) {
     $the_track = $myrow["id"];
     $the_encounter = $myrow["encounter"];
     $track_count++;
 
     // reset local arrays;
-    $date_local     = array();  # (collects items' datetime for local row)
-    $value_local    = array();  # (collects item's values [local array])
-    $localplot_c    = array(); // counter to decide if graph-button is shown
+    $date_local     = [];  # (collects items' datetime for local row)
+    $value_local    = [];  # (collects item's values [local array])
+    $localplot_c    = []; // counter to decide if graph-button is shown
     $shownameflag   = 0; // show table-head ?
     $localplot      = 0; // show graph-button?
     $col            = 0; // how many Items per row
@@ -231,14 +247,15 @@ while ($myrow = sqlFetchArray($query)) {
     // get every single tracks
     echo "<div id='graph" . attr($track_count) . "' class='chart-dygraphs'> </div><br />"; // here goes the graph
     echo "<small>[" . xlt('Data from') . " ";
-    echo "<a href='../../patient_file/encounter/encounter_top.php?set_encounter=" . attr_url($the_encounter) . "' target='RBot'>" . xlt('encounter') . " #" . text($the_encounter) . "</a>]";
+    $encounterQuery = http_build_query(['set_encounter' => $the_encounter, 'csrf_token_form' => CsrfUtils::collectCsrfToken(session: $session)]);
+    echo "<a href='../../patient_file/encounter/encounter_top.php?" . attr($encounterQuery) . "' target='RBot'>" . xlt('encounter') . " #" . text($the_encounter) . "</a>]";
     echo "</small>";
     echo "<table border='1'>";
     $spell2  = "SELECT DISTINCT track_timestamp ";
     $spell2 .= "FROM form_track_anything_results ";
     $spell2 .= "WHERE track_anything_id = ? ";
     $spell2 .= "ORDER BY track_timestamp " . escape_sort_order($ASC_DESC);
-    $query2 = sqlStatement($spell2, array($the_track));
+    $query2 = sqlStatement($spell2, [$the_track]);
     while ($myrow2 = sqlFetchArray($query2)) {
         $thistime = $myrow2['track_timestamp'];
         $shownameflag++;
@@ -250,7 +267,7 @@ while ($myrow = sqlFetchArray($query)) {
         $spell3 .= "WHERE track_anything_id = ? AND track_timestamp = ? AND form_track_anything_type.active = 1 ";
         $spell3 .= "ORDER BY form_track_anything_results.track_timestamp " . escape_sort_order($ASC_DESC) . ", ";
         $spell3 .= " form_track_anything_type.position ASC, the_name ASC ";
-        $query3  = sqlStatement($spell3, array($the_track, $thistime));
+        $query3  = sqlStatement($spell3, [$the_track, $thistime]);
 
         // print local <table>-heads
         // ----------------------------
@@ -279,7 +296,7 @@ while ($myrow = sqlFetchArray($query)) {
         $date_global[$row_gl] = $thistime; // save datetime into global array
         $date_local[$row_lc]  = $thistime; // save datetime into local array
 
-        $query3  = sqlStatement($spell3, array($the_track, $thistime));
+        $query3  = sqlStatement($spell3, [$the_track, $thistime]);
         while ($myrow3 = sqlFetchArray($query3)) {
             echo "<td class='item'>&nbsp;" . text($myrow3['result']) . "&nbsp;</td>";
             if (is_numeric($myrow3['result'])) {
@@ -305,8 +322,17 @@ while ($myrow = sqlFetchArray($query)) {
         echo "<td class='check'>";
         for ($row_b = 0; $row_b < $row_lc; $row_b++) {
             if (is_numeric($value_local[$col_i][$row_b])) {
-                $localplot_c[$col_i]++; // count more than 1 to show graph-button
-                $globalplot_c[$col_i]++;
+                if (empty($localplot_c[$col_i])) {
+                    $localplot_c[$col_i] = 1;
+                } else {
+                    $localplot_c[$col_i]++; // count more than 1 to show graph-button
+                }
+
+                if (empty($globalplot_c[$col_i])) {
+                    $globalplot_c[$col_i] = 1;
+                } else {
+                    $globalplot_c[$col_i]++;
+                }
             }
         }
 
@@ -409,7 +435,7 @@ echo "<input type='hidden' name='fromencounter' value='" . attr($fromencounter) 
 // go to encounter or go to demographics
 //---------------------------------------------
 if ($fromencounter == 1) {
-    echo "<td>&nbsp;&nbsp;&nbsp;<a class='btn btn-primary' href='" . $GLOBALS['webroot'] . "/interface/patient_file/encounter/$returnurl' onclick='top.restoreSession()'><span>" . xlt('Back to encounter') . "</span></a></td>";
+    echo "<td>&nbsp;&nbsp;&nbsp;<a class='btn btn-primary' href='" . OEGlobalsBag::getInstance()->getWebRoot() . "/interface/patient_file/encounter/$returnurl' onclick='top.restoreSession()'><span>" . xlt('Back to encounter') . "</span></a></td>";
 }
 
 if ($fromencounter == 0) {

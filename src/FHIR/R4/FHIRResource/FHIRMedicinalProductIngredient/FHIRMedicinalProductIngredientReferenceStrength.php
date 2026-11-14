@@ -248,7 +248,7 @@ class FHIRMedicinalProductIngredientReferenceStrength extends FHIRBackboneElemen
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return $this->get_fhirElementName();
     }
@@ -256,7 +256,7 @@ class FHIRMedicinalProductIngredientReferenceStrength extends FHIRBackboneElemen
     /**
      * @return array
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         $json = parent::jsonSerialize();
         if (isset($this->substance)) {
@@ -281,15 +281,13 @@ class FHIRMedicinalProductIngredientReferenceStrength extends FHIRBackboneElemen
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<MedicinalProductIngredientReferenceStrength xmlns="http://hl7.org/fhir"></MedicinalProductIngredientReferenceStrength>');
-        }
+        $sxe ??= new \SimpleXMLElement('<MedicinalProductIngredientReferenceStrength xmlns="http://hl7.org/fhir"></MedicinalProductIngredientReferenceStrength>');
         parent::xmlSerialize(true, $sxe);
         if (isset($this->substance)) {
             $this->substance->xmlSerialize(true, $sxe->addChild('substance'));

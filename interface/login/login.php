@@ -4,7 +4,7 @@
  * Login screen.
  *
  * @package OpenEMR
- * @link      http://www.open-emr.org
+ * @link    https://www.open-emr.org
  * @author  Rod Roark <rod@sunsetsystems.com>
  * @author  Brady Miller <brady.g.miller@gmail.com>
  * @author  Kevin Yeh <kevin.y@integralemr.com>
@@ -16,39 +16,75 @@
  * @author  Tyler Wrenn <tyler@tylerwrenn.com>
  * @author  Ken Chapple <ken@mi-squared.com>
  * @author  Daniel Pflieger <daniel@mi-squared.com> <daniel@growlingflea.com>
+ * @author  Robert Down <robertdown@live.com>
+ * @author  Michael A. Smith <michael@opencoreemr.com>
  * @copyright Copyright (c) 2019 Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2020 Tyler Wrenn <tyler@tylerwrenn.com>
  * @copyright Copyright (c) 2021 Ken Chapple <ken@mi-squared.com>
  * @copyright Copyright (c) 2021 Daniel Pflieger <daniel@mi-squared.com> <daniel@growlingflea.com>
+ * @copyright Copyright (c) 2021-2023 Robert Down <robertdown@live.com>
+ * @copyright Copyright (c) 2026 OpenCoreEMR Inc <https://opencoreemr.com/>
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
  */
 
-use OpenEMR\Core\Header;
+// prevent UI redressing
+Header("X-Frame-Options: DENY");
+Header("Content-Security-Policy: frame-ancestors 'none'");
+
+use OpenEMR\BC\ServiceContainer;
+use OpenEMR\Common\Session\SessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
+use OpenEMR\Core\OEGlobalsBag;
+use OpenEMR\Events\Core\TemplatePageEvent;
 use OpenEMR\Services\FacilityService;
+use OpenEMR\Services\LogoService;
+use Twig\Error\LoaderError;
+use Twig\Error\RuntimeError;
+use Twig\Error\SyntaxError;
+
+require_once(__DIR__ . "/../../vendor/autoload.php");
+
+$globalsBag = OEGlobalsBag::getInstance();
+
+SessionUtil::setAppCookie(SessionUtil::CORE_SESSION_ID);
 
 $ignoreAuth = true;
 // Set $sessionAllowWrite to true to prevent session concurrency issues during authorization related code
 $sessionAllowWrite = true;
 require_once("../globals.php");
 
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+
+$t = ServiceContainer::getTwig();
+
+$logoService = new LogoService();
+$primaryLogo = $logoService->getLogo("core/login/primary");
+$secondaryLogo = $logoService->getLogo("core/login/secondary");
+$smallLogoOne = $logoService->getLogo("core/login/small_logo_1");
+$smallLogoTwo = $logoService->getLogo("core/login/small_logo_2");
+
+// Fall back to the documented default (see library/globals.inc.php) when the
+// `login_page_layout` row is absent — happens on freshly seeded databases that
+// haven't run the 7.0.0 → 7.0.1 upgrade. Without this the next line passes
+// null into TemplatePageEvent and the login page 500s with no way to recover.
+$layout = $globalsBag->getString('login_page_layout') ?: 'login/layouts/vertical_band.html.twig';
+
 // mdsupport - Add 'App' functionality for user interfaces without standard menu and frames
 // If this script is called with app parameter, validate it without showing other apps.
 //
 // Build a list of valid entries
-$emr_app = array();
-$rs = sqlStatement(
-    "SELECT option_id, title,is_default FROM list_options
-        WHERE list_id=? and activity=1 ORDER BY seq, option_id",
-    array ('apps')
-);
+// Original merge v5.0.1
+$emr_app = [];
+$sql = "SELECT option_id, title,is_default FROM list_options WHERE list_id=? and activity=1 ORDER BY seq, option_id";
+$rs = sqlStatement($sql, ['apps']);
 if (sqlNumRows($rs)) {
     while ($app = sqlFetchArray($rs)) {
-        $app_req = explode('?', trim($app['title']));
+        $app_req = explode('?', trim((string) $app['title']));
         if (! file_exists('../' . $app_req[0])) {
             continue;
         }
 
-            $emr_app [trim($app ['option_id'])] = trim($app ['title']);
+        $emr_app [trim((string) $app ['option_id'])] = trim((string) $app ['title']);
         if ($app ['is_default']) {
             $emr_app_def = $app ['option_id'];
         }
@@ -66,383 +102,177 @@ if (count($emr_app)) {
     if (isset($_REQUEST['app']) && $emr_app[$_REQUEST['app']]) {
         $div_app = sprintf('<input type="hidden" name="appChoice" value="%s">', attr($_REQUEST['app']));
     } else {
+        $opt_htm = '';
         foreach ($emr_app as $opt_disp => $opt_value) {
             $opt_htm .= sprintf(
                 '<option value="%s" %s>%s</option>\n',
                 attr($opt_disp),
-                ($opt_disp == $opt_default ? 'selected="selected"' : ''),
+                ($opt_disp == ($emr_app_def ?? '') ? 'selected="selected"' : ''),
                 text(xl_list_label($opt_disp))
             );
         }
 
         $div_app = sprintf(
             '
-<div id="divApp" class="form-group">
-	<label for="appChoice" class="text-right">%s:</label>
-    <div>
-        <select class="form-control" id="selApp" name="appChoice" size="1">%s</select>
-    </div>
-</div>',
+            <div id="divApp" class="form-group row">
+                <label for="appChoice" class="col-form-label col-sm-4">%s:</label>
+                <div class="col">
+                    <select class="form-control" id="selApp" name="appChoice" size="1">%s</select>
+                </div>
+            </div>',
             xlt('App'),
             $opt_htm
         );
     }
 }
 
-// This code allows configurable positioning in the login page
-$loginrow = "row login-row align-items-center m-5";
 
-if ($GLOBALS['login_page_layout'] == 'left') {
-    $logoarea = "col-md-6 login-bg-left py-3 px-5 py-md-login order-1 order-md-2";
-    $formarea = "col-md-6 p-5 login-area-left order-2 order-md-1";
-} else if ($GLOBALS['login_page_layout'] == 'right') {
-    $logoarea = "col-md-6 login-bg-right py-3 px-5 py-md-login order-1 order-md-1";
-    $formarea = "col-md-6 p-5 login-area-right order-2 order-md-2";
-} else {
-    $logoarea = "col-12 login-bg-center py-3 px-5 order-1";
-    $formarea = "col-12 p-5 login-area-center order-2";
-    $loginrow = "row login-row login-row-center align-items-center";
+function getDefaultLanguage(): array
+{
+    global $globalsBag;
+    $sql = "SELECT * FROM lang_languages where lang_description = ?";
+    $res = sqlStatement($sql, [$globalsBag->getString('language_default')]);
+    $langs = [];
+
+    while ($row = sqlFetchArray($res)) {
+        $langs[] = $row;
+    }
+
+    $id = 1;
+    $desc = "English";
+
+    if (count($langs) == 1) {
+        $id = $langs[0]["lang_id"];
+        $desc = $langs[0]["lang_description"];
+    }
+
+    return ["id" => $id, "language" => $desc];
 }
 
-?>
-<html>
-<head>
-    <?php Header::setupHeader(); ?>
+function getLanguagesList(): array
+{
+    global $globalsBag;
+    $session = SessionWrapperFactory::getInstance()->getActiveSession();
+    $language_choice = $session->get('language_choice');
+    $mainLangID = empty($language_choice) ? '1' : $language_choice;
+    $sql = "SELECT ll.lang_id, IF(LENGTH(ld.definition), ld.definition, ll.lang_description) AS trans_lang_description, ll.lang_description
+        FROM lang_languages AS ll
+        LEFT JOIN lang_constants AS lc ON lc.constant_name = ll.lang_description
+        LEFT JOIN lang_definitions AS ld ON ld.cons_id = lc.cons_id AND ld.lang_id = ?
+        ORDER BY IF(LENGTH(ld.definition),ld.definition,ll.lang_description), ll.lang_id";
+    $res = sqlStatement($sql, [$mainLangID]);
+    $langList = [];
 
-    <title><?php echo text($openemr_name) . " " . xlt('Login'); ?></title>
-
-    <?php
-    if (!empty($GLOBALS['google_signin_enabled']) && !empty($GLOBALS['google_signin_client_id'])) { ?>
-        <meta name="google-signin-client_id" content="<?php echo $GLOBALS['google_signin_client_id']; ?>">
-    <?php } ?>
-    <script>
-        var registrationTranslations = <?php echo json_encode(array(
-            'title' => xla('OpenEMR Product Registration'),
-            'pleaseProvideValidEmail' => xla('Please provide a valid email address'),
-            'success' => xla('Success'),
-            'registeredSuccess' => xla('Your installation of OpenEMR has been registered'),
-            'submit' => xla('Submit'),
-            'noThanks' => xla('No Thanks'),
-            'registeredEmail' => xla('Registered email'),
-            'registeredId' => xla('Registered id'),
-            'genericError' => xla('Error. Try again later'),
-            'closeTooltip' => ''
-        )); ?>;
-
-        var registrationConstants = <?php echo json_encode(array(
-            'webroot' => $GLOBALS['webroot']
-        )); ?>;
-    </script>
-
-    <script src="<?php echo $webroot ?>/interface/product_registration/product_registration_service.js?v=<?php echo $v_js_includes; ?>"></script>
-    <script src="<?php echo $webroot ?>/interface/product_registration/product_registration_controller.js?v=<?php echo $v_js_includes; ?>"></script>
-
-    <script>
-        $(function () {
-            init();
-
-            var productRegistrationController = new ProductRegistrationController();
-            productRegistrationController.getProductRegistrationStatus(function(err, data) {
-                if (err) { return; }
-
-                if (data.statusAsString === 'UNREGISTERED') {
-                    productRegistrationController.showProductRegistrationModal();
-                }
-            });
-        });
-
-        function init() {
-            $("#authUser").focus();
+    while ($row = sqlFetchArray($res)) {
+        if (!$globalsBag->getBoolean('allow_debug_language') && $row['lang_description'] == 'dummy') {
+            continue; // skip the dummy language
         }
 
-        function transmit_form(element) {
-            // disable submit button to insert a notification of working
-            element.disabled = true;
-            // nothing fancy. mainly for mobile.
-            element.innerHTML = '<i class="fa fa-sync fa-spin"></i> ' + jsText(<?php echo xlj("Authenticating"); ?>);
-            <?php if (!empty($GLOBALS['restore_sessions'])) { ?>
-                // Delete the session cookie by setting its expiration date in the past.
-                // This forces the server to create a new session ID.
-                var olddate = new Date();
-                olddate.setFullYear(olddate.getFullYear() - 1);
-                <?php if (version_compare(phpversion(), '7.3.0', '>=')) { ?>
-                    // Using the SameSite setting when using php version 7.3.0 or above, which avoids browser warnings when cookie is not 'secure' and SameSite is not set to anything
-                    document.cookie = <?php echo json_encode(urlencode(session_name())); ?> + '=' + <?php echo json_encode(urlencode(session_id())); ?> + '; path=<?php echo($web_root ? $web_root : '/');?>; expires=' + olddate.toGMTString() + '; SameSite=Strict';
-                <?php } else { ?>
-                    document.cookie = <?php echo json_encode(urlencode(session_name())); ?> + '=' + <?php echo json_encode(urlencode(session_id())); ?> + '; path=<?php echo($web_root ? $web_root : '/');?>; expires=' + olddate.toGMTString();
-                <?php } ?>
-            <?php } ?>
-            document.forms[0].submit();
-        }
-    </script>
-</head>
-<body class="login">
-  <form method="POST" id="login_form" autocomplete="off" action="../main/main_screen.php?auth=login&site=<?php echo attr($_SESSION['site_id']); ?>" target="_top" name="login_form">
-      <div class="<?php echo $loginrow; ?>">
-          <div class="<?php echo $formarea; ?>">
-              <input type='hidden' name='new_login_session_management' value='1' />
-
-              <?php
-              // collect default language id
-                $res2 = sqlStatement("select * from lang_languages where lang_description = ?", array($GLOBALS['language_default']));
-                for ($iter = 0; $row = sqlFetchArray($res2); $iter++) {
-                    $result2[$iter] = $row;
-                }
-
-                if (count($result2) == 1) {
-                    $defaultLangID = $result2[0]["lang_id"];
-                    $defaultLangName = $result2[0]["lang_description"];
-                } else {
-                    //default to english if any problems
-                    $defaultLangID = 1;
-                    $defaultLangName = "English";
-                }
-
-              // set session variable to default so login information appears in default language
-                $_SESSION['language_choice'] = $defaultLangID;
-              // collect languages if showing language menu
-                if ($GLOBALS['language_menu_login']) {
-                    // sorting order of language titles depends on language translation options.
-                    $mainLangID = empty($_SESSION['language_choice']) ? '1' : $_SESSION['language_choice'];
-                    // Use and sort by the translated language name.
-                    $sql = "SELECT ll.lang_id, " .
-                      "IF(LENGTH(ld.definition),ld.definition,ll.lang_description) AS trans_lang_description, " .
-                      "ll.lang_description " .
-                      "FROM lang_languages AS ll " .
-                      "LEFT JOIN lang_constants AS lc ON lc.constant_name = ll.lang_description " .
-                      "LEFT JOIN lang_definitions AS ld ON ld.cons_id = lc.cons_id AND " .
-                      "ld.lang_id = ? " .
-                      "ORDER BY IF(LENGTH(ld.definition),ld.definition,ll.lang_description), ll.lang_id";
-                    $res3 = SqlStatement($sql, array($mainLangID));
-
-                    for ($iter = 0; $row = sqlFetchArray($res3); $iter++) {
-                        $result3[$iter] = $row;
-                    }
-
-                    if (count($result3) == 1) {
-                        //default to english if only return one language
-                        echo "<input type='hidden' name='languageChoice' value='1' />\n";
-                    }
-                } else {
-                    echo "<input type='hidden' name='languageChoice' value='" . attr($defaultLangID) . "' />\n";
-                }
-
-                if ($GLOBALS['login_into_facility']) {
-                    $facilityService = new FacilityService();
-                    $facilities = $facilityService->getAllFacility();
-                    $facilitySelected = ($GLOBALS['set_facility_cookie'] && isset($_COOKIE['pc_facility'])) ? $_COOKIE['pc_facility'] : null;
-                }
-                ?>
-              <?php if (isset($_SESSION['relogin']) && ($_SESSION['relogin'] == 1)) { // Begin relogin dialog ?>
-              <div class="alert alert-info m-1 font-weight-bold">
-                    <?php echo xlt('Password security has recently been upgraded.') . '&nbsp;&nbsp;' . xlt('Please login again.'); ?>
-              </div>
-                    <?php unset($_SESSION['relogin']);
-              }
-              if (isset($_SESSION['loginfailure']) && ($_SESSION['loginfailure'] == 1)) { // Begin login failure block ?>
-              <div class="alert alert-danger login-failure m-1">
-                  <?php echo xlt('Invalid username or password'); ?>
-              </div>
-            <?php } // End login failure block ?>
-            <div id="standard-auth-username" class="form-group">
-                <label for="authUser" class="text-right"><?php echo xlt('Username:'); ?></label>
-                <input type="text" class="form-control" id="authUser" name="authUser" placeholder="<?php echo xla('Username:'); ?>" />
-            </div>
-            <div id="standard-auth-password" class="form-group">
-                <label for="clearPass" class="text-right"><?php echo xlt('Password:'); ?></label>
-                <input type="password" class="form-control" id="clearPass" name="clearPass" placeholder="<?php echo xla('Password:'); ?>" />
-            </div>
-            <?php echo $div_app; ?>
-            <?php if ($GLOBALS['language_menu_login'] && (count($result3) != 1)) : // Begin language menu block ?>
-                <div class="form-group">
-                    <label for="language" class="text-right"><?php echo xlt('Language'); ?>:</label>
-                    <div>
-                        <select class="form-control" name="languageChoice" size="1">
-                            <?php
-                            echo "<option selected='selected' value='" . attr($defaultLangID) . "'>" . xlt('Default') . " - " . xlt($defaultLangName) . "</option>\n";
-                            foreach ($result3 as $iter) :
-                                if ($GLOBALS['language_menu_showall']) {
-                                    if (!$GLOBALS['allow_debug_language'] && $iter['lang_description'] == 'dummy') {
-                                        continue; // skip the dummy language
-                                    }
-
-                                        echo "<option value='" . attr($iter['lang_id']) . "'>" . text($iter['trans_lang_description']) . "</option>\n";
-                                } else {
-                                    if (in_array($iter['lang_description'], $GLOBALS['language_menu_show'])) {
-                                        if (!$GLOBALS['allow_debug_language'] && $iter['lang_description'] == 'dummy') {
-                                            continue; // skip the dummy language
-                                        }
-
-                                            echo "<option value='" . attr($iter['lang_id']) . "'>" . text($iter['trans_lang_description']) . "</option>\n";
-                                    }
-                                }
-                            endforeach; ?>
-                        </select>
-                    </div>
-                </div>
-            <?php endif; // End language menu block ?>
-            <?php if ($GLOBALS['login_into_facility']) { // Begin facilities menu block ?>
-                <div class="form-group">
-                    <label for="facility" class="text-right"><?php echo xlt('Facility'); ?>:</label>
-                    <div>
-                        <select class="form-control" name="facility" size="1">
-                            <option value="user_default"><?php echo xlt('My default facility'); ?></option>
-                            <?php foreach ($facilities as $facility) { ?>
-                                <?php if (!is_null($facilitySelected) && $facilitySelected == $facility['id']) { ?>
-                                    <option value="<?php echo attr($facility['id']);?>" selected><?php echo text($facility['name']);?></option>
-                                <?php } else { ?>
-                                    <option value="<?php echo attr($facility['id']);?>"><?php echo text($facility['name']);?></option>
-                                <?php } ?>
-                            <?php } ?>
-                        </select>
-                    </div>
-                </div>
-            <?php } // End facilities menu block ?>
-            <div class="form-group oe-pull-away">
-                <button id="login-button" type="submit" class="btn btn-login btn-lg" onClick="transmit_form(this)"><i class="fa fa-sign-in-alt"></i>&nbsp;&nbsp;<?php echo xlt('Login');?></button>
-            </div>
-            <div class="form-group">
-                  <?php if (!empty($GLOBALS['google_signin_enabled']) && !empty($GLOBALS['google_signin_client_id'])) { ?>
-                <input type="hidden" id="used-google-signin" name="used_google_signin" value="">
-                <input type="hidden" id="google-signin-token" name="google_signin_token" value="">
-                <div id="google-signin" onclick="return do_google_signin();">
-                    <!-- This message is displayed if the google platform API cannot render the button -->
-                    <span id="google-signin-service-unreachable-alert" style="display:none;"><?php echo xlt('Google Sign-In is enabled but the service is unreachable.'); ?></span>
-                </div>
-                <div id="google-signout">
-                    <a href="#" onclick="signOut();"><?php echo xlt('Sign out'); ?></a>
-                </div>
-                  <?php } ?>
-            </div>
-          </div>
-          <div class="<?php echo $logoarea; ?>">
-            <?php $extraLogo = $GLOBALS['extra_logo_login']; ?>
-            <?php if ($extraLogo) { ?>
-            <div class="text-center">
-              <span class="d-inline-block w-40"><?php echo file_get_contents($GLOBALS['images_static_absolute'] . "/login-logo.svg"); ?></span>
-              <span class="d-inline-block w-15 login-bg-text-color"><i class="fas fa-plus fa-2x"></i></span>
-              <span class="d-inline-block w-40"><?php echo $logocode; ?></span>
-            </div>
-            <?php } else { ?>
-              <div class="mx-auto m-4 w-75">
-                  <?php echo file_get_contents($GLOBALS['images_static_absolute'] . "/login-logo.svg"); ?>
-              </div>
-            <?php } ?>
-            <div class="text-center login-title-label">
-                <?php if ($GLOBALS['show_label_login']) { ?>
-                    <?php echo text($openemr_name); ?>
-                <?php } ?>
-            </div>
-                <?php
-                // Figure out how to display the tiny logos
-                $t1 = $GLOBALS['tiny_logo_1'];
-                $t2 = $GLOBALS['tiny_logo_2'];
-                if ($t1 && !$t2) {
-                    echo $tinylogocode1;
-                } if ($t2 && !$t1) {
-                    echo $tinylogocode2;
-                } if ($t1 && $t2) { ?>
-                  <div class="row mb-3">
-                    <div class="col-sm-6"><?php echo $tinylogocode1;?></div>
-                    <div class="col-sm-6"><?php echo $tinylogocode2;?></div>
-                  </div>
-                <?php } ?>
-            <p class="text-center lead font-weight-normal login-bg-text-color"><?php echo xlt('The most popular open-source Electronic Health Record and Medical Practice Management solution.'); ?></p>
-            <p class="text-center small"><a href="../../acknowledge_license_cert.html" class="login-bg-text-color" target="main"><?php echo xlt('Acknowledgments, Licensing and Certification'); ?></a></p>
-          </div>
-      </div>
-      <div class="product-registration-modal modal fade">
-          <div class="modal-dialog modal-dialog-centered">
-              <div class="modal-content">
-                  <div class="modal-header"></div>
-                  <div class="modal-body">
-                      <p class="context"><?php echo xlt("Register your installation with OEMR to receive important notifications, such as security fixes and new release announcements."); ?></p>
-                      <input placeholder="<?php echo xlt('email'); ?>" type="email" class="email w-100 text-body form-control" />
-                      <p class="message font-italic"></p>
-                  </div>
-                  <div class="modal-footer">
-                      <button type="button" class="btn btn-secondary submit"><?php echo xlt("Submit"); ?></button>
-                      <button type="button" class="btn btn-secondary nothanks"><?php echo xlt("No Thanks"); ?></button>
-                  </div>
-              </div>
-          </div>
-      </div>
-  </form>
-</body>
-</html>
-<?php if (!empty($GLOBALS['google_signin_enabled']) && !empty($GLOBALS['google_signin_client_id'])) { ?>
-<script type="text/javascript">
-
-    // This variable controls whether we should login to OpenEMR
-    // so we only login if "Sign in with Google button" was clicked
-    let google_signin = false;
-
-    // Hide the google signout link unless we are signed-in
-    // This isn't really ever displayed, because once we sign-in with google,
-    // we automatically log into the app
-    $('#google-signout').hide();
-
-    // Click-handler for signin button
-    function do_google_signin() {
-        google_signin = true;
-    }
-
-    // When Google sign-in successful, sign in to the app, but only
-    // if the button was clicked (otherwise we would automatically login)
-    function onSignInSuccess(googleUser) {
-        if (google_signin === true) {
-            const auth_response = googleUser.getAuthResponse();
-            const id_token = auth_response.id_token;
-            $('.login-failure').hide();
-            $('#used-google-signin').val(true);
-            $('#google-signin-token').val(id_token);
-            $('#google-signout').show();
-            $('#standard-auth-username, #standard-auth-password').hide();
-            var element = document.getElementById('login-button');
-            transmit_form(element);
+        if ($globalsBag->getBoolean('language_menu_showall')) {
+            $langList[] = $row;
+        } else {
+            if (in_array($row['lang_description'], $globalsBag->get('language_menu_show'))) {
+                $langList[] = $row;
+            }
         }
     }
 
-    function onSignInFailure(error) {
-        $('.login-failure').show();
-    }
+    return $langList;
+}
 
-    function renderButton() {
-        gapi.signin2.render('google-signin', {
-            'prompt': 'select_account',
-            'scope': 'profile email',
-            'width': 240,
-            'height': 50,
-            'longtitle': true,
-            'theme': 'dark',
-            'onsuccess': onSignInSuccess,
-            'onfailure': onSignInFailure
-        });
-    }
+$facilities = [];
+$facilitySelected = false;
+if ($globalsBag->getBoolean('login_into_facility')) {
+    $facilityService = new FacilityService();
+    $facilities = $facilityService->getAllFacility();
+    $facilitySelected = ($globalsBag->getBoolean('set_facility_cookie') && isset($_COOKIE['pc_facility'])) ? $_COOKIE['pc_facility'] : null;
+}
 
-    function signOut() {
-        google_signin = false;
-        const auth2 = gapi.auth2.getAuthInstance();
-        auth2.signOut().then(function () {
-            $('#used-google-signin').val('');
-            $('#google-signin-token').val('');
-            $('#google-signout').hide();
-            $('#standard-auth-username, #standard-auth-password').show();
-        });
-    }
+$defaultLanguage = getDefaultLanguage();
+$languageList = getLanguagesList();
+$session->set('language_choice', $defaultLanguage['id']);
 
-    $.getScript('https://apis.google.com/js/platform.js', function(data, textStatus, jqxh ) {
-        // When the auth2 library is loaded, log out so the user has to sign into google
-        gapi.load('auth2', function() {
-            gapi.auth2.init().then(function () {
-                signOut();
-            });
-        });
+$relogin = $session->has('relogin') && $session->get('relogin') == 1;
+if ($relogin) {
+    $session->remove("relogin");
+}
 
-        // Render the "Sign in with Google" button
-        renderButton();
-    }).fail(function (jqxhr, settings, exception) {
-        $('#google-signin-service-unreachable-alert').show();
-    });
-</script>
-<?php } ?>
+$t1 = $globalsBag->getBoolean('tiny_logo_1');
+$t2 = $globalsBag->getBoolean('tiny_logo_2');
+$displaySmallLogo = false;
+if ($t1 && !$t2) {
+    $displaySmallLogo = 1;
+} if ($t2 && !$t1) {
+    $displaySmallLogo = 2;
+} if ($t1 && $t2) {
+    $displaySmallLogo = 3;
+}
+
+$sid = urlencode($session->getId());
+$sname = urlencode($session->getName());
+$scparams = session_get_cookie_params();
+$domain = $scparams['domain'];
+$path = $scparams['path'];
+$oldDate = gmdate('Y', strtotime("-1 years"));
+$expires = gmdate(DATE_RFC1123, $oldDate);
+$sameSite = empty($scparams['samesite']) ? '' : $scparams['samesite'];
+$cookie = "{$sname}={$sid}; path={$path}; domain={$domain}; expires={$expires}";
+
+if ($sameSite) {
+    $cookie .= "; SameSite={$sameSite}";
+}
+
+$cookie = json_encode($cookie);
+
+if ($_GET['testing_mode'] ?? 0 == 1) {
+    $session->set('testing_mode', 1);
+}
+
+$viewArgs = [
+    'title' => $openemr_name,
+    'displayLanguage' => $globalsBag->get("language_menu_login") && (count($languageList) != 1),
+    'defaultLangID' => $defaultLanguage['id'],
+    'defaultLangName' => $defaultLanguage['language'],
+    'languageList' => $languageList,
+    'relogin' => $relogin,
+    'loginFail' => $session->has("loginfailure") && $session->get("loginfailure") == 1,
+    'displayFacilities' => $globalsBag->getBoolean("login_into_facility"),
+    'facilityList' => $facilities,
+    'facilitySelected' => $facilitySelected,
+    'displayGoogleSignin' => $globalsBag->getBoolean('google_signin_enabled') && !empty($globalsBag->getString('google_signin_client_id')),
+    'googleSigninClientID' => $globalsBag->getString('google_signin_client_id'),
+    'displaySmallLogo' => $displaySmallLogo,
+    'smallLogoOne' => $smallLogoOne,
+    'smallLogoTwo' => $smallLogoTwo,
+    'showTitleOnLogin' => $globalsBag->getBoolean('show_label_login'),
+    'displayTagline' => $globalsBag->getBoolean('show_tagline_on_login'),
+    'tagline' => $globalsBag->getString('login_tagline_text'),
+    'displayAck' => $globalsBag->getBoolean('display_acknowledgements_on_login'),
+    'hasSession' => true,
+    'cookieText' => $cookie,
+    'regConstants' => json_encode(['webroot' => $globalsBag->get('webroot')]),
+    'siteID' => $session->get('site_id'),
+    'showLabels' => $globalsBag->getBoolean('show_labels_on_login_form'),
+    'displayPrimaryLogo' => $globalsBag->getBoolean('show_primary_logo'),
+    'primaryLogo'   => $primaryLogo,
+    'primaryLogoWidth' => $globalsBag->get('primary_logo_width'),
+    'logoPosition' => $globalsBag->get('logo_position'),
+    'secondaryLogoWidth' => $globalsBag->get('secondary_logo_width'),
+    'displaySecondaryLogo' => $globalsBag->getBoolean('extra_logo_login'),
+    'secondaryLogo' => $secondaryLogo,
+    'secondaryLogoPosition' => $globalsBag->get('secondary_logo_position'),
+];
+
+/**
+ * @var \Symfony\Component\EventDispatcher\EventDispatcherInterface $ed
+ */
+$ed = $globalsBag->getKernel()->getEventDispatcher();
+
+$templatePageEvent = new TemplatePageEvent('login/login.php', [], $layout, $viewArgs);
+$event = $ed->dispatch($templatePageEvent, TemplatePageEvent::RENDER_EVENT);
+
+try {
+    echo $t->render($event->getTwigTemplate(), $event->getTwigVariables());
+} catch (LoaderError | RuntimeError | SyntaxError $e) {
+    echo "<p style='font-size:24px; color: red;'>" . text($e->getMessage()) . '</p>';
+}

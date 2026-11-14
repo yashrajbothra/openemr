@@ -124,7 +124,7 @@ class FHIRTestReportActionResult extends FHIRElement implements \JsonSerializabl
     /**
      * @return string
      */
-    public function __toString()
+    public function __toString(): string
     {
         return (string)$this->getValue();
     }
@@ -132,21 +132,19 @@ class FHIRTestReportActionResult extends FHIRElement implements \JsonSerializabl
     /**
      * @return mixed
      */
-    public function jsonSerialize()
+    public function jsonSerialize(): mixed
     {
         return $this->value;
     }
 
     /**
-     * @param boolean $returnSXE
+     * @param bool $returnSXE
      * @param \SimpleXMLElement $sxe
      * @return string|\SimpleXMLElement
      */
     public function xmlSerialize($returnSXE = false, $sxe = null)
     {
-        if (null === $sxe) {
-            $sxe = new \SimpleXMLElement('<TestReportActionResult xmlns="http://hl7.org/fhir"></TestReportActionResult>');
-        }
+        $sxe ??= new \SimpleXMLElement('<TestReportActionResult xmlns="http://hl7.org/fhir"></TestReportActionResult>');
         $sxe->addAttribute('value', $this->value);
         if ($returnSXE) {
             return $sxe;

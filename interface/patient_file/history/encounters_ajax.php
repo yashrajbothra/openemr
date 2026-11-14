@@ -4,7 +4,7 @@
  * Billing notes.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Rod Roark <rod@sunsetsystems.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2012 Rod Roark <rod@sunsetsystems.com>
@@ -13,35 +13,24 @@
  */
 
 require_once("../../globals.php");
-require_once("$srcdir/forms.inc");
 
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Forms\FormReportRenderer;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 
-if (!CsrfUtils::verifyCsrfToken($_GET["csrf_token_form"])) {
-    CsrfUtils::csrfNotVerified();
-}
+$session = SessionWrapperFactory::getInstance()->getActiveSession();
+CsrfUtils::checkCsrfInput(INPUT_GET, dieOnFail: true);
 
 $ptid     = $_GET['ptid'] + 0;
 $encid    = $_GET['encid'] + 0;
 $formname = strtr(
     $_GET['formname'],
-    array('.' => '', '\\' => '', '/' => '', '\'' => '', '"' => '', "\r" => '', "\n" => '')
+    ['.' => '', '\\' => '', '/' => '', '\'' => '', '"' => '', "\r" => '', "\n" => '']
 );
 $formid   = $_GET['formid'] + 0;
 
 if (!hasFormPermission($formname)) {
     exit;
 }
-
-if (substr($formname, 0, 3) == 'LBF') {
-    include_once("{$GLOBALS['incdir']}/forms/LBF/report.php");
-    lbf_report($ptid, $encid, 2, $formid, $formname);
-} else {
-    include_once("{$GLOBALS['incdir']}/forms/$formname/report.php");
-    $report_function = $formname . '_report';
-    if (!function_exists($report_function)) {
-        exit;
-    }
-
-    call_user_func($report_function, $ptid, $encid, 2, $formid);
-}
+$formReportRenderer = new FormReportRenderer();
+$formReportRenderer->renderReport($formname, "encounters_ajax.php", $ptid, $encid, 2, $formid);

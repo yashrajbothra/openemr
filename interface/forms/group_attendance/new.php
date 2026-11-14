@@ -4,7 +4,7 @@
  * interface/forms/group_attendance/new.php
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Shachar Zilbershlag <shaharzi@matrix.co.il>
  * @author    Amiel Elboim <amielel@matrix.co.il>
  * @author    Brady Miller <brady.g.miller@gmail.com>
@@ -16,10 +16,21 @@
 
 require_once(__DIR__ . "/../../globals.php");
 require_once("functions.php");
-require_once(dirname(__FILE__) . "/../../../library/group.inc");
+require_once(__DIR__ . "/../../../library/group.inc.php");
 
 use OpenEMR\Common\Acl\AclMain;
+use OpenEMR\Common\Session\EncounterSessionUtil;
+use OpenEMR\Common\Session\PatientSessionUtil;
+use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Core\Header;
+use OpenEMR\Core\OEGlobalsBag;
+
+// Hoist legacy `globals.php` locals so PHPStan can see them (#11792 Phase 5).
+$rootdir = OEGlobalsBag::getInstance()->getString('rootdir');
+$encounter = EncounterSessionUtil::getEncounter();
+$therapy_group = (PatientSessionUtil::getPid() === 0)
+    ? (SessionWrapperFactory::getInstance()->getActiveSession()->get('therapy_group') ?? 0)
+    : 0;
 
 //Check acl
 $can_view = AclMain::aclCheckCore("groups", "gadd", false, 'view');
@@ -43,14 +54,7 @@ if (isset($_GET['id'])) {//clicked edit form
 
 
 if ($form_id) {//If editing a form or the form already exists (inwhich case will automatically go into edit mode for existing form)
-    $participants_sql =  "SELECT tgpa.*, p.fname, p.lname " .
-        "FROM therapy_groups_participant_attendance as tgpa " .
-        "JOIN patient_data as p ON tgpa.pid = p.id " .
-        "WHERE tgpa.form_id = ?;";
-    $result = sqlStatement($participants_sql, array($form_id));
-    while ($p = sqlFetchArray($result)) {
-        $participants[] = $p;
-    }
+    $participants = getGroupAttendance($form_id);
 } else {//new form
     $participants = getParticipants($therapy_group, true);
 }
@@ -145,7 +149,7 @@ if ($form_id) {//If editing a form or the form already exists (inwhich case will
                 $('#group_attendance_form_table_filter').hide(); //hide searchbar
             },
             <?php // Bring in the translations ?>
-            <?php require($GLOBALS['srcdir'] . '/js/xl/datatables-net.js.php'); ?>
+            <?php require(OEGlobalsBag::getInstance()->getSrcDir() . '/js/xl/datatables-net.js.php'); ?>
         });
 
         /* 'Add Participant' elements */
@@ -158,7 +162,7 @@ if ($form_id) {//If editing a form or the form already exists (inwhich case will
             top.restoreSession();
             $('.new_patient').css("border-color", "var(--body-color)");
             $('.error_wrap .error').html("");
-            var url = '<?php echo $GLOBALS['webroot']?>/interface/main/calendar/find_patient_popup.php';
+            var url = '<?php echo OEGlobalsBag::getInstance()->getWebRoot()?>/interface/main/calendar/find_patient_popup.php';
             dlgopen(url, '_blank', 500, 400);
         });
 

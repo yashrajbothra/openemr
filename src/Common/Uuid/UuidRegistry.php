@@ -15,7 +15,7 @@
  *    When add support for a new table uuid, need to add it to the populateAllMissingUuids function.
  *
  * @package   OpenEMR
- * @link      http://www.open-emr.org
+ * @link      https://www.open-emr.org
  * @author    Gerhard Brink <gjdbrink@gmail.com>
  * @author    Brady Miller <brady.g.miller@gmail.com>
  * @copyright Copyright (c) 2019 Gerhard Brink <gjdbrink@gmail.com>
@@ -25,17 +25,64 @@
 
 namespace OpenEMR\Common\Uuid;
 
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Logging\EventAuditLogger;
+use OpenEMR\Common\Uuid\UuidMapping;
 use Ramsey\Uuid\Codec\TimestampFirstCombCodec;
 use Ramsey\Uuid\Generator\CombGenerator;
-use Ramsey\Uuid\UuidFactory;
 use Ramsey\Uuid\Uuid;
+use Ramsey\Uuid\UuidFactory;
 
 class UuidRegistry
 {
+    const UUID_MAX_BATCH_COUNT = 1000;
+    const UUID_TABLE_DEFINITIONS = [
 
+        'care_teams' => ['table_name' => 'care_teams'],
+        'ccda' => ['table_name' => 'ccda'],
+        'documents' => ['table_name' => 'documents'],
+        'drugs' => ['table_name' => 'drugs', 'table_id' => 'drug_id'],
+        'drug_sales' => ['table_name' => 'drug_sales', 'table_id' => 'sale_id'],
+        'employer_data' => ['table_name' => 'employer_data'],
+        'facility' => ['table_name' => 'facility'],
+        'facility_user_ids' => ['table_name' => 'facility_user_ids', 'table_vertical' => ['uid', 'facility_id']],
+        'form_clinical_notes' => ['table_name' => 'form_clinical_notes'],
+        'form_encounter' => ['table_name' => 'form_encounter'],
+        'form_vitals' => ['table_name' => 'form_vitals'],
+        'form_vitals_calculation' => ['table_name' => 'form_vitals_calculation'],
+        'form_observation' => ['table_name' => 'form_observation'],
+        'history_data' => ['table_name' => 'history_data'],
+        'issue_encounter' => ['table_name' => 'issue_encounter'],
+        'immunizations' => ['table_name' => 'immunizations'],
+        'insurance_companies' => ['table_name' => 'insurance_companies'],
+        'insurance_data' => ['table_name' => 'insurance_data'],
+        'lists' => ['table_name' => 'lists'],
+        'openemr_postcalendar_events' => ['table_name' => 'openemr_postcalendar_events', 'table_id' => 'pc_eid'],
+        'patient_care_experience_preferences' => ['table_name' => 'patient_care_experience_preferences'],
+        'patient_data' => ['table_name' => 'patient_data'],
+        'patient_history' => ['table_name' => 'patient_history'],
+        'patient_treatment_intervention_preferences' => ['table_name' => 'patient_treatment_intervention_preferences'],
+        'person' => ['table_name' => 'person'],
+        'prescriptions' => ['table_name' => 'prescriptions'],
+        'procedure_order' => ['table_name' => 'procedure_order', 'table_id' => 'procedure_order_id'],
+        'procedure_providers' => ['table_name' => 'procedure_providers', 'table_id' => 'ppid'],
+        'procedure_report' => ['table_name' => 'procedure_report', 'table_id' => 'procedure_report_id'],
+        'procedure_result' => ['table_name' => 'procedure_result', 'table_id' => 'procedure_result_id'],
+        'procedure_specimen' => ['table_name' => 'procedure_specimen', 'table_id' => 'procedure_specimen_id'],
+        'questionnaire_repository' => ['table_name' => 'questionnaire_repository'],
+        'questionnaire_response' => ['table_name' => 'questionnaire_response'],
+        'form_history_sdoh' => ['table_name' => 'form_history_sdoh'],
+        'task' => ['table_name' => 'task'],
+        'transactions' => ['table_name' => 'transactions'],
+        'users' => ['table_name' => 'users']
+    ];
     // Maximum tries to create a unique uuid before failing (this should never happen)
     const MAX_TRIES = 100;
+
+    /**
+     * Maximum number of records to process in a single transaction when populating missing UUIDs
+     */
+    const UUID_TRANSACTION_MAX_RECORDS = 10000;
 
     private $table_name;      // table to check if uuid has already been used in
     private $table_id;        // the label of the column in above table that is used for id (defaults to 'id')
@@ -48,24 +95,12 @@ class UuidRegistry
     public function __construct($associations = [])
     {
         $this->table_name = $associations['table_name'] ?? '';
-        if (!empty($this->table_name)) {
-            $this->table_id = $associations['table_id'] ?? 'id';
-        } else {
-            $this->table_id = '';
-        }
+        $this->table_id = !empty($this->table_name) ? $associations['table_id'] ?? 'id' : '';
         $this->table_vertical = $associations['table_vertical'] ?? false;
         $this->disable_tracker = $associations['disable_tracker'] ?? false;
         $this->couchdb = $associations['couchdb'] ?? '';
-        if (!empty($associations['document_drive']) && $associations['document_drive'] === true) {
-            $this->document_drive = 1;
-        } else {
-            $this->document_drive = 0;
-        }
-        if (!empty($associations['mapped']) && $associations['mapped'] === true) {
-            $this->mapped = 1;
-        } else {
-            $this->mapped = 0;
-        }
+        $this->document_drive = !empty($associations['document_drive']) && $associations['document_drive'] === true ? 1 : 0;
+        $this->mapped = !empty($associations['mapped']) && $associations['mapped'] === true ? 1 : 0;
     }
 
     /**
@@ -73,123 +108,182 @@ class UuidRegistry
      */
     public function createUuid()
     {
-        $isUnique = false;
-        $i = 0;
-        while (!$isUnique) {
-            $i++;
-            if ($i > 1) {
-                // There was a uuid creation collision, so need to try again.
-                error_log("OpenEMR Warning: There was a collision when creating a unique UUID. This is try number " . $i . ". Will try again.");
-            }
-            if ($i > self::MAX_TRIES) {
-                // This error should never happen. If so, then the random generation of the
-                //  OS is compromised and no use continuing to run OpenEMR.
-                error_log("OpenEMR Error: Unable to create a unique UUID");
-                exit;
-            }
-
-            // Create uuid using the Timestamp-first COMB Codec, so can use for primary keys
-            //  (since first part is timestamp, it is naturally ordered; the rest is from uuid4, so is random)
-            //  reference:
-            //    https://uuid.ramsey.dev/en/latest/customize/timestamp-first-comb-codec.html#customize-timestamp-first-comb-codec
-            $factory = new UuidFactory();
-            $codec = new TimestampFirstCombCodec($factory->getUuidBuilder());
-            $factory->setCodec($codec);
-            $factory->setRandomGenerator(new CombGenerator(
-                $factory->getRandomGenerator(),
-                $factory->getNumberConverter()
-            ));
-            $timestampFirstComb = $factory->uuid4();
-            $uuid = $timestampFirstComb->getBytes();
-
-            /** temp debug stuff
-            error_log(bin2hex($uuid)); // log hex uuid
-            error_log(bin2hex($timestampFirstComb->getBytes())); // log hex uuid
-            error_log($timestampFirstComb->toString()); // log string uuid
-            $test_uuid = (\Ramsey\Uuid\Uuid::fromBytes($uuid))->toString(); // convert byte uuid to string and log below
-            error_log($test_uuid);
-            error_log(bin2hex((\Ramsey\Uuid\Uuid::fromString($test_uuid))->getBytes())); // convert string uuid to byte and log hex
-             */
-
-            // Check to ensure uuid is unique in uuid_registry (unless $this->disable_tracker is set to true)
-            if (!$this->disable_tracker) {
-                $checkUniqueRegistry = sqlQueryNoLog("SELECT * FROM `uuid_registry` WHERE `uuid` = ?", [$uuid]);
-            }
-            if (empty($checkUniqueRegistry)) {
-                if (!empty($this->table_name)) {
-                    // If using $this->table_name, then ensure uuid is unique in that table
-                    $checkUniqueTable = sqlQueryNoLog("SELECT * FROM `" . $this->table_name . "` WHERE `uuid` = ?", [$uuid]);
-                    if (empty($checkUniqueTable)) {
-                        $isUnique = true;
-                    }
-                } elseif ($this->document_drive === 1) {
-                    // If using for document labeling on drive, then ensure drive_uuid is unique in documents table
-                    $checkUniqueTable = sqlQueryNoLog("SELECT * FROM `documents` WHERE `drive_uuid` = ?", [$uuid]);
-                    if (empty($checkUniqueTable)) {
-                        $isUnique = true;
-                    }
-                } else {
-                    $isUnique = true;
-                }
-            }
-        }
+        // Create uuid using the Timestamp-first COMB Codec, so can use for primary keys
+        //  (since first part is timestamp, it is naturally ordered; the rest is from uuid4, so is random)
+        //  reference:
+        //    https://uuid.ramsey.dev/en/latest/customize/timestamp-first-comb-codec.html#customize-timestamp-first-comb-codec
+        $uuid = $this->getUnusedUuidBatch(1)[0];
 
         // Insert the uuid into uuid_registry (unless $this->disable_tracker is set to true)
         if (!$this->disable_tracker) {
-            if (!$this->table_vertical) {
-                sqlQueryNoLog("INSERT INTO `uuid_registry` (`uuid`, `table_name`, `table_id`, `couchdb`, `document_drive`, `mapped`, `created`) VALUES (?, ?, ?, ?, ?, ?, NOW())", [$uuid, $this->table_name, $this->table_id, $this->couchdb, $this->document_drive, $this->mapped]);
-            } else {
-                sqlQueryNoLog("INSERT INTO `uuid_registry` (`uuid`, `table_name`, `table_id`, `table_vertical`, `couchdb`, `document_drive`, `mapped`, `created`) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())", [$uuid, $this->table_name, $this->table_id, json_encode($this->table_vertical), $this->couchdb, $this->document_drive, $this->mapped]);
-            }
+            $this->insertUuidsIntoRegistry([$uuid]);
         }
 
         // Return the uuid
         return $uuid;
     }
 
-    // Generic function to update all missing uuids (to be primarily used in service that is run intermittently; should not use anywhere else)
+    // Generic function to update all missing uuids (to be primarily used in service that is run intermittently in addition to upgrade/patch mechanism)
     // When add support for a new table uuid, need to add it here
     //  Will log by default
+    //  Will return log or false
     public static function populateAllMissingUuids($log = true)
     {
         $logEntryComment = '';
 
         // Update for tables (alphabetically ordered):
-        //  ccda
-        //  drugs (with custom id drug_id)
-        //  facility
-        //  facility_user_ids (vertical table)
-        //  form_encounter
-        //  immunizations
-        //  insurance_companies
-        //  insurance_data
-        //  lists
-        //  patient_data
-        //  prescriptions
-        //  procedure_order (with custom id procedure_order_id)
-        //  procedure_result (with custom id procedure_result_id)
-        //  users
-        self::appendPopulateLog('ccda', (new UuidRegistry(['table_name' => 'ccda']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('drugs', (new UuidRegistry(['table_name' => 'drugs', 'table_id' => 'drug_id']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('facility', (new UuidRegistry(['table_name' => 'facility']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('facility_user_ids', (new UuidRegistry(['table_name' => 'facility_user_ids', 'table_vertical' => ['uid', 'facility_id']]))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('form_encounter', (new UuidRegistry(['table_name' => 'form_encounter']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('immunizations', (new UuidRegistry(['table_name' => 'immunizations']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('insurance_companies', (new UuidRegistry(['table_name' => 'insurance_companies']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('insurance_data', (new UuidRegistry(['table_name' => 'insurance_data']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('lists', (new UuidRegistry(['table_name' => 'lists']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('patient_data', (new UuidRegistry(['table_name' => 'patient_data']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('prescriptions', (new UuidRegistry(['table_name' => 'prescriptions']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('procedure_order', (new UuidRegistry(['table_name' => 'procedure_order', 'table_id' => 'procedure_order_id']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('procedure_result', (new UuidRegistry(['table_name' => 'procedure_result', 'table_id' => 'procedure_result_id']))->createMissingUuids(), $logEntryComment);
-        self::appendPopulateLog('users', (new UuidRegistry(['table_name' => 'users']))->createMissingUuids(), $logEntryComment);
+        $tables = self::UUID_TABLE_DEFINITIONS;
+        foreach ($tables as $table_name => $uuidProperties) {
+            self::appendPopulateLog($table_name, (new UuidRegistry($uuidProperties))->createMissingUuids(), $logEntryComment);
+        }
+
+        // Update for mapped uuids
+        $mappedCounter = UuidMapping::createAllMissingResourceUuids();
+        if (!empty($mappedCounter)) {
+            self::appendPopulateLog('uuid_mapping', $mappedCounter, $logEntryComment);
+        }
+
+        // To rectify a bug where mapped uuids were created but nothing in the UUID register for vital observations we
+        // will populate the UUIDRegistry
+        $mappedRegistryUuidCounter = self::createMissingMappedUuids();
+        self::appendPopulateLog('uuid_registry', $mappedRegistryUuidCounter, $logEntryComment);
+
+        if (!empty($logEntryComment)) {
+            $logEntryComment = rtrim((string) $logEntryComment, ', ');
+        }
 
         // log it
         if ($log && !empty($logEntryComment)) {
-            $logEntryComment = rtrim($logEntryComment, ', ');
-            EventAuditLogger::instance()->newEvent('uuid', '', '', 1, 'Automatic uuid service creation: ' . $logEntryComment);
+            EventAuditLogger::getInstance()->newEvent('uuid', '', '', 1, 'Automatic uuid service creation: ' . $logEntryComment);
+        }
+
+        // return it
+        if (!empty($logEntryComment)) {
+            return $logEntryComment;
+        } else {
+            return false;
         }
     }
+
+    /**
+     * Creates registry entries for missing uuids in uuid_mapping that are not in uuid_registry.  Returns the count of
+     * the records that were created.
+     * @return int
+     */
+    private static function createMissingMappedUuids()
+    {
+        $createdRows = 0;
+        $sql = "INSERT INTO `uuid_registry`(`uuid`,`table_name`,`table_id`,`mapped`) "
+            . " SELECT `uuid_mapping`.`uuid`,'uuid_mapping','id',1 FROM `uuid_mapping` LEFT JOIN `uuid_registry` registry2 ON `uuid_mapping`.`uuid` = registry2.uuid WHERE registry2.uuid IS NULL";
+        $result = sqlStatementNoLog($sql, []);
+        if ($result !== false) {
+            $createdRows = QueryUtils::affectedRows();
+        }
+        return $createdRows;
+    }
+
+    /**
+     * Returns the uuid registry record for a given uuid.
+     * @param string|binary $uuid The uuid to search
+     * @param bool $is_binary Whether the passed in uuid is a string or binary
+     */
+    public static function getRegistryRecordForUuid($uuid, $is_binary = false): array
+    {
+        $sql = "select * from `uuid_registry` WHERE uuid = ?";
+        $uuid_as_binary = $is_binary ? $uuid : UuidRegistry::uuidToBytes($uuid);
+        $result = QueryUtils::fetchRecords($sql, [$uuid_as_binary]);
+        if (!empty($result)) {
+            return $result[0];
+        }
+        return $result;
+    }
+
+    /**
+     * Given a table name it returns the UuidRegistry object for that table name
+     * @param string $table_name The name of the table that has a uuid column
+     * @return UuidRegistry
+     */
+    public static function getRegistryForTable($table_name): UuidRegistry
+    {
+        $tableDefinition = self::getUuidTableDefinitionForTable($table_name);
+        if (empty($tableDefinition)) {
+            throw new \InvalidArgumentException("Table name does not exist in uuid registry");
+        }
+        return new UuidRegistry($tableDefinition);
+    }
+
+    /**
+     * Given the name of a table that is supported in the uuid registry, return its uuid registry definition.  If there
+     * is no definition an empty array is returned
+     * @param $table_name string The name of the table
+     * @return array The definition definition or empty array
+     */
+    public static function getUuidTableDefinitionForTable($table_name)
+    {
+        return self::UUID_TABLE_DEFINITIONS[$table_name] ?? [];
+    }
+
+    /**
+     * Given an array of table names populate all of the missing uuids for that array of uuid tables.
+     * @param $table_names string array of table names found in the UuidRegistry::UUID_TABLE_DEFINITIONS table constant.
+     */
+    public static function createMissingUuidsForTables(array $table_names)
+    {
+        foreach ($table_names as $table) {
+            self::getRegistryForTable($table)->createMissingUuids();
+        }
+    }
+
+    /**
+     * Populate the UUID for a single row when missing, keyed by the caller's
+     * id column. Intended for code paths (authentication, authorization) that
+     * need to ensure the current principal has a UUID without letting an
+     * authenticated request trigger a whole-table backfill across every row
+     * missing a UUID. Prefer this over createMissingUuidsForTables() whenever
+     * the caller already knows which row it cares about.
+     *
+     * Generates a candidate UUID without inserting into uuid_registry, runs
+     * a guarded UPDATE against NULL / empty / all-zero byte UUID values on
+     * the target row, and only then records the UUID in uuid_registry when
+     * the UPDATE actually wrote a row. This keeps the call idempotent and
+     * avoids leaking orphaned uuid_registry entries when the row already
+     * has a UUID or does not exist.
+     *
+     * The all-zero byte comparison is bound as a parameter rather than
+     * embedded as a backslash-escaped SQL literal so the predicate works
+     * regardless of the connection's NO_BACKSLASH_ESCAPES mode.
+     *
+     * @param string     $tableName table registered in UUID_TABLE_DEFINITIONS
+     * @param string     $idColumn  column to match in the WHERE clause
+     * @param int|string $idValue   id value to match
+     * @throws \InvalidArgumentException if the table is unknown or the id column is not a valid identifier
+     */
+    public static function createMissingUuidForRow(string $tableName, string $idColumn, int|string $idValue): void
+    {
+        if (!isset(self::UUID_TABLE_DEFINITIONS[$tableName])) {
+            throw new \InvalidArgumentException(
+                "UuidRegistry::createMissingUuidForRow: unknown table '" . $tableName . "'"
+            );
+        }
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $idColumn) !== 1) {
+            throw new \InvalidArgumentException(
+                "UuidRegistry::createMissingUuidForRow: invalid id column '" . $idColumn . "'"
+            );
+        }
+        $registry = new self(['table_name' => $tableName]);
+        $uuidBytes = $registry->getUnusedUuidBatch(1)[0];
+        $nilUuid = str_repeat("\0", 16);
+        QueryUtils::sqlStatementThrowException(
+            "UPDATE `" . $tableName . "` SET `uuid` = ? "
+            . "WHERE `" . $idColumn . "` = ? "
+            . "AND (`uuid` IS NULL OR `uuid` = '' OR `uuid` = ?)",
+            [$uuidBytes, $idValue, $nilUuid]
+        );
+        if (QueryUtils::affectedRows() === 1) {
+            $registry->insertUuidsIntoRegistry([$uuidBytes]);
+        }
+    }
+
 
     // Helper function for above populateAllMissingUuids function
     private static function appendPopulateLog($table, $count, &$logEntry)
@@ -199,110 +293,335 @@ class UuidRegistry
         }
     }
 
-    // Generic function to create missing uuids in a sql table
-    //  This function works in "blocks" of 1000 to avoid mysql/mariadb death when updating a super large (>500K) amount of uuids in one table
-    //  This function returns the number of missing uuids that were populated
-    public function createMissingUuids()
+    private function createMissingUuids(): int
     {
-        // set up counter
-        $counter = 0;
+        try {
+            QueryUtils::startTransaction();
+            $counter = 0;
 
-        // Empty should be NULL, but to be safe also checking for empty and null bytes
-        $done = false;
-        while (!$done) {
-            // just maximum of 1000 at a time to attempt to speed things up and not break when inserting a large number of uuids
-            if (!$this->table_vertical) {
-                // in this standard case, can decrease memory use by just collecting the id
-                $resultSet = sqlStatementNoLog("SELECT `" . $this->table_id . "` FROM `" . $this->table_name . "` WHERE `uuid` IS NULL OR `uuid` = '' OR `uuid` = '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' LIMIT 1000");
+            // we split the loop so we aren't doing a condition inside each one.
+            if ($this->table_vertical) {
+                do {
+                    $count = $this->createMissingUuidsForVerticalTable();
+                    $counter += $count;
+                } while ($count > 0);
+                do {
+                    $count = $this->completePartialMissingUuidsForVerticalTable();
+                    $counter += $count;
+                } while ($count > 0);
             } else {
-                // in this more complicated case (ie. vertical table), need to collect all columns
-                $resultSet = sqlStatementNoLog("SELECT * FROM `" . $this->table_name . "` WHERE `uuid` IS NULL OR `uuid` = '' OR `uuid` = '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' LIMIT 1000");
-            }
-            if (sqlNumRows($resultSet) < 1000) {
-                $done = true;
-            }
-            while ($row = sqlFetchArray($resultSet)) {
-                if (!$this->table_vertical) {
-                    // standard case, add missing uuid
-                    sqlQueryNoLog("UPDATE `" . $this->table_name . "` SET `uuid` = ? WHERE `" . $this->table_id . "` = ?", [$this->createUuid(), $row[$this->table_id]]);
-                    $counter++;
-                } else {
-                    // more complicated case where setting uuid in a vertical table. In this case need a uuid for each combination of table columns stored in $this->table_vertical array
-                    $stringQuery = "";
-                    $arrayQuery = [];
-                    $prependAnd = false;
-                    foreach ($this->table_vertical as $column) {
-                        if ($prependAnd) {
-                            $stringQuery .= " AND `" . $column . "` = ? ";
-                        } else {
-                            $stringQuery .= " `" . $column . "` = ? ";
-                        }
-                        $arrayQuery[] = $row[$column];
-                        $prependAnd = true;
+                do {
+                    $count = $this->createMissingUuidsForTableWithId();
+                    $counter += $count;
+                    if ($counter % self::UUID_TRANSACTION_MAX_RECORDS == 0 && $counter > 0) {
+                        // commit every 10k to not have a massive transaction
+                        QueryUtils::commitTransaction();
+                        QueryUtils::startTransaction();
                     }
-                    // First, see if it has already been set
-                    $setUuid = sqlQueryNoLog("SELECT `uuid` FROM `" . $this->table_name . "` WHERE `uuid` IS NOT NULL AND `uuid` != '' AND `uuid` != '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' AND " . $stringQuery, $arrayQuery)['uuid'];
-                    if (!empty($setUuid)) {
-                        // Already set
-                        array_unshift($arrayQuery, $setUuid);
-                    } else {
-                        // Not already set, so create
-                        array_unshift($arrayQuery, $this->createUuid());
-                    }
-                    // Now populate
-                    sqlQueryNoLog("UPDATE `" . $this->table_name . "` SET `uuid` = ? WHERE " . $stringQuery, $arrayQuery);
-                    $counter++;
-                }
+                } while ($count > 0);
             }
+            QueryUtils::commitTransaction();
+            return $counter;
+        } catch (\Throwable $exception) {
+            QueryUtils::rollbackTransaction();
+            throw $exception;
         }
-
-        return $counter;
-    }
-
-    // Generic function to see if there are missing uuids in a sql table (table needs an `id` column to work)
-    public function tableNeedsUuidCreation()
-    {
-        // Empty should be NULL, but to be safe also checking for empty and null bytes
-        $resultSet = sqlQueryNoLog("SELECT count(`" . $this->table_id . "`) as `total` FROM `" . $this->table_name . "` WHERE `uuid` IS NULL OR `uuid` = '' OR `uuid` = '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0'");
-        if ($resultSet['total'] > 0) {
-            return true;
-        }
-        return false;
     }
 
     /**
      * Converts a UUID byte value to a string representation
-     * @return the UUID string value
+     * @return string the UUID string value
      */
-    public static function uuidToString($uuidBytes)
+    public static function uuidToString($uuidBytes): string
     {
         return Uuid::fromBytes($uuidBytes)->toString();
     }
 
     /**
      * Converts a UUID string to a bytes representation
-     * @return the UUID bytes value
+     * @return string the UUID bytes value
      */
-    public static function uuidToBytes($uuidString)
+    public static function uuidToBytes($uuidString): string
     {
         return Uuid::fromString($uuidString)->getBytes();
     }
 
     /**
+     * Registers a uuid that was issued before its record existed, for this registry's table.
+     *
+     * The patient review queue gives a patient app the id of a write it holds; approving the
+     * write creates the record under that id. createUuid() picks its own, so this takes the
+     * issued one instead, after the same uniqueness checks.
+     *
+     * @param string $uuidBytes the 16-byte uuid
+     * @throws \RuntimeException when the uuid is already registered or used in the table
+     */
+    public function registerIssuedUuid(string $uuidBytes): void
+    {
+        if (strlen($uuidBytes) !== 16) {
+            throw new \InvalidArgumentException('A uuid is 16 bytes');
+        }
+        $table = $this->table_name;
+        if (!is_string($table) || $table === '') {
+            throw new \LogicException('An issued uuid is registered for a table');
+        }
+        $used = QueryUtils::fetchRecordsNoLog('SELECT `uuid` FROM `uuid_registry` WHERE `uuid` = ?', [$uuidBytes]) !== []
+            || QueryUtils::fetchRecordsNoLog(
+                'SELECT `uuid` FROM ' . QueryUtils::escapeTableName($table) . ' WHERE `uuid` = ?',
+                [$uuidBytes]
+            ) !== [];
+        if ($used) {
+            throw new \RuntimeException('The issued uuid is already in use');
+        }
+        if (!$this->disable_tracker) {
+            $this->insertUuidsIntoRegistry([$uuidBytes]);
+        }
+    }
+
+    /**
      * Check if UUID String is Valid
-     * @return boolean
+     * @return bool
      */
     public static function isValidStringUUID($uuidString)
     {
-        return (Uuid::isValid($uuidString));
+        return Uuid::isValid($uuidString);
     }
 
     /**
      * Check if UUID Brinary is Empty
-     * @return boolean
+     * @return bool
      */
-    public static function isEmptyBinaryUUID($uuidString)
+    public static function isEmptyBinaryUUID($uuidString): bool
     {
         return (empty($uuidString) || ($uuidString == '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0'));
+    }
+
+    /**
+     * Returns a batch of generated uuids that do NOT exist in the system.  The number of records generated is determined
+     * by the limit.
+     * @param int $limit
+     * @return array
+     */
+    public function getUnusedUuidBatch($limit = 10)
+    {
+        if ($limit <= 0) {
+            return [];
+        }
+        $uuids = $this->getUUIDBatch($limit);
+        $dbUUIDs = [];
+
+        if (!$this->disable_tracker) {
+            $sqlColumns = array_map(fn($u): string => '`uuid` = ?', $uuids);
+            $sqlWhere = implode(" OR ", $sqlColumns);
+            $dbUUIDs = QueryUtils::fetchRecordsNoLog("SELECT `uuid` FROM `uuid_registry` WHERE " . $sqlWhere, $uuids);
+        }
+        if (empty($dbUUIDs)) {
+            if (!empty($this->table_name)) {
+                $sqlColumns = array_map(fn($u): string => '`uuid` = ?', $uuids);
+                $sqlWhere = implode(" OR ", $sqlColumns);
+                // If using $this->table_name, then ensure uuid is unique in that table
+                $dbUUIDs =  QueryUtils::fetchRecordsNoLog("SELECT `uuid` FROM `" . $this->table_name . "` WHERE " . $sqlWhere, $uuids);
+            } elseif ($this->document_drive === 1) {
+                $sqlColumns = array_map(fn($u): string => '`drive_uuid` = ?', $uuids);
+                $sqlWhere = implode(" OR ", $sqlColumns);
+                // If using for document labeling on drive, then ensure drive_uuid is unique in documents table
+                $dbUUIDs = QueryUtils::fetchRecordsNoLog("SELECT `drive_uuid` as `uuid` FROM `documents` WHERE " . $sqlWhere, $uuids);
+            }
+        }
+
+        $count = count($dbUUIDs);
+
+        if ($count <= 0) {
+            return $uuids;
+        }
+
+        // generate some new uuids since we had duplicates... which should never happen... but we have this here in
+        // case we do
+        error_log("OpenEMR Warning: There was a collision when creating a unique UUID. Will try again.");
+        return $this->getUnusedUuidBatch($limit);
+    }
+
+    private function createMissingUuidsForTableWithId(): int
+    {
+        $counter = 0;
+        $count = $this->getTableCountWithMissingUuids();
+        if ($count > 0) {
+            // loop through in batches of 1000
+            // generate min(1000, $count)
+            // generate bulk insert statement
+            $gen_count = min($count, self::UUID_MAX_BATCH_COUNT);
+            $batchUUids = $this->getUnusedUuidBatch($gen_count);
+            $ids = QueryUtils::fetchRecords("SELECT " . $this->table_id . " FROM `" . $this->table_name . "` WHERE `uuid` IS NULL OR `uuid` = '' OR `uuid` = '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' LIMIT " . $gen_count);
+            $this->insertUuidsIntoRegistry($batchUUids);
+            for ($i = 0; $i < $gen_count; $i++) {
+                // do single updates
+                sqlStatementNoLog("UPDATE `" . $this->table_name . "` SET `uuid` = ? WHERE `" . $this->table_id . "` = ?", [$batchUUids[$i], $ids[$i][$this->table_id]], true);
+                $counter++;
+            }
+        }
+        return $counter;
+    }
+
+    private function getTableCountWithMissingUuids()
+    {
+        $result = QueryUtils::fetchRecordsNoLog("SELECT count(*) AS cnt FROM `" . $this->table_name . "` WHERE `uuid` IS NULL OR `uuid` = '' OR `uuid` = '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0'", []);
+        // loop through batches of 1000
+        $count = $result[0]['cnt'];
+        return $count;
+    }
+
+    /**
+     * Participates in populating missing uuids for a group in vertical table. It will use a
+     *  key or composite key to represent the group of entries. Note there are 2 scenarios
+     *  (this function deals with scenario 1):
+     *   1. The entire group is missing a uuid (this function)
+     *   2. The group has a uuid, however, one or more items in the group have not been
+     *      assigned this group uuid. (see completePartialMissingUuidsForVerticalTable() function)
+     * @return int
+     */
+    private function createMissingUuidsForVerticalTable(): int
+    {
+        $counter = 0;
+
+        // Collect groups that are missing a uuid
+        $columns = array_map(fn($col): string => "`$col`", $this->table_vertical);
+        $columnsQtwo = array_map(fn($col): string => "`q2`.`$col`", $this->table_vertical);
+        $columnsOn = array_map(fn($col): string => "`q1`.`$col` = `q2`.`$col`", $this->table_vertical);
+        $columnsWhere = array_map(fn($col): string => "(`q1`.`$col` IS NULL OR `q1`.`$col` = '')", $this->table_vertical);
+        $query = "SELECT " . implode(",", $columnsQtwo) . "
+        FROM
+          (SELECT " . implode(",", $columns) . "
+          FROM `" . $this->table_name . "`
+          WHERE `uuid` IS NOT NULL AND `uuid` != '' AND `uuid` != '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0'
+          GROUP BY " . implode(",", $columns) . ") AS `q1`
+        RIGHT OUTER JOIN `" . $this->table_name . "` as `q2`
+        ON " . implode(" AND ", $columnsOn) . "
+        WHERE " . implode(" AND ", $columnsWhere) . "
+        GROUP BY " . implode(",", $columnsQtwo) . "
+        LIMIT " . self::UUID_MAX_BATCH_COUNT;
+        $groupsWithoutUuid = QueryUtils::sqlStatementThrowException($query, [], noLog: true);
+        $number = $groupsWithoutUuid->RecordCount();
+
+        // create uuids and populate the groups with them
+        if ($number > 0) {
+            $batchUUids = $this->getUnusedUuidBatch($number);
+            $this->insertUuidsIntoRegistry($batchUUids);
+            $sqlUpdate = "UPDATE `" . $this->table_name . "` SET `uuid` = ? WHERE " .
+                implode(" AND ", array_map(fn($col): string => "`$col` = ? ", $this->table_vertical));
+            while ($row = QueryUtils::fetchArrayFromResultSet($groupsWithoutUuid)) {
+                $mappedValues = array_map(fn($col): mixed => $row[$col], $this->table_vertical);
+                $bindValues = array_merge([$batchUUids[$counter]], $mappedValues);
+                QueryUtils::sqlStatementThrowException($sqlUpdate, $bindValues, noLog: true);
+                $counter++;
+            }
+        }
+        return $counter;
+    }
+
+    /**
+     * Participates in populating missing uuids for a group in vertical table. It will use a
+     *  key or composite key to represent the group of entries. Note there are 2 scenarios
+     *  (this function deals with scenario 2):
+     *   1. The entire group is missing a uuid (see createMissingUuidsForVerticalTable() function)
+     *   2. The group has a uuid, however, one or more items in the group have not been
+     *      assigned this group uuid. (this function)
+     * @return int
+     */
+    private function completePartialMissingUuidsForVerticalTable(): int
+    {
+        $counter = 0;
+
+        // Collect groups that are missing a uuid
+        $columns = array_map(fn($col): string => "`$col`", $this->table_vertical);
+        $columnsQtwo = array_map(fn($col): string => "`q2`.`$col`", array_merge(['uuid'], $this->table_vertical));
+        $columnsOn = array_map(fn($col): string => "`q1`.`$col` = `q2`.`$col`", $this->table_vertical);
+        $query = "SELECT " . implode(",", $columnsQtwo) . "
+        FROM
+          (SELECT " . implode(",", $columns) . "
+          FROM `" . $this->table_name . "`
+          WHERE `uuid` IS NULL OR `uuid` = '' OR `uuid` = '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0'
+          GROUP BY " . implode(",", $columns) . ") AS `q1`
+        INNER JOIN `" . $this->table_name . "` as `q2`
+        ON " . implode(" AND ", $columnsOn) . "
+        WHERE `q2`.`uuid` IS NOT NULL AND `q2`.`uuid` != '' AND `q2`.`uuid` != '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0'
+        GROUP BY " . implode(",", $columnsQtwo) . "
+        LIMIT " . self::UUID_MAX_BATCH_COUNT;
+        $groupsWithoutUuid = QueryUtils::sqlStatementThrowException($query, [], noLog: true);
+        $number = $groupsWithoutUuid->RecordCount();
+
+        // populate the groups with the already existent uuids
+        if ($number > 0) {
+            $sqlUpdate = "UPDATE `" . $this->table_name . "` SET `uuid` = ? WHERE " .
+                implode(" AND ", array_map(fn($col): string => "`$col` = ? ", $this->table_vertical));
+            while ($row = QueryUtils::fetchArrayFromResultSet($groupsWithoutUuid)) {
+                $mappedValues = array_map(fn($col): mixed => $row[$col], array_merge(['uuid'], $this->table_vertical));
+                QueryUtils::sqlStatementThrowException($sqlUpdate, $mappedValues, noLog: true);
+                $counter++;
+            }
+        }
+        return $counter;
+    }
+
+    /**
+     * Given a batch of UUIDs it inserts them into the uuid registry.
+     * @param $batchUuids
+     */
+    public function insertUuidsIntoRegistry($batchUuids)
+    {
+        $count = count($batchUuids);
+        $sql = "INSERT INTO `uuid_registry` (`uuid`, `table_name`, `table_id`, `table_vertical`, `couchdb`, `document_drive`, `mapped`, `created`) VALUES ";
+        $columns = [];
+        $bind = [];
+        $json_vertical = !empty($this->table_vertical) ? json_encode($this->table_vertical) : "";
+        for ($i = 0; $i < $count; $i++) {
+            $columns[] = "(?, ?, ?, ?, ?, ?, ?, NOW())";
+            $bind[] = $batchUuids[$i];
+            $bind[] = $this->table_name;
+            $bind[] = $this->table_id;
+            $bind[] = $json_vertical;
+            $bind[] = $this->couchdb;
+            $bind[] = $this->document_drive;
+            $bind[] = $this->mapped;
+        }
+        $sql .= implode(",", $columns);
+        QueryUtils::sqlStatementThrowException($sql, $bind);
+    }
+
+
+    /**
+     * A uuid factory whose uuid4() makes the timestamp-first COMB uuids OpenEMR uses for its
+     * records: the first part is a timestamp, so they are naturally ordered and can be used for
+     * primary keys; the rest is random, as in a uuid4. createUuid() uses the same factory.
+     *
+     * For an id chosen before its record exists, such as the one the patient review queue
+     * gives a held write (see registerIssuedUuid()).
+     *
+     * @link https://uuid.ramsey.dev/en/latest/customize/timestamp-first-comb-codec.html#customize-timestamp-first-comb-codec
+     */
+    public static function timestampFirstCombFactory(): UuidFactory
+    {
+        $factory = new UuidFactory();
+        $factory->setCodec(new TimestampFirstCombCodec($factory->getUuidBuilder()));
+        $factory->setRandomGenerator(new CombGenerator(
+            $factory->getRandomGenerator(),
+            $factory->getNumberConverter()
+        ));
+
+        return $factory;
+    }
+
+    /**
+     * Returns an array of generated unique universal identifiers up to the passed in limit.
+     * @param int $limit
+     */
+    private function getUUIDBatch($limit = 10): array
+    {
+        $uuids = [];
+        $factory = self::timestampFirstCombFactory();
+        for ($i = 0; $i < $limit; $i++) {
+            $timestampFirstComb = $factory->uuid4();
+            $uuids[] = $timestampFirstComb->getBytes();
+        }
+        return $uuids;
     }
 }

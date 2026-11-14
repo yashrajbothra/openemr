@@ -1,0 +1,90 @@
+<?php
+
+// Copyright (C) 2010-2011 Aron Racho <aron@mi-squred.com>
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+namespace OpenEMR\ClinicalDecisionRules\Interface\RuleLibrary;
+
+use OpenEMR\ClinicalDecisionRules\Interface\Common;
+use OpenEMR\ClinicalDecisionRules\Interface\RuleLibrary\RuleCriteria;
+
+/**
+ * Description of OpenEMR\ClinicalDecisionRules\Interface\RuleLibrary\RuleCriteriaLifestyle
+ *
+ * @author aron
+ */
+class RuleCriteriaLifestyle extends RuleCriteria
+{
+    public function __construct(public $type, public $matchValue)
+    {
+    }
+
+    public function getRequirements(): string
+    {
+        $requirements = xl("Value") . ": ";
+        if (is_null($this->matchValue)) {
+            $requirements .= xl("Any");
+        } else {
+            $requirements .= "'" . $this->matchValue . "'";
+        }
+
+        return $requirements;
+    }
+
+    public function getTitle(): string
+    {
+        $label = xl_layout_label($this->getLayoutLabel($this->type, "HIS"));
+        return xl("Lifestyle") . " - " . $label;
+    }
+
+    public function getView(): string
+    {
+        return "lifestyle.php";
+    }
+
+    public function getOptions(): array
+    {
+        $stmt = sqlStatement(
+            "SELECT lo.field_id, lo.title FROM layout_options AS lo, layout_group_properties AS lp "
+            . "WHERE lo.form_id = 'HIS' AND lp.grp_form_id = lo.form_id AND lp.grp_group_id = lo.group_id "
+            . "AND lp.grp_title LIKE '%Lifestyle%'"
+        );
+
+        $options = [];
+
+        for ($iter = 0; $row = sqlFetchArray($stmt); $iter++) {
+            $id = $row['field_id'];
+            $label = xl_layout_label($row['title']);
+            $option = ["id" => $id, "label" => $label];
+            array_push($options, $option);
+        }
+
+        return $options;
+    }
+
+    public function getDbView()
+    {
+        $dbView = parent::getDbView();
+
+        $dbView->method = "database";
+        $dbView->methodDetail = "";
+        $dbView->value = "LIFESTYLE::" . $this->type . "::" . ($this->matchValue ?? "");
+        return $dbView;
+    }
+
+    public function updateFromRequest()
+    {
+        parent::updateFromRequest();
+
+        $lifestyle = Common::post("fld_lifestyle");
+        $value = Common::post("fld_value");
+        $matchType = Common::post("fld_value_type");
+
+        $this->type = $lifestyle;
+
+        $this->matchValue = $matchType == "any" ? null : $value;
+    }
+}
